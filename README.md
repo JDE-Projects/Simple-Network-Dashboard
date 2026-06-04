@@ -27,8 +27,9 @@ sudo apt install prometheus-node-exporter
 ```bash
 git clone https://github.com/JDE-Projects/Simple-Network-Dashboard.git ~/simple-network-dashboard
 cd ~/simple-network-dashboard
-pip install -r requirements.txt
-python main.py
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+venv/bin/python main.py
 ```
 
 Then open `http://<server-ip>:3000` in your browser.
@@ -43,9 +44,9 @@ Description=Simple Network Dashboard
 After=network.target
 
 [Service]
-User=youruser
-WorkingDirectory=/home/youruser/simple-network-dashboard
-ExecStart=/usr/bin/python3 main.py
+User=<your-user>
+WorkingDirectory=/home/<your-user>/simple-network-dashboard
+ExecStart=/home/<your-user>/simple-network-dashboard/venv/bin/python main.py
 Restart=always
 
 [Install]
