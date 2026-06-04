@@ -8,8 +8,7 @@ and pushes real-time metrics + SSH events over a WebSocket.
 import asyncio
 import json
 import os
-import re
-import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -62,6 +61,9 @@ ssh_mgr = SSHManager(ws_mgr.broadcast)
 # Latest metrics per device (includes _raw fields for delta calculation)
 _metrics_cache: dict[str, dict] = {}
 
+# In-memory device list — seeded from disk at startup, kept in sync by _save()
+_devices_cache: list = []
+
 
 # ---------------------------------------------------------------------------
 # Device persistence
@@ -80,9 +82,11 @@ def _load() -> list:
 
 
 def _save(devices: list) -> bool:
+    global _devices_cache
     try:
         with open(DEVICES_FILE, "w", encoding="utf-8") as f:
             json.dump({"_app": APP_NAME, "devices": devices}, f, indent=2)
+        _devices_cache = list(devices)
         return True
     except Exception:
         return False
@@ -117,7 +121,7 @@ def _norm(d: dict) -> dict:
 
 async def _metrics_loop():
     while True:
-        for device in _load():
+        for device in list(_devices_cache):
             did  = device.get("id")
             host = device.get("host")
             port = device.get("metrics_port", 9100)
@@ -137,6 +141,8 @@ async def _metrics_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _devices_cache
+    _devices_cache = _load()
     ssh_mgr.set_loop(asyncio.get_running_loop())
     task = asyncio.create_task(_metrics_loop())
     yield
@@ -212,7 +218,7 @@ async def upsert_device(body: DeviceIn):
         else:
             devices.append(_norm(d))
     else:
-        d["id"] = "dev" + str(int(time.time() * 1000))
+        d["id"] = "dev_" + uuid.uuid4().hex[:12]
         devices.append(_norm(d))
     _save(devices)
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
@@ -235,10 +241,10 @@ class CommandsIn(BaseModel):
 @app.put("/api/devices/{device_id}/commands")
 async def update_commands(device_id: str, body: CommandsIn):
     devices = _load()
-    for d in devices:
+    for i, d in enumerate(devices):
         if d["id"] == device_id:
             d["commands"] = body.commands
-            _norm(d)
+            devices[i] = _norm(d)
             break
     _save(devices)
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
@@ -315,25 +321,6 @@ async def ssh_host_key(host: str):
 @app.delete("/api/ssh/host_key/{host}")
 async def ssh_forget_key(host: str):
     return ssh_mgr.forget_host_key(host)
-
-
-class ExportIn(BaseModel):
-    device_name: str = "Console"
-    text:        str = ""
-
-
-@app.post("/api/ssh/export")
-async def ssh_export(body: ExportIn):
-    safe  = re.sub(r'[\\/:*?"<>|]', "", body.device_name.replace(" ", "_"))
-    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    fname = f"{safe}_Console_{stamp}.txt"
-    path  = os.path.join(BASE_DIR, fname)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(body.text)
-        return {"ok": True, "path": path, "name": fname}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
