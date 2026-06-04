@@ -1,0 +1,1368 @@
+<!DOCTYPE html>
+<!-- Simple Network Dashboard — https://github.com/JDE-Projects -->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Simple Network Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg:        #0a0e14;
+    --bg-2:      #0e131c;
+    --panel:     #121823;
+    --panel-2:   #161d2a;
+    --border:    #20293a;
+    --border-2:  #2b3650;
+    --text:      #dfe7f2;
+    --text-dim:  #8a98b0;
+    --text-faint:#5a6678;
+    --accent:    #4dd6c1;
+    --accent-2:  #2bb6a3;
+    --glow:      rgba(77,214,193,0.35);
+    --amber:     #f0b860;
+    --red:       #ff6b7a;
+    --green:     #5ce39b;
+    --blue:      #6db3ff;
+    --purple:    #b48cff;
+    --radius:    14px;
+    --radius-sm: 9px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%; background: var(--bg); color: var(--text);
+    font-family: 'Sora', system-ui, sans-serif;
+    overflow: hidden; -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background:
+      radial-gradient(900px 500px at 12% -10%, rgba(77,214,193,0.09), transparent 60%),
+      radial-gradient(800px 500px at 100% 0%, rgba(109,179,255,0.06), transparent 55%),
+      var(--bg);
+  }
+
+  /* ---- app grid ---- */
+  .app {
+    display: grid;
+    grid-template-rows: auto minmax(0,1fr) 240px;
+    grid-template-columns: 280px 360px 1fr;
+    grid-template-areas: "top top top" "left stats right" "lib lib lib";
+    height: 100vh; gap: 14px; padding: 16px;
+  }
+
+  /* ---- top bar ---- */
+  .topbar { grid-area: top; display: flex; align-items: center; justify-content: space-between; }
+  .brand  { display: flex; align-items: center; gap: 13px; }
+  .brand .mark {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(145deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center;
+    box-shadow: 0 0 22px var(--glow), inset 0 1px 0 rgba(255,255,255,0.22);
+  }
+  .brand .mark svg { width: 20px; height: 20px; }
+  .brand h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.2px; }
+  .brand .sub { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
+  .top-actions { display: flex; gap: 9px; }
+
+  /* ---- buttons ---- */
+  .btn {
+    font-family: inherit; font-size: 13px; font-weight: 500; color: var(--text);
+    background: var(--panel-2); border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm); padding: 8px 13px;
+    display: inline-flex; align-items: center; gap: 7px;
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent); color: #fff; transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn svg { width: 14px; height: 14px; flex: none; }
+  .btn.primary {
+    background: linear-gradient(145deg, var(--accent), var(--accent-2));
+    color: #042b27; border: none; font-weight: 600;
+    box-shadow: 0 4px 16px var(--glow);
+  }
+  .btn.primary:hover { filter: brightness(1.08); color: #042b27; }
+  .btn.ghost  { background: transparent; }
+  .btn.danger:hover { border-color: var(--red); color: var(--red); }
+  .btn.tiny   { padding: 5px 10px; font-size: 12px; }
+  .btn:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
+
+  /* ---- shared panel shell ---- */
+  .panel {
+    background: linear-gradient(180deg, var(--panel), var(--bg-2));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px 10px; flex: none;
+  }
+  .panel-head h2 {
+    font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: var(--text-dim); font-weight: 600;
+  }
+
+  /* ---- devices panel ---- */
+  .devices { grid-area: left; }
+  .device-list { overflow-y: auto; padding: 2px 12px 12px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
+
+  .card {
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 13px 14px;
+    transition: border-color 0.18s, box-shadow 0.18s;
+    position: relative; overflow: hidden; cursor: pointer;
+  }
+  .card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--border-2); transition: background 0.2s;
+  }
+  .card.selected { border-color: var(--accent-2); box-shadow: 0 0 0 1px rgba(77,214,193,0.12), 0 6px 24px rgba(0,0,0,0.28); }
+  .card.selected::before { background: linear-gradient(var(--accent), var(--accent-2)); }
+
+  .card-top  { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .card-left { flex: 1; min-width: 0; }
+  .card-name { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+
+  /* dual indicator dots: metrics (left) + ssh (right) */
+  .dots { display: flex; align-items: center; gap: 4px; flex: none; }
+  .dot  { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; transition: background 0.3s; }
+  .dot.metrics-ok   { background: var(--accent); box-shadow: 0 0 0 2px rgba(77,214,193,0.2); }
+  .dot.metrics-err  { background: var(--red); }
+  .dot.ssh-connected { background: var(--green); box-shadow: 0 0 0 2px rgba(92,227,155,0.2); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.5;} }
+
+  .card-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card-icons { display: flex; gap: 3px; flex: none; }
+  .icon-btn { background: none; border: none; color: var(--text-faint); cursor: pointer; padding: 4px; border-radius: 6px; display: grid; place-items: center; transition: all 0.14s; }
+  .icon-btn:hover { color: var(--text); background: var(--border); }
+  .icon-btn svg { width: 14px; height: 14px; }
+
+  /* password row (shown when not SSH-connected) */
+  .pw-row { display: none; margin-top: 11px; gap: 7px; }
+  .card:not(.ssh-on) .pw-row { display: flex; }
+  .pw-row input { flex: 1; background: var(--bg); border: 1px solid var(--border-2); border-radius: var(--radius-sm); color: var(--text); padding: 8px 11px; font-family: inherit; font-size: 12.5px; min-width: 0; }
+  .pw-row input:focus { outline: none; border-color: var(--accent); }
+  .cerr { display: none; color: var(--red); font-size: 11.5px; margin-top: 7px; }
+  .cerr.show { display: block; }
+
+  /* SSH-connected actions */
+  .ssh-actions { display: none; margin-top: 11px; flex-direction: column; gap: 9px; }
+  .card.ssh-on .ssh-actions { display: flex; }
+  .pins { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pin-btn { font-size: 12px; padding: 6px 10px; }
+  .pins-empty { font-size: 11px; color: var(--text-faint); }
+  .cmd-row { display: flex; gap: 7px; align-items: stretch; }
+  .cmd-row input[type=text] { flex: 1; background: var(--bg); border: 1px solid var(--border-2); border-radius: var(--radius-sm); color: var(--text); padding: 8px 11px; font-family: 'JetBrains Mono', monospace; font-size: 12px; min-width: 0; }
+  .cmd-row input[type=text]:focus { outline: none; border-color: var(--accent); }
+  .sudo-tog { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); cursor: pointer; user-select: none; border: 1px solid var(--border-2); border-radius: var(--radius-sm); padding: 0 9px; white-space: nowrap; }
+  .sudo-tog input { accent-color: var(--accent); width: 13px; height: 13px; }
+  .bottom-row { display: flex; gap: 7px; justify-content: flex-end; }
+  .stop-btn { display: none; }
+
+  /* ---- stats panel ---- */
+  .stats-panel { grid-area: stats; overflow-y: auto; padding: 0 16px 16px; }
+  .stats-empty {
+    height: 100%; display: flex; align-items: center; justify-content: center;
+    color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px;
+  }
+  .stats-header { padding: 14px 0 12px; display: flex; align-items: flex-start; justify-content: space-between; position: sticky; top: 0; background: var(--panel); z-index: 1; margin: 0 -16px; padding: 14px 16px 10px; }
+  .stats-dev-name { font-size: 15px; font-weight: 600; }
+  .stats-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; font-family: 'JetBrains Mono', monospace; }
+  .live-chip { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--accent); background: rgba(77,214,193,0.1); border: 1px solid rgba(77,214,193,0.25); border-radius: 20px; padding: 3px 9px; flex: none; }
+  .live-chip .dot { width: 6px; height: 6px; background: var(--accent); animation: pulse 2s infinite; }
+  .offline-chip { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-faint); background: rgba(90,102,120,0.15); border: 1px solid var(--border); border-radius: 20px; padding: 3px 9px; flex: none; }
+
+  .stat-section { margin-bottom: 14px; }
+  .stat-label { font-size: 10.5px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--text-dim); font-weight: 600; margin-bottom: 8px; }
+
+  .usage-row { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+  .usage-name { font-size: 12.5px; color: var(--text-dim); width: 58px; flex: none; }
+  .bar-track { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .bar-fill  { height: 100%; border-radius: 3px; transition: width 0.6s ease, background-color 0.4s; }
+  .usage-pct { font-size: 12px; font-family: 'JetBrains Mono', monospace; color: var(--text); width: 38px; text-align: right; flex: none; }
+  .usage-sub { font-size: 11px; color: var(--text-faint); margin-top: -4px; margin-bottom: 8px; margin-left: 68px; font-family: 'JetBrains Mono', monospace; }
+
+  .disk-row { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
+  .disk-mount { font-size: 11.5px; font-family: 'JetBrains Mono', monospace; color: var(--text-dim); width: 90px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .disk-info  { font-size: 10.5px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; width: 80px; text-align: right; flex: none; }
+
+  .temps-wrap { display: flex; flex-wrap: wrap; gap: 7px; }
+  .temp-badge {
+    display: flex; align-items: center; gap: 7px;
+    background: var(--panel-2); border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm); padding: 6px 10px;
+  }
+  .temp-label { font-size: 11.5px; color: var(--text-dim); }
+  .temp-val   { font-size: 13px; font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+
+  .net-row { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  .net-iface { color: var(--text-dim); width: 70px; flex: none; font-size: 11.5px; }
+  .net-rx { color: var(--green); }
+  .net-tx { color: var(--blue); }
+
+  .load-row { display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+  .load-val { color: var(--text); }
+  .load-hint { font-size: 10.5px; color: var(--text-faint); }
+
+  .stats-offline { padding: 20px 0; text-align: center; }
+  .stats-offline .err-icon { font-size: 28px; margin-bottom: 10px; }
+  .stats-offline .err-msg { font-size: 13px; color: var(--text-dim); margin-bottom: 14px; }
+  .stats-offline .install-box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-dim); text-align: left; }
+
+  /* ---- console panel ---- */
+  .console-wrap { grid-area: right; display: flex; flex-direction: column; overflow: hidden; }
+  .tabstrip { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border-bottom: 1px solid var(--border); flex: none; }
+  .tablist  { display: flex; align-items: center; gap: 6px; overflow-x: auto; flex: 1; }
+  .tab {
+    display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim);
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 5px 8px; cursor: pointer;
+    white-space: nowrap; transition: all 0.14s; max-width: 180px;
+  }
+  .tab:hover { border-color: var(--border-2); }
+  .tab.active { color: var(--text); border-color: var(--accent-2); background: rgba(77,214,193,0.07); }
+  .tab .tdot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex: none; }
+  .tab.connected .tdot  { background: var(--green); }
+  .tab.running .tdot   { background: var(--amber); }
+  .tab .tname  { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .tab .tclose { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; border-radius: 4px; }
+  .tab .tclose:hover { color: var(--red); }
+  .console-actions { display: flex; gap: 7px; }
+  .console-body    { flex: 1; position: relative; overflow: hidden; }
+  .console {
+    position: absolute; inset: 0; overflow-y: auto;
+    padding: 12px 14px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.65;
+  }
+  .ln { white-space: pre-wrap; word-break: break-word; display: flex; gap: 9px; }
+  .ln .tag { flex: none; color: var(--text-faint); font-size: 10px; width: 64px; text-align: right; opacity: 0.7; padding-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ln .msg { flex: 1; }
+  .ln.cmd  .msg { color: var(--accent); font-weight: 600; }
+  .ln.ok   .msg { color: var(--green); }
+  .ln.err  .msg { color: var(--red); }
+  .ln.warn .msg { color: var(--amber); }
+  .ln.muted .msg{ color: var(--text-faint); }
+  .ln.out  .msg { color: var(--text-dim); }
+  .console-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px; }
+
+  /* ---- library panel ---- */
+  .library  { grid-area: lib; }
+  .lib-title .dev { color: var(--accent); }
+  .lib-body { flex: 1; overflow-y: auto; padding: 2px 14px 14px; }
+  .cmd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px,1fr)); gap: 9px; }
+  .lib-empty { color: var(--text-faint); font-size: 13px; text-align: center; margin-top: 30px; }
+
+  .cmd-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .cmd-card.pinned { border-color: var(--accent-2); }
+  .cc-top  { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
+  .cc-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cc-pin  { background: none; border: none; cursor: pointer; color: var(--text-faint); padding: 2px; display: grid; place-items: center; }
+  .cc-pin svg { width: 14px; height: 14px; }
+  .cc-pin.on { color: var(--accent); }
+  .cc-cmd  { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cc-foot { display: flex; align-items: center; gap: 5px; }
+  .cc-badge { font-size: 9px; letter-spacing: 0.4px; text-transform: uppercase; font-weight: 600; padding: 2px 6px; border-radius: 20px; }
+  .cc-badge.sudo { color: var(--amber); background: rgba(240,184,96,0.12); border: 1px solid rgba(240,184,96,0.28); }
+  .cc-badge.confirm { color: var(--red); background: rgba(255,107,122,0.1); border: 1px solid rgba(255,107,122,0.28); }
+  .cc-actions { margin-left: auto; display: flex; gap: 6px; color: var(--text-faint); }
+  .cc-actions button { background: none; border: none; color: inherit; cursor: pointer; padding: 3px; border-radius: 5px; display: grid; place-items: center; transition: all 0.13s; }
+  .cc-actions button:hover { color: var(--text); background: var(--border); }
+  .cc-actions button:disabled { opacity: 0.32; cursor: not-allowed; }
+  .cc-actions button svg { width: 14px; height: 14px; }
+  .cc-actions .run:hover:not(:disabled) { color: var(--green); }
+  .cc-actions .del:hover { color: var(--red); }
+
+  /* ---- modals ---- */
+  .overlay { position: fixed; inset: 0; background: rgba(4,7,12,0.82); display: none; place-items: center; z-index: 50; }
+  .overlay.show { display: grid; }
+  .modal { width: 440px; max-width: 92vw; background: var(--panel); border: 1px solid var(--border-2); border-radius: var(--radius); padding: 22px; box-shadow: 0 24px 60px rgba(0,0,0,0.6); animation: rise 0.18s ease; }
+  @keyframes rise { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:none;} }
+  .modal h3 { font-size: 16px; margin-bottom: 3px; }
+  .modal p.hint { font-size: 12px; color: var(--text-faint); margin-bottom: 16px; }
+  .field { margin-bottom: 13px; }
+  .field label { display: block; font-size: 10.5px; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 5px; font-weight: 600; }
+  .field input[type=text], .field input[type=number], .field textarea { width: 100%; background: var(--bg); border: 1px solid var(--border-2); border-radius: var(--radius-sm); color: var(--text); padding: 9px 11px; font-family: inherit; font-size: 13px; }
+  .field textarea { font-family: 'JetBrains Mono', monospace; font-size: 12px; resize: vertical; min-height: 42px; }
+  .field input:focus, .field textarea:focus { outline: none; border-color: var(--accent); }
+  .checkrow { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim); cursor: pointer; user-select: none; margin-bottom: 13px; }
+  .checkrow input { accent-color: var(--accent); width: 14px; height: 14px; }
+  .modal-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 6px; }
+  .modal-err { color: var(--red); font-size: 12px; min-height: 16px; margin-top: 3px; }
+  .cmd-preview { background: var(--bg); border: 1px solid var(--border-2); border-radius: var(--radius-sm); padding: 9px 11px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-dim); margin-bottom: 14px; word-break: break-all; }
+  .copy-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; max-height: 260px; overflow-y: auto; }
+  .copy-item { display: flex; align-items: center; justify-content: space-between; gap: 9px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: var(--radius-sm); color: var(--text); padding: 9px 12px; cursor: pointer; text-align: left; transition: all 0.14s; }
+  .copy-item:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .copy-item .ci-name { font-size: 13px; }
+  .copy-item .ci-meta { font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; }
+
+  /* ---- library footer ---- */
+  .lib-foot { display: flex; align-items: center; gap: 11px; padding: 9px 16px; border-top: 1px solid var(--border); flex: none; }
+  .dbg-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
+  .dbg-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+  .dbg-track { width: 32px; height: 17px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border-2); position: relative; transition: all 0.14s; }
+  .dbg-track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--text-faint); transition: all 0.14s; }
+  .dbg-toggle input:checked + .dbg-track { background: var(--accent); border-color: var(--accent); }
+  .dbg-toggle input:checked + .dbg-track::after { left: 16px; background: #042b27; }
+  .dbg-label { font-size: 11.5px; color: var(--text-dim); }
+
+  /* ---- ws status dot (inside version button) ---- */
+  .ws-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); display: inline-block; flex: none; transition: background 0.3s; }
+  .ws-dot.ok  { background: var(--accent); }
+  .ws-dot.err { background: var(--red); animation: pulse 1.5s infinite; }
+
+  /* scrollbars */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a4658; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- top bar -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#042b27" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <path d="M8 21h8M12 17v4"/>
+        </svg>
+      </div>
+      <div>
+        <h1>Simple Network Dashboard</h1>
+        <div class="sub">github.com/JDE-Projects</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn ghost tiny" id="verBtn"><span class="ws-dot err" id="wsChip"></span>v1.0.0</button>
+      <button class="btn ghost" id="addBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        Add Device
+      </button>
+      <button class="btn danger ghost" id="endAllBtn" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18.36 6.64A9 9 0 1 1 5.64 6.64M12 2v10"/></svg>
+        Disconnect All
+      </button>
+    </div>
+  </div>
+
+  <!-- devices -->
+  <div class="panel devices">
+    <div class="panel-head"><h2>Devices</h2></div>
+    <div class="device-list" id="deviceList"></div>
+  </div>
+
+  <!-- stats -->
+  <div class="panel stats-panel" id="statsPanel">
+    <div class="stats-empty">Select a device to view stats.</div>
+  </div>
+
+  <!-- console -->
+  <div class="panel console-wrap">
+    <div class="tabstrip">
+      <div class="tablist" id="tablist"></div>
+      <div class="console-actions">
+        <button class="btn tiny ghost" id="exportBtn">Export</button>
+        <button class="btn tiny ghost" id="clearBtn">Clear</button>
+      </div>
+    </div>
+    <div class="console-body" id="consoleBody">
+      <div class="console-empty" id="consoleEmpty">Connect to a device to begin. Output appears here.</div>
+    </div>
+  </div>
+
+  <!-- library -->
+  <div class="panel library">
+    <div class="panel-head">
+      <h2 class="lib-title" id="libTitle">Command Library</h2>
+      <button class="btn tiny" id="addCmdBtn" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        Add Command
+      </button>
+    </div>
+    <div class="lib-body" id="libBody">
+      <div class="lib-empty">Select a device to manage its commands.</div>
+    </div>
+    <div class="lib-foot">
+      <label class="dbg-toggle" title="Write a timestamped debug log next to the app on the server. Passwords are never written.">
+        <input type="checkbox" id="debugChk" />
+        <span class="dbg-track"></span>
+        <span class="dbg-label">Server debug log</span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<!-- device editor modal -->
+<div class="overlay" id="deviceModal">
+  <div class="modal">
+    <h3 id="devModalTitle">Add Device</h3>
+    <p class="hint">Name, host and username are saved. Passwords are never stored.</p>
+    <input type="hidden" id="fId" />
+    <div class="field"><label>Display Name</label><input type="text" id="fName" placeholder="e.g. Pi 4 Media Server" /></div>
+    <div class="field"><label>Host / IP Address</label><input type="text" id="fHost" placeholder="e.g. 192.168.1.50" /></div>
+    <div class="field"><label>SSH Username</label><input type="text" id="fUser" placeholder="e.g. youruser" /></div>
+    <div class="field"><label>Node Exporter Port</label><input type="number" id="fPort" value="9100" min="1" max="65535" /></div>
+    <div class="modal-err" id="devErr"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="devCancel">Cancel</button>
+      <button class="btn primary" id="devSave">Save Device</button>
+    </div>
+  </div>
+</div>
+
+<!-- command editor modal -->
+<div class="overlay" id="cmdModal">
+  <div class="modal">
+    <h3 id="cmdModalTitle">Add Command</h3>
+    <p class="hint">Give the command a name and the shell command to run.</p>
+    <input type="hidden" id="cId" />
+    <div class="field"><label>Name</label><input type="text" id="cName" placeholder="e.g. Update OS" /></div>
+    <div class="field"><label>Command</label><textarea id="cCmd" placeholder="e.g. apt update && apt upgrade -y"></textarea></div>
+    <div class="field"><label>Confirm prompt (optional)</label><input type="text" id="cConfirm" placeholder="Ask before running, e.g. Reboot now?" /></div>
+    <label class="checkrow"><input type="checkbox" id="cSudo" /> Run with sudo</label>
+    <label class="checkrow"><input type="checkbox" id="cPinned" /> Pin as quick button</label>
+    <div class="modal-err" id="cmdErr"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="cmdCancel">Cancel</button>
+      <button class="btn primary" id="cmdSave">Save Command</button>
+    </div>
+  </div>
+</div>
+
+<!-- save-to-library prompt -->
+<div class="overlay" id="saveModal">
+  <div class="modal" style="width:400px;">
+    <h3>Save to library?</h3>
+    <p class="hint">Add this command to the current device for one-click reuse.</p>
+    <div class="cmd-preview" id="savePreview"></div>
+    <div class="field"><label>Name</label><input type="text" id="saveName" placeholder="Give it a short name" /></div>
+    <label class="checkrow"><input type="checkbox" id="saveNoAsk" /> Don't ask again this session</label>
+    <div class="modal-actions">
+      <button class="btn ghost" id="saveSkip">Not now</button>
+      <button class="btn primary" id="saveDo">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- confirm / info modal -->
+<div class="overlay" id="confirm">
+  <div class="modal" style="width:400px;">
+    <h3 id="confirmTitle">Are you sure?</h3>
+    <p class="hint" id="confirmMsg" style="white-space:pre-line;"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="confirmNo">Cancel</button>
+      <button class="btn primary" id="confirmYes">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- copy-to-device picker -->
+<div class="overlay" id="copyModal">
+  <div class="modal" style="width:400px;">
+    <h3>Copy command to…</h3>
+    <p class="hint" id="copyHint"></p>
+    <div class="copy-list" id="copyList"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="copyClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   State
+   ============================================================ */
+let DEVICES   = [];
+let METRICS   = {};          // device_id -> metrics dict (no _raw fields)
+let SSH_STATE = {};          // device_id -> 'connected'|'running'|'idle'
+let currentDeviceId = null;
+let activeTabId     = null;
+const openTabs = {};
+let askSaveCustom = true;
+let confirmCb = null;
+let cmdCtx    = null;   // {deviceId, index|null}
+let saveCtx   = null;   // {deviceId, command, sudo}
+let copyState = null;   // {srcId, idx}
+const MAX_LINES = 1500;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dev = id => DEVICES.find(d => d.id === id);
+
+/* ============================================================
+   WebSocket
+   ============================================================ */
+let ws = null;
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    $('wsChip').className = 'ws-dot ok';
+  };
+
+  ws.onclose = () => {
+    $('wsChip').className = 'ws-dot err';
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = evt => {
+    const msg = JSON.parse(evt.data);
+    switch (msg.type) {
+      case 'init':
+        DEVICES = msg.devices || [];
+        if (msg.version) $('verBtn').textContent = 'v' + msg.version;
+        // Restore SSH state from server (e.g. after page refresh)
+        (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
+        updateDisconnectAllBtn();
+        renderDevices();
+        renderStats();
+        renderLibrary();
+        reconcileTabs();
+        break;
+      case 'metrics':
+        METRICS[msg.device_id] = msg.data;
+        updateMetricsDot(msg.device_id, msg.data);
+        if (msg.device_id === currentDeviceId) renderStats();
+        break;
+      case 'ssh_log':
+        addLine(msg.device_id, msg.text, msg.level);
+        break;
+      case 'ssh_status':
+        handleSSHStatus(msg.device_id, msg.state);
+        break;
+      case 'devices':
+        DEVICES = msg.devices || [];
+        renderDevices();
+        renderStats();
+        renderLibrary();
+        break;
+    }
+  };
+}
+
+/* ============================================================
+   API helpers
+   ============================================================ */
+async function api(method, path, body) {
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  return r.json();
+}
+const GET    = path       => api('GET',    path);
+const POST   = (path, b)  => api('POST',   path, b);
+const PUT    = (path, b)  => api('PUT',    path, b);
+const DELETE = path       => api('DELETE', path);
+
+/* ============================================================
+   Stats helpers
+   ============================================================ */
+function barColor(pct) {
+  if (pct >= 90) return 'var(--red)';
+  if (pct >= 75) return 'var(--amber)';
+  return 'var(--accent)';
+}
+function tempColor(c) {
+  if (c >= 80) return 'var(--red)';
+  if (c >= 65) return 'var(--amber)';
+  return 'var(--green)';
+}
+function fmtRate(kbs) {
+  if (kbs >= 1024) return (kbs/1024).toFixed(1) + ' MB/s';
+  return kbs.toFixed(0) + ' KB/s';
+}
+
+function updateMetricsDot(did, m) {
+  const card = document.querySelector(`[data-card="${did}"]`);
+  if (!card) return;
+  const dot = card.querySelector('.dot.metrics');
+  if (!dot) return;
+  dot.classList.remove('metrics-ok', 'metrics-err');
+  dot.classList.add(m && !m.error ? 'metrics-ok' : 'metrics-err');
+}
+
+function renderStats() {
+  const panel = $('statsPanel');
+  if (!currentDeviceId) {
+    panel.innerHTML = '<div class="stats-empty">Select a device to view stats.</div>';
+    return;
+  }
+  const device = dev(currentDeviceId);
+  if (!device) return;
+  const m = METRICS[currentDeviceId];
+
+  // Header (always shown)
+  const hostname = m && !m.error && m.hostname ? ` · ${m.hostname}` : '';
+  const uptime   = m && !m.error && m.uptime   ? ` · up ${m.uptime}` : '';
+  const chip = (m && !m.error)
+    ? `<span class="live-chip"><span class="dot"></span>Live</span>`
+    : `<span class="offline-chip">○ Offline</span>`;
+
+  let html = `
+    <div class="stats-header">
+      <div>
+        <div class="stats-dev-name">${esc(device.name)}</div>
+        <div class="stats-meta">${esc(device.host)}${esc(hostname)}${esc(uptime)}</div>
+      </div>
+      ${chip}
+    </div>`;
+
+  if (!m) {
+    html += `<div class="stats-empty" style="padding-top:30px;">Waiting for first poll…</div>`;
+    panel.innerHTML = html; return;
+  }
+  if (m.error) {
+    html += `
+      <div class="stats-offline">
+        <div class="err-icon">○</div>
+        <div class="err-msg">Node Exporter unreachable on <b>${esc(device.host)}:${device.metrics_port || 9100}</b></div>
+        <div class="install-box">sudo apt install prometheus-node-exporter</div>
+      </div>`;
+    panel.innerHTML = html; return;
+  }
+
+  // CPU
+  if (m.cpu_percent !== undefined || m.cpu_count !== undefined) {
+    html += `<div class="stat-section"><div class="stat-label">CPU</div>`;
+    if (m.cpu_percent !== undefined) {
+      const c = barColor(m.cpu_percent);
+      html += `
+        <div class="usage-row">
+          <span class="usage-name">Usage</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${m.cpu_percent}%;background:${c}"></div></div>
+          <span class="usage-pct">${m.cpu_percent}%</span>
+        </div>`;
+    } else {
+      html += `<div class="usage-row"><span class="usage-name">Usage</span><span style="font-size:11px;color:var(--text-faint)">Calculating…</span></div>`;
+    }
+    if (m.cpu_count) html += `<div class="usage-sub">${m.cpu_count} cores${m.arch ? ' · ' + esc(m.arch) : ''}</div>`;
+    if (m.load1 !== undefined) {
+      html += `<div class="load-row" style="margin-top:4px;">
+        <span class="usage-name" style="font-size:11.5px;">Load</span>
+        <span class="load-val">${m.load1}</span>
+        <span class="load-val">${m.load5}</span>
+        <span class="load-val">${m.load15}</span>
+        <span class="load-hint">(1/5/15 min)</span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Memory
+  if (m.ram_percent !== undefined) {
+    const c = barColor(m.ram_percent);
+    html += `<div class="stat-section"><div class="stat-label">Memory</div>
+      <div class="usage-row">
+        <span class="usage-name">RAM</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${m.ram_percent}%;background:${c}"></div></div>
+        <span class="usage-pct">${m.ram_percent}%</span>
+      </div>
+      <div class="usage-sub">${m.ram_used_gb} / ${m.ram_total_gb} GB</div>`;
+    if (m.swap_percent !== undefined && m.swap_total_gb > 0) {
+      const cs = barColor(m.swap_percent);
+      html += `<div class="usage-row">
+        <span class="usage-name">Swap</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${m.swap_percent}%;background:${cs}"></div></div>
+        <span class="usage-pct">${m.swap_percent}%</span>
+      </div>
+      <div class="usage-sub">${m.swap_used_gb} / ${m.swap_total_gb} GB</div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Disk
+  if (m.disks && m.disks.length) {
+    html += `<div class="stat-section"><div class="stat-label">Disk</div>`;
+    m.disks.forEach(d => {
+      const c = barColor(d.percent);
+      html += `<div class="disk-row">
+        <span class="disk-mount" title="${esc(d.mount)}">${esc(d.mount)}</span>
+        <div class="bar-track" style="flex:1"><div class="bar-fill" style="width:${d.percent}%;background:${c}"></div></div>
+        <span class="usage-pct">${d.percent}%</span>
+        <span class="disk-info">${d.used_gb}/${d.total_gb} GB</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  // Temperature
+  if (m.temps && m.temps.length) {
+    html += `<div class="stat-section"><div class="stat-label">Temperature</div><div class="temps-wrap">`;
+    m.temps.forEach(t => {
+      const c = tempColor(t.celsius);
+      html += `<div class="temp-badge">
+        <span class="temp-label">${esc(t.label)}</span>
+        <span class="temp-val" style="color:${c}">${t.celsius}°C</span>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // Network
+  if (m.network && Object.keys(m.network).length) {
+    html += `<div class="stat-section"><div class="stat-label">Network</div>`;
+    Object.entries(m.network).forEach(([iface, r]) => {
+      html += `<div class="net-row">
+        <span class="net-iface">${esc(iface)}</span>
+        <span class="net-rx">↓ ${fmtRate(r.rx_kbs)}</span>
+        <span class="net-tx">↑ ${fmtRate(r.tx_kbs)}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  panel.innerHTML = html;
+}
+
+/* ============================================================
+   Console / tabs
+   ============================================================ */
+function consoleFor(id) {
+  let el = document.querySelector(`[data-console="${id}"]`);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'console';
+    el.dataset.console = id;
+    el.style.display = (id === activeTabId) ? 'block' : 'none';
+    $('consoleBody').appendChild(el);
+  }
+  return el;
+}
+
+function addLine(id, text, level) {
+  ensureTab(id);
+  const con = consoleFor(id);
+  const ln  = document.createElement('div');
+  ln.className = 'ln ' + (level || 'out');
+  const t  = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  ln.innerHTML = '<span class="tag"></span><span class="msg"></span>';
+  ln.querySelector('.tag').textContent = t;
+  ln.querySelector('.msg').textContent = text;
+  con.appendChild(ln);
+  while (con.children.length > MAX_LINES) con.removeChild(con.firstChild);
+  if (id === activeTabId) con.scrollTop = con.scrollHeight;
+}
+
+function renderTabs() {
+  const strip = $('tablist');
+  strip.innerHTML = '';
+  Object.keys(openTabs).forEach(id => {
+    const d     = dev(id);
+    const name  = d ? d.name : id;
+    const state = SSH_STATE[id] || 'disconnected';
+    const tab   = document.createElement('div');
+    tab.className = `tab ${state}${id === activeTabId ? ' active' : ''}`;
+    tab.dataset.tab = id;
+    tab.innerHTML = `<span class="tdot"></span><span class="tname">${esc(name)}</span><button class="tclose" title="Close">&times;</button>`;
+    tab.onclick = e => { if (e.target.classList.contains('tclose')) return; setActiveTab(id); };
+    tab.querySelector('.tclose').onclick = e => { e.stopPropagation(); closeTab(id); };
+    strip.appendChild(tab);
+  });
+}
+
+function setTabState(id, state) {
+  const tab = document.querySelector(`.tab[data-tab="${id}"]`);
+  if (!tab) return;
+  tab.classList.remove('connected','running','disconnected');
+  tab.classList.add(state);
+}
+
+function ensureTab(id) {
+  if (openTabs[id]) return;
+  openTabs[id] = true;
+  consoleFor(id);
+  if (!activeTabId) activeTabId = id;
+  renderTabs();
+}
+
+function setActiveTab(id) {
+  activeTabId = id;
+  $('consoleEmpty').style.display = 'none';
+  document.querySelectorAll('.console').forEach(c => {
+    c.style.display = c.dataset.console === id ? 'block' : 'none';
+  });
+  consoleFor(id).scrollTop = 999999;
+  renderTabs();
+  selectDevice(id);
+}
+
+function closeTab(id) {
+  const wasConn = SSH_STATE[id] === 'connected' || SSH_STATE[id] === 'running';
+  const doClose = () => {
+    delete openTabs[id];
+    const c = document.querySelector(`[data-console="${id}"]`);
+    if (c) c.remove();
+    if (activeTabId === id) {
+      const rest = Object.keys(openTabs);
+      activeTabId = rest.length ? rest[0] : null;
+    }
+    if (activeTabId) setActiveTab(activeTabId);
+    else { $('consoleEmpty').style.display = 'flex'; renderTabs(); }
+  };
+  if (wasConn) {
+    const name = (dev(id) || {}).name || 'this device';
+    askConfirm('Close tab', `Close this tab and disconnect from ${name}?`, async () => {
+      await POST('/api/ssh/disconnect', {device_id: id});
+      doClose();
+    }, 'Disconnect & close', 'Cancel');
+  } else {
+    doClose();
+  }
+}
+
+function reconcileTabs() {
+  // After a page refresh, open a tab for each device that's still SSH-connected server-side
+  Object.keys(SSH_STATE).forEach(id => {
+    if (SSH_STATE[id] === 'connected' || SSH_STATE[id] === 'running') ensureTab(id);
+  });
+  renderTabs();
+}
+
+/* ============================================================
+   SSH state changes
+   ============================================================ */
+function handleSSHStatus(id, state) {
+  SSH_STATE[id] = state;
+  setTabState(id, state === 'idle' ? 'disconnected' : state);
+  updateDisconnectAllBtn();
+
+  const card = document.querySelector(`[data-card="${id}"]`);
+  if (state === 'idle') {
+    delete SSH_STATE[id];
+    if (card) { card.classList.remove('ssh-on'); cardRunning(card, false); }
+  } else if (state === 'connected') {
+    if (card) { card.classList.add('ssh-on'); cardRunning(card, false); }
+    ensureTab(id);
+  } else if (state === 'running') {
+    if (card) { card.classList.add('ssh-on'); cardRunning(card, true); }
+    ensureTab(id);
+  }
+
+  // Update SSH dot on card
+  if (card) {
+    const sshDot = card.querySelector('.dot.ssh');
+    if (sshDot) {
+      sshDot.classList.remove('ssh-connected');
+      if (state !== 'idle') sshDot.classList.add('ssh-connected');
+    }
+  }
+
+  if (id === currentDeviceId) renderLibrary();
+}
+
+function cardRunning(card, running) {
+  const stop  = card.querySelector('.stop-btn');
+  const ctrls = card.querySelectorAll('.ssh-actions .btn:not(.stop-btn), .ssh-actions input');
+  ctrls.forEach(b => { b.disabled = running; });
+  if (stop) stop.style.display = running ? 'inline-flex' : 'none';
+}
+
+/* ============================================================
+   Device cards
+   ============================================================ */
+function renderDevices() {
+  const list = $('deviceList');
+  list.innerHTML = '';
+  if (!DEVICES.length) {
+    list.innerHTML = '<div class="lib-empty" style="margin-top:24px;">No devices yet. Click "Add Device".</div>';
+    return;
+  }
+  DEVICES.forEach(d => list.appendChild(buildCard(d)));
+  // Apply current SSH / metrics state
+  DEVICES.forEach(d => {
+    const card = document.querySelector(`[data-card="${d.id}"]`);
+    if (!card) return;
+    if (SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') card.classList.add('ssh-on');
+    const m = METRICS[d.id];
+    const mDot = card.querySelector('.dot.metrics');
+    if (mDot && m) mDot.classList.add(m.error ? 'metrics-err' : 'metrics-ok');
+    const sDot = card.querySelector('.dot.ssh');
+    if (sDot && SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') sDot.classList.add('ssh-connected');
+  });
+  applySelection();
+}
+
+const SVG = {
+  key:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.85 12.15 19 4"/><path d="m18 5 2 2m-5 0 2 2"/></svg>`,
+  edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4v16h16v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>`,
+  del:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>`,
+  pin:  `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2l8 8-3.5 1.2-3 3L14 22l-2.2-2.2-4.4 4.4-1.4-1.4 4.4-4.4L8 16l3-3 1.2-3.5z"/></svg>`,
+};
+
+function buildCard(d) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.dataset.card = d.id;
+  card.innerHTML = `
+    <div class="card-top">
+      <div class="card-left">
+        <div class="card-name">
+          <div class="dots">
+            <div class="dot metrics" title="Metrics"></div>
+            <div class="dot ssh"     title="SSH"></div>
+          </div>
+          ${esc(d.name)}
+        </div>
+        <div class="card-meta">${esc(d.username)}@${esc(d.host)}</div>
+      </div>
+      <div class="card-icons">
+        <button class="icon-btn" data-hostkey title="View host key">${SVG.key}</button>
+        <button class="icon-btn" data-edit    title="Edit">${SVG.edit}</button>
+        <button class="icon-btn" data-del     title="Delete">${SVG.del}</button>
+      </div>
+    </div>
+    <div class="pw-row">
+      <input type="password" data-pw placeholder="SSH password (never saved)" />
+      <button class="btn primary tiny" data-connect>Connect</button>
+    </div>
+    <div class="cerr" data-cerr></div>
+    <div class="ssh-actions">
+      <div class="pins" data-pins></div>
+      <div class="cmd-row">
+        <input type="text" data-custom placeholder="Custom command…" />
+        <label class="sudo-tog"><input type="checkbox" data-sudo />sudo</label>
+        <button class="btn tiny" data-run>Run</button>
+        <button class="btn danger tiny stop-btn" data-cancel>Stop</button>
+      </div>
+      <div class="bottom-row">
+        <button class="btn danger ghost tiny" data-disconnect>Disconnect</button>
+      </div>
+    </div>`;
+
+  buildPins(card, d);
+  wireCard(card, d);
+  return card;
+}
+
+function buildPins(card, d) {
+  const wrap   = card.querySelector('[data-pins]');
+  const pinned = (d.commands || []).filter(c => c.pinned);
+  wrap.innerHTML = '';
+  if (!pinned.length) {
+    wrap.innerHTML = '<span class="pins-empty">No pinned commands.</span>';
+    return;
+  }
+  pinned.forEach(c => {
+    const idx = d.commands.indexOf(c);
+    const b = document.createElement('button');
+    b.className = 'btn tiny pin-btn';
+    b.textContent = c.name;
+    b.onclick = e => { e.stopPropagation(); runLibCmd(d.id, idx); };
+    wrap.appendChild(b);
+  });
+}
+
+function wireCard(card, d) {
+  const id  = d.id;
+  const err = card.querySelector('[data-cerr]');
+
+  card.onclick = () => selectDevice(id);
+  card.querySelector('[data-edit]').onclick = e => { e.stopPropagation(); openDeviceEditor(d); };
+  card.querySelector('[data-del]').onclick  = e => {
+    e.stopPropagation();
+    askConfirm('Delete device?', `Remove "${d.name}" and all its saved commands?`, async () => {
+      const r = await DELETE(`/api/devices/${id}`);
+      if (r.ok) {
+        DEVICES = r.devices;
+        if (currentDeviceId === id) { currentDeviceId = null; }
+        if (openTabs[id]) closeTab(id);
+      }
+    });
+  };
+  card.querySelector('[data-hostkey]').onclick = async e => {
+    e.stopPropagation();
+    const r = await GET(`/api/ssh/host_key/${encodeURIComponent(d.host)}`);
+    if (r.known && r.entries && r.entries.length) {
+      showInfo(`Host key — ${r.host}`, r.entries.map(x => `${x.key_type}\n${x.fingerprint}`).join('\n\n'));
+    } else {
+      showInfo(`Host key — ${r.host}`, `No key pinned yet for ${r.host}.\nIt is recorded the first time you connect and accept it.`);
+    }
+  };
+
+  const pwInput    = card.querySelector('[data-pw]');
+  const connectBtn = card.querySelector('[data-connect]');
+
+  async function tryConnect() {
+    err.classList.remove('show'); err.textContent = '';
+    connectBtn.disabled = true; connectBtn.textContent = 'Connecting…';
+    const r = await POST('/api/ssh/connect', {device_id: id, password: pwInput.value});
+    connectBtn.disabled = false; connectBtn.textContent = 'Connect';
+    if (r.ok) { pwInput.value = ''; setActiveTab(id); return; }
+    if (r.host_key_unknown) {
+      askConfirm('Unknown host key',
+        `First connection to ${r.host}.\n\nType: ${r.key_type}\nFingerprint: ${r.fingerprint}\n\nAccept and remember this host?`,
+        async () => {
+          const t = await POST('/api/ssh/trust_key', {device_id: id});
+          if (!t.ok) { err.textContent = t.error; err.classList.add('show'); return; }
+          tryConnect();
+        }, 'Accept & connect', 'Cancel');
+      return;
+    }
+    if (r.host_key_changed) {
+      askConfirm('⚠ Host key changed',
+        `The key for ${r.host} has CHANGED.\n\nOld: ${r.old_fingerprint}\nNew (${r.key_type}): ${r.new_fingerprint}\n\nOnly replace if you expected this (e.g. OS reinstall).`,
+        async () => {
+          const t = await POST('/api/ssh/trust_key', {device_id: id});
+          if (!t.ok) { err.textContent = t.error; err.classList.add('show'); return; }
+          tryConnect();
+        }, 'Replace key', 'Cancel');
+      return;
+    }
+    err.textContent = r.error; err.classList.add('show');
+  }
+
+  connectBtn.onclick = e => { e.stopPropagation(); tryConnect(); };
+  pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') connectBtn.click(); });
+
+  card.querySelector('[data-cancel]').onclick     = e => { e.stopPropagation(); POST('/api/ssh/cancel', {device_id: id}); };
+  card.querySelector('[data-disconnect]').onclick = e => {
+    e.stopPropagation();
+    askConfirm('Disconnect', `Disconnect from ${d.name}?`, async () => {
+      await POST('/api/ssh/disconnect', {device_id: id});
+    }, 'Disconnect', 'Cancel');
+  };
+
+  const runCustom = e => {
+    if (e) e.stopPropagation();
+    const input = card.querySelector('[data-custom]');
+    const sudo  = card.querySelector('[data-sudo]').checked;
+    const cmd   = input.value.trim();
+    if (!cmd) return;
+    ensureTab(id); setActiveTab(id);
+    POST('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command'});
+    input.value = '';
+    maybeOfferSave(id, cmd, sudo);
+  };
+  card.querySelector('[data-run]').onclick = runCustom;
+  card.querySelector('[data-custom]').addEventListener('keydown', e => { if (e.key === 'Enter') runCustom(e); });
+}
+
+function selectDevice(id) {
+  if (currentDeviceId === id) return;
+  currentDeviceId = id;
+  applySelection();
+  renderStats();
+  renderLibrary();
+}
+
+function applySelection() {
+  document.querySelectorAll('.card').forEach(c => c.classList.toggle('selected', c.dataset.card === currentDeviceId));
+}
+
+/* ============================================================
+   Command library
+   ============================================================ */
+function renderLibrary() {
+  const d = dev(currentDeviceId);
+  $('addCmdBtn').disabled = !d;
+  if (!d) {
+    $('libTitle').innerHTML = 'Command Library';
+    $('libBody').innerHTML  = '<div class="lib-empty">Select a device to manage its commands.</div>';
+    return;
+  }
+  $('libTitle').innerHTML = `Command Library <span class="dev">· ${esc(d.name)}</span>`;
+  const cmds   = d.commands || [];
+  const isConn = !!(SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle');
+  if (!cmds.length) {
+    $('libBody').innerHTML = `<div class="lib-empty">No commands saved for ${esc(d.name)}. Click "Add Command".</div>`;
+    return;
+  }
+  const grid = document.createElement('div');
+  grid.className = 'cmd-grid';
+  cmds.forEach((c, i) => {
+    const card = document.createElement('div');
+    card.className = 'cmd-card' + (c.pinned ? ' pinned' : '');
+    card.innerHTML = `
+      <div class="cc-top">
+        <span class="cc-name">${esc(c.name)}</span>
+        <button class="cc-pin ${c.pinned?'on':''}" title="${c.pinned?'Unpin':'Pin'}">${SVG.pin}</button>
+      </div>
+      <div class="cc-cmd" title="${esc(c.command)}">${esc(c.command)}</div>
+      <div class="cc-foot">
+        ${c.sudo    ? '<span class="cc-badge sudo">sudo</span>'    : ''}
+        ${c.confirm ? '<span class="cc-badge confirm">confirm</span>' : ''}
+        <div class="cc-actions">
+          <button class="run"  title="${isConn?'Run':'Connect first'}" ${isConn?'':'disabled'}>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+          </button>
+          <button class="edit" title="Edit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4v16h16v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>
+          </button>
+          <button class="copy" title="Copy to another device">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+          </button>
+          <button class="del"  title="Delete">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+          </button>
+        </div>
+      </div>`;
+    card.querySelector('.cc-pin').onclick  = ()  => togglePin(d.id, i);
+    card.querySelector('.edit').onclick    = ()  => openCmdEditor(d.id, i);
+    card.querySelector('.copy').onclick    = ()  => openCopyPicker(d.id, i);
+    card.querySelector('.del').onclick     = ()  => {
+      askConfirm('Delete command?', `Remove "${c.name}" from ${d.name}?`, () => deleteCmd(d.id, i));
+    };
+    if (isConn) card.querySelector('.run').onclick = () => runLibCmd(d.id, i);
+    grid.appendChild(card);
+  });
+  $('libBody').innerHTML = '';
+  $('libBody').appendChild(grid);
+}
+
+function runLibCmd(deviceId, index) {
+  const d = dev(deviceId); if (!d) return;
+  const c = (d.commands || [])[index]; if (!c) return;
+  const go = () => {
+    ensureTab(deviceId); setActiveTab(deviceId);
+    POST('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name});
+  };
+  if (c.confirm) askConfirm(c.name, c.confirm, go);
+  else go();
+}
+
+async function persistDevice(d) {
+  const r = await POST('/api/devices', d);
+  if (r.ok) DEVICES = r.devices;
+  renderDevices();
+  renderLibrary();
+}
+
+function pinnedCount(d) { return (d.commands || []).filter(c => c.pinned).length; }
+
+function togglePin(deviceId, index) {
+  const d = dev(deviceId); if (!d) return;
+  const c = d.commands[index];
+  if (!c.pinned && pinnedCount(d) >= 10) { addLine(deviceId, 'Maximum 10 pinned commands.', 'warn'); ensureTab(deviceId); return; }
+  c.pinned = !c.pinned;
+  persistDevice(d);
+}
+
+function deleteCmd(deviceId, index) {
+  const d = dev(deviceId); if (!d) return;
+  d.commands.splice(index, 1);
+  persistDevice(d);
+}
+
+/* ============================================================
+   Command editor modal
+   ============================================================ */
+function openCmdEditor(deviceId, index) {
+  cmdCtx = {deviceId, index: typeof index === 'number' ? index : null};
+  const d = dev(deviceId);
+  const c = cmdCtx.index !== null ? d.commands[cmdCtx.index] : null;
+  $('cmdModalTitle').textContent = c ? 'Edit Command' : 'Add Command';
+  $('cName').value    = c ? c.name       : '';
+  $('cCmd').value     = c ? c.command    : '';
+  $('cConfirm').value = c ? (c.confirm||'') : '';
+  $('cSudo').checked  = c ? !!c.sudo     : false;
+  $('cPinned').checked= c ? !!c.pinned   : false;
+  $('cmdErr').textContent = '';
+  $('cmdModal').classList.add('show');
+  setTimeout(() => $('cName').focus(), 40);
+}
+$('cmdCancel').onclick = () => $('cmdModal').classList.remove('show');
+$('cmdSave').onclick   = () => {
+  const name    = $('cName').value.trim();
+  const command = $('cCmd').value.trim();
+  if (!name || !command) { $('cmdErr').textContent = 'Name and command are required.'; return; }
+  const d = dev(cmdCtx.deviceId); if (!d) return;
+  const pinned   = $('cPinned').checked;
+  const wasPinned = cmdCtx.index !== null ? !!d.commands[cmdCtx.index].pinned : false;
+  if (pinned && !wasPinned && pinnedCount(d) >= 10) { $('cmdErr').textContent = 'Maximum 10 pinned commands.'; return; }
+  const obj = {name, command, sudo: $('cSudo').checked, confirm: $('cConfirm').value.trim(), pinned};
+  if (!d.commands) d.commands = [];
+  if (cmdCtx.index !== null) d.commands[cmdCtx.index] = obj;
+  else d.commands.push(obj);
+  $('cmdModal').classList.remove('show');
+  persistDevice(d);
+};
+$('addCmdBtn').onclick = () => { if (currentDeviceId) openCmdEditor(currentDeviceId, null); };
+
+/* ============================================================
+   Save-to-library prompt
+   ============================================================ */
+function maybeOfferSave(deviceId, command, sudo) {
+  if (!askSaveCustom) return;
+  const d = dev(deviceId); if (!d) return;
+  if ((d.commands||[]).some(c => c.command === command)) return;
+  saveCtx = {deviceId, command, sudo};
+  $('savePreview').textContent = command;
+  $('saveName').value = '';
+  $('saveNoAsk').checked = false;
+  $('saveModal').classList.add('show');
+  setTimeout(() => $('saveName').focus(), 40);
+}
+function closeSave() {
+  if ($('saveNoAsk').checked) askSaveCustom = false;
+  $('saveModal').classList.remove('show');
+  saveCtx = null;
+}
+$('saveSkip').onclick = closeSave;
+$('saveDo').onclick   = () => {
+  if (!saveCtx) { closeSave(); return; }
+  const name = $('saveName').value.trim() || saveCtx.command.slice(0, 24);
+  const d    = dev(saveCtx.deviceId);
+  if (d) {
+    if (!d.commands) d.commands = [];
+    d.commands.push({name, command: saveCtx.command, sudo: !!saveCtx.sudo, confirm: '', pinned: false});
+    persistDevice(d);
+  }
+  closeSave();
+};
+$('saveName').addEventListener('keydown', e => { if (e.key === 'Enter') $('saveDo').click(); });
+
+/* ============================================================
+   Device editor modal
+   ============================================================ */
+function openDeviceEditor(d) {
+  $('devModalTitle').textContent = d ? 'Edit Device' : 'Add Device';
+  $('fId').value   = d ? d.id       : '';
+  $('fName').value = d ? d.name     : '';
+  $('fHost').value = d ? d.host     : '';
+  $('fUser').value = d ? d.username : '';
+  $('fPort').value = d ? (d.metrics_port || 9100) : 9100;
+  $('devErr').textContent = '';
+  $('deviceModal').classList.add('show');
+  setTimeout(() => $('fName').focus(), 40);
+}
+$('addBtn').onclick    = () => openDeviceEditor(null);
+$('devCancel').onclick = () => $('deviceModal').classList.remove('show');
+$('devSave').onclick   = async () => {
+  const name = $('fName').value.trim();
+  const host = $('fHost').value.trim();
+  const user = $('fUser').value.trim();
+  const port = parseInt($('fPort').value) || 9100;
+  if (!name || !host || !user) { $('devErr').textContent = 'Name, host and username are required.'; return; }
+  const existing = $('fId').value ? dev($('fId').value) : null;
+  const body = {id: $('fId').value || null, name, host, username: user, metrics_port: port, commands: existing ? (existing.commands||[]) : []};
+  const r = await POST('/api/devices', body);
+  if (!r.ok) { $('devErr').textContent = r.error || 'Save failed.'; return; }
+  DEVICES = r.devices;
+  $('deviceModal').classList.remove('show');
+  renderDevices(); renderStats(); renderLibrary();
+  const saved = DEVICES.find(x => x.name === name && x.host === host);
+  if (saved) selectDevice(saved.id);
+};
+
+/* ============================================================
+   Confirm / info modal
+   ============================================================ */
+function askConfirm(title, msg, cb, yesLabel, noLabel) {
+  $('confirmTitle').textContent  = title;
+  $('confirmMsg').textContent    = msg;
+  $('confirmYes').textContent    = yesLabel || 'Confirm';
+  $('confirmNo').textContent     = noLabel  || 'Cancel';
+  $('confirmNo').style.display   = '';
+  confirmCb = cb;
+  $('confirm').classList.add('show');
+}
+function showInfo(title, msg) {
+  $('confirmTitle').textContent  = title;
+  $('confirmMsg').textContent    = msg;
+  $('confirmYes').textContent    = 'OK';
+  $('confirmNo').style.display   = 'none';
+  confirmCb = null;
+  $('confirm').classList.add('show');
+}
+$('confirmNo').onclick  = () => { $('confirm').classList.remove('show'); confirmCb = null; };
+$('confirmYes').onclick = () => { $('confirm').classList.remove('show'); const cb = confirmCb; confirmCb = null; if (cb) cb(); };
+
+/* ============================================================
+   Copy-to-device picker
+   ============================================================ */
+function openCopyPicker(srcId, idx) {
+  const src = dev(srcId);
+  const cmd = src && (src.commands||[])[idx];
+  if (!cmd) return;
+  copyState = {srcId, idx};
+  const others = DEVICES.filter(d => d.id !== srcId);
+  const list   = $('copyList');
+  list.innerHTML = '';
+  $('copyHint').textContent = others.length ? `Copy "${cmd.name}" to:` : '';
+  if (!others.length) {
+    const msg = document.createElement('div');
+    msg.className = 'lib-empty';
+    msg.style.margin = '8px 0';
+    msg.textContent = 'No other devices to copy to. Add another device first.';
+    list.appendChild(msg);
+  } else {
+    others.forEach(d => {
+      const item = document.createElement('button');
+      item.className = 'copy-item';
+      item.innerHTML = `<span class="ci-name">${esc(d.name)}</span><span class="ci-meta">${esc(d.username)}@${esc(d.host)}</span>`;
+      item.onclick = () => copyTo(d.id);
+      list.appendChild(item);
+    });
+  }
+  $('copyModal').classList.add('show');
+}
+async function copyTo(targetId) {
+  if (!copyState) { closeCopy(); return; }
+  const src    = dev(copyState.srcId);
+  const target = dev(targetId);
+  const cmd    = src && (src.commands||[])[copyState.idx];
+  if (!target || !cmd) { closeCopy(); return; }
+  const copy = {name: cmd.name, command: cmd.command, sudo: !!cmd.sudo, confirm: cmd.confirm||'', pinned: false};
+  target.commands = (target.commands||[]).concat([copy]);
+  closeCopy();
+  await persistDevice(target);
+}
+function closeCopy() { $('copyModal').classList.remove('show'); copyState = null; }
+$('copyClose').onclick = closeCopy;
+
+/* ============================================================
+   Top bar actions
+   ============================================================ */
+function updateDisconnectAllBtn() {
+  const hasActive = Object.values(SSH_STATE).some(s => s && s !== 'idle');
+  $('endAllBtn').disabled = !hasActive;
+}
+
+$('endAllBtn').onclick = () => {
+  askConfirm('Disconnect all?', 'Disconnect every device and clear all passwords from memory.', () => {
+    POST('/api/ssh/disconnect_all', {});
+  });
+};
+
+$('exportBtn').onclick = () => {
+  if (!activeTabId) return;
+  const d    = dev(activeTabId);
+  const name = d ? d.name : 'Console';
+  const con  = document.querySelector(`[data-console="${activeTabId}"]`);
+  const lines = con ? Array.from(con.querySelectorAll('.ln')).map(ln => {
+    const t = ln.querySelector('.tag').textContent;
+    const m = ln.querySelector('.msg').textContent;
+    return `${t}  ${name} · ${m}`;
+  }) : [];
+  if (!lines.length) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
+  const blob = new Blob([lines.join('\n') + '\n'], {type: 'text/plain'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `${name.replace(/[^a-z0-9]/gi,'_')}_Console.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+$('clearBtn').onclick = () => {
+  if (!activeTabId) return;
+  const con = document.querySelector(`[data-console="${activeTabId}"]`);
+  if (con) con.innerHTML = '';
+};
+
+/* ============================================================
+   Boot
+   ============================================================ */
+connectWS();
+</script>
+</body>
+</html>

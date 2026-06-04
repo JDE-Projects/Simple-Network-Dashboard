@@ -1,0 +1,16 @@
+# Runtime config — contains your internal hostnames and usernames, keep private
+devices.json
+
+# SSH known hosts — keep private
+known_hosts
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Optional debug logs (written next to main.py when toggled on in the UI)
+Debug_Log_*.txt
+
+# Console export files
+*_Console_*.txt
