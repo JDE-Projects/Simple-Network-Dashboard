@@ -10,6 +10,7 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -55,14 +56,37 @@ class _WSManager:
             self.drop(ws)
 
 
-ws_mgr  = _WSManager()
-ssh_mgr = SSHManager(ws_mgr.broadcast)
+ws_mgr = _WSManager()
 
 # Latest metrics per device (includes _raw fields for delta calculation)
 _metrics_cache: dict[str, dict] = {}
 
 # In-memory device list — seeded from disk at startup, kept in sync by _save()
 _devices_cache: list = []
+
+# Debug log file handle — None when disabled
+_debug_file = None
+
+
+def _debug_write(text: str):
+    if _debug_file is not None:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        _debug_file.write(f"[{stamp}] {text}\n")
+
+
+async def _broadcast(msg: dict):
+    """Broadcast wrapper that also writes SSH events to the debug log."""
+    if _debug_file is not None:
+        t   = msg.get("type", "")
+        did = msg.get("device_id", "")
+        if t == "ssh_log":
+            _debug_write(f"SSH [{did}] {msg.get('level', 'out').upper()}: {msg.get('text', '')}")
+        elif t == "ssh_status":
+            _debug_write(f"SSH [{did}] → {msg.get('state', '')}")
+    await ws_mgr.broadcast(msg)
+
+
+ssh_mgr = SSHManager(_broadcast)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +154,8 @@ async def _metrics_loop():
             prev    = _metrics_cache.get(did)
             metrics = await fetch_metrics(host, port, prev)
             _metrics_cache[did] = metrics
+            if metrics.get("error"):
+                _debug_write(f"METRICS [{did}] {host}:{port} → {metrics['error']}")
             public = {k: v for k, v in metrics.items() if not k.startswith("_")}
             await ws_mgr.broadcast({"type": "metrics", "device_id": did, "data": public})
         await asyncio.sleep(POLL_INTERVAL)
@@ -148,6 +174,9 @@ async def lifespan(app: FastAPI):
     yield
     task.cancel()
     ssh_mgr.disconnect_all()
+    if _debug_file is not None:
+        _debug_write("=== Debug log closed (server shutdown) ===")
+        _debug_file.close()
 
 
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
@@ -172,6 +201,7 @@ async def ws_endpoint(ws: WebSocket):
         await ws.send_text(json.dumps({
             "type": "init", "devices": devices, "version": APP_VERSION,
             "ssh_connected": list(ssh_mgr.sessions.keys()),
+            "debug": _debug_file is not None,
         }))
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
@@ -321,6 +351,30 @@ async def ssh_host_key(host: str):
 @app.delete("/api/ssh/host_key/{host}")
 async def ssh_forget_key(host: str):
     return ssh_mgr.forget_host_key(host)
+
+
+# ---------------------------------------------------------------------------
+# Debug log
+# ---------------------------------------------------------------------------
+
+class DebugIn(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/debug")
+async def toggle_debug(body: DebugIn):
+    global _debug_file
+    if body.enabled and _debug_file is None:
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path  = os.path.join(BASE_DIR, f"Debug_Log_{stamp}.txt")
+        _debug_file = open(path, "w", encoding="utf-8", buffering=1)  # line-buffered
+        _debug_write("=== Debug log started ===")
+        return {"ok": True, "enabled": True, "path": path}
+    if not body.enabled and _debug_file is not None:
+        _debug_write("=== Debug log stopped ===")
+        _debug_file.close()
+        _debug_file = None
+    return {"ok": True, "enabled": False}
 
 
 # ---------------------------------------------------------------------------
