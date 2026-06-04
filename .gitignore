@@ -14,3 +14,6 @@ Debug_Log_*.txt
 
 # Console export files
 *_Console_*.txt
+
+# Claude project context (local only)
+CLAUDE.md

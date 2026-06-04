@@ -132,8 +132,12 @@
   .dot  { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; transition: background 0.3s; }
   .dot.metrics-ok   { background: var(--accent); box-shadow: 0 0 0 2px rgba(77,214,193,0.2); }
   .dot.metrics-err  { background: var(--red); }
-  .dot.ssh-connected { background: var(--green); box-shadow: 0 0 0 2px rgba(92,227,155,0.2); animation: pulse 2s infinite; }
+  .dot.ssh-connected { background: var(--green); box-shadow: 0 0 0 2px rgba(92,227,155,0.3); animation: ssh-pulse 3s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.5;} }
+  @keyframes ssh-pulse {
+    0%,100% { opacity:1;    box-shadow: 0 0 0 2px rgba(92,227,155,0.35); }
+    50%      { opacity:0.25; box-shadow: 0 0 0 4px rgba(92,227,155,0);   }
+  }
 
   .card-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card-icons { display: flex; gap: 3px; flex: none; }
