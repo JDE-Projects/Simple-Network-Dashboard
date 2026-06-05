@@ -551,7 +551,6 @@ function connectWS() {
         break;
       case 'metrics':
         METRICS[msg.device_id] = msg.data;
-        updateMetricsDot(msg.device_id, msg.data);
         if (msg.device_id === currentDeviceId) renderStats();
         break;
       case 'ssh_log':
@@ -602,14 +601,6 @@ function fmtRate(kbs) {
   return kbs.toFixed(0) + ' KB/s';
 }
 
-function updateMetricsDot(did, m) {
-  const card = document.querySelector(`[data-card="${did}"]`);
-  if (!card) return;
-  const dot = card.querySelector('.dot.metrics');
-  if (!dot) return;
-  dot.classList.remove('metrics-ok', 'metrics-err');
-  dot.classList.add(m && !m.error ? 'metrics-ok' : 'metrics-err');
-}
 
 function renderStats() {
   const panel = $('statsPanel');
@@ -907,9 +898,6 @@ function renderDevices() {
     const card = document.querySelector(`[data-card="${d.id}"]`);
     if (!card) return;
     if (SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') card.classList.add('ssh-on');
-    const m = METRICS[d.id];
-    const mDot = card.querySelector('.dot.metrics');
-    if (mDot && m) mDot.classList.add(m.error ? 'metrics-err' : 'metrics-ok');
     const sDot = card.querySelector('.dot.ssh');
     if (sDot && SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') sDot.classList.add('ssh-connected');
   });
@@ -932,8 +920,7 @@ function buildCard(d) {
       <div class="card-left">
         <div class="card-name">
           <div class="dots">
-            <div class="dot metrics" title="Metrics"></div>
-            <div class="dot ssh"     title="SSH"></div>
+            <div class="dot ssh" title="SSH"></div>
           </div>
           ${esc(d.name)}
         </div>
