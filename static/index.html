@@ -618,7 +618,11 @@ function renderStats() {
     return;
   }
   const device = dev(currentDeviceId);
-  if (!device) return;
+  if (!device) {
+    currentDeviceId = null;
+    panel.innerHTML = '<div class="stats-empty">Select a device to view stats.</div>';
+    return;
+  }
   const m = METRICS[currentDeviceId];
 
   // Header (always shown)
