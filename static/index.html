@@ -50,7 +50,7 @@
   .app {
     display: grid;
     grid-template-rows: auto minmax(0,1fr) 240px;
-    grid-template-columns: 280px 360px 1fr;
+    grid-template-columns: 320px 360px 1fr;
     grid-template-areas: "top top top" "left stats right" "lib lib lib";
     height: 100vh; gap: 14px; padding: 16px;
   }
@@ -144,6 +144,8 @@
   .card-icons { display: flex; gap: 3px; flex: none; }
   .icon-btn { background: none; border: none; color: var(--text-faint); cursor: pointer; padding: 4px; border-radius: 6px; display: grid; place-items: center; transition: all 0.14s; }
   .icon-btn:hover { color: var(--text); background: var(--border); }
+  .icon-btn.danger:hover { color: var(--red); background: var(--border); }
+  .icon-btn:disabled { opacity: 0.38; cursor: not-allowed; }
   .icon-btn svg { width: 14px; height: 14px; }
 
   /* password row (shown when not SSH-connected) */
@@ -169,7 +171,8 @@
   .stop-btn { display: none; }
 
   /* ---- stats panel ---- */
-  .stats-panel { grid-area: stats; overflow-y: auto; padding: 0 16px 16px; }
+  .stats-panel { grid-area: stats; }
+  .stats-body  { overflow-y: auto; padding: 0 16px 16px; flex: 1; }
   .stats-empty {
     height: 100%; display: flex; align-items: center; justify-content: center;
     color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px;
@@ -344,36 +347,45 @@
     </div>
     <div class="top-actions">
       <button class="btn ghost tiny" id="verBtn"><span class="ws-dot err" id="wsChip"></span><span id="verText">v1.0.0</span></button>
-      <button class="btn ghost" id="addBtn">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        Add Device
-      </button>
-      <button class="btn danger ghost" id="endAllBtn" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18.36 6.64A9 9 0 1 1 5.64 6.64M12 2v10"/></svg>
-        Disconnect All
-      </button>
     </div>
   </div>
 
   <!-- devices -->
   <div class="panel devices">
-    <div class="panel-head"><h2>Devices</h2></div>
+    <div class="panel-head">
+      <h2>Devices</h2>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button class="btn tiny" id="addBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Add Device
+        </button>
+        <button class="icon-btn danger" id="endAllBtn" disabled title="Disconnect All">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18.36 6.64A9 9 0 1 1 5.64 6.64M12 2v10"/></svg>
+        </button>
+      </div>
+    </div>
     <div class="device-list" id="deviceList"></div>
   </div>
 
   <!-- stats -->
-  <div class="panel stats-panel" id="statsPanel">
-    <div class="stats-empty">Select a device to view stats.</div>
+  <div class="panel stats-panel">
+    <div class="panel-head"><h2>Stats</h2></div>
+    <div class="stats-body" id="statsPanel">
+      <div class="stats-empty">Select a device to view stats.</div>
+    </div>
   </div>
 
   <!-- console -->
   <div class="panel console-wrap">
-    <div class="tabstrip">
-      <div class="tablist" id="tablist"></div>
+    <div class="panel-head">
+      <h2>Console</h2>
       <div class="console-actions">
         <button class="btn tiny ghost" id="exportBtn">Export</button>
         <button class="btn tiny ghost" id="clearBtn">Clear</button>
       </div>
+    </div>
+    <div class="tabstrip">
+      <div class="tablist" id="tablist"></div>
     </div>
     <div class="console-body" id="consoleBody">
       <div class="console-empty" id="consoleEmpty">Connect to a device to begin. Output appears here.</div>
