@@ -316,10 +316,14 @@
   .dbg-toggle input:checked + .dbg-track::after { left: 16px; background: #042b27; }
   .dbg-label { font-size: 11.5px; color: var(--text-dim); }
 
-  /* ---- ws status dot (inside version button) ---- */
-  .ws-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); display: inline-block; flex: none; transition: background 0.3s; }
-  .ws-dot.ok  { background: var(--accent); }
+  /* ---- ws status dot (inside status button) ---- */
+  .ws-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); display: inline-block; flex: none; margin-left: 5px; transition: background 0.3s; }
+  .ws-dot.ok  { background: var(--accent); animation: ws-pulse 3s ease-in-out infinite; }
   .ws-dot.err { background: var(--red); animation: pulse 1.5s infinite; }
+  @keyframes ws-pulse {
+    0%,100% { opacity:1;    box-shadow: 0 0 0 2px rgba(77,214,193,0.35); }
+    50%      { opacity:0.25; box-shadow: 0 0 0 4px rgba(77,214,193,0);   }
+  }
 
   /* scrollbars */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -346,7 +350,7 @@
       </div>
     </div>
     <div class="top-actions">
-      <button class="btn ghost tiny" id="verBtn"><span class="ws-dot err" id="wsChip"></span><span id="verText">v1.0.0</span></button>
+      <button class="btn ghost tiny" id="verBtn"><span id="verText">Status</span><span class="ws-dot err" id="wsChip"></span></button>
     </div>
   </div>
 
@@ -536,7 +540,6 @@ function connectWS() {
     switch (msg.type) {
       case 'init':
         DEVICES = msg.devices || [];
-        if (msg.version) $('verText').textContent = 'v' + msg.version;
         $('debugChk').checked = !!msg.debug;
         // Restore SSH state from server (e.g. after page refresh)
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
