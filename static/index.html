@@ -1323,6 +1323,11 @@ async function copyTo(targetId) {
   const target = dev(targetId);
   const cmd    = src && (src.commands||[])[copyState.idx];
   if (!target || !cmd) { closeCopy(); return; }
+  if ((target.commands||[]).some(c => c.command === cmd.command)) {
+    closeCopy();
+    showInfo('Already exists', `"${cmd.name}" is already in ${target.name}'s command library.`);
+    return;
+  }
   const copy = {name: cmd.name, command: cmd.command, sudo: !!cmd.sudo, confirm: cmd.confirm||'', pinned: false};
   target.commands = (target.commands||[]).concat([copy]);
   closeCopy();
