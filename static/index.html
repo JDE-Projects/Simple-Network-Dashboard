@@ -1040,6 +1040,20 @@ function wireCard(card, d) {
     e.stopPropagation();
     askConfirm('Disconnect', `Disconnect from ${d.name}?`, async () => {
       await POST('/api/ssh/disconnect', {device_id: id});
+      if (openTabs[id]) {
+        askConfirm('Console tab', `Keep the console history for ${d.name} open?`, () => {
+          delete openTabs[id];
+          const c = document.querySelector(`[data-console="${id}"]`);
+          if (c) c.remove();
+          if (activeTabId === id) {
+            const rest = Object.keys(openTabs);
+            activeTabId = rest.length ? rest[0] : null;
+          }
+          if (activeTabId) setActiveTab(activeTabId);
+          else { $('consoleEmpty').style.display = 'flex'; renderTabs(); }
+          renderTabs();
+        }, 'Close tab', 'Keep open');
+      }
     }, 'Disconnect', 'Cancel');
   };
 
