@@ -18,8 +18,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from metrics_poller import fetch_metrics, POLL_INTERVAL
+from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
+
+METRICS_INTERVAL = 2  # seconds between polls for the selected device
 
 APP_NAME    = "Simple Network Dashboard"
 APP_VERSION = "1.0.0"
@@ -60,6 +62,9 @@ ws_mgr = _WSManager()
 
 # Latest metrics per device (includes _raw fields for delta calculation)
 _metrics_cache: dict[str, dict] = {}
+
+# Device ID currently selected in the browser (None = no device selected / no clients)
+_selected_device_id: Optional[str] = None
 
 # In-memory device list — seeded from disk at startup, kept in sync by _save()
 _devices_cache: list = []
@@ -145,20 +150,20 @@ def _norm(d: dict) -> dict:
 
 async def _metrics_loop():
     while True:
-        for device in list(_devices_cache):
-            did  = device.get("id")
-            host = device.get("host")
-            port = device.get("metrics_port", 9100)
-            if not did or not host:
-                continue
-            prev    = _metrics_cache.get(did)
-            metrics = await fetch_metrics(host, port, prev)
-            _metrics_cache[did] = metrics
-            if metrics.get("error"):
-                _debug_write(f"METRICS [{did}] {host}:{port} → {metrics['error']}")
-            public = {k: v for k, v in metrics.items() if not k.startswith("_")}
-            await ws_mgr.broadcast({"type": "metrics", "device_id": did, "data": public})
-        await asyncio.sleep(POLL_INTERVAL)
+        if ws_mgr._connections and _selected_device_id:
+            device = next((d for d in _devices_cache if d.get("id") == _selected_device_id), None)
+            if device:
+                did  = device.get("id")
+                host = device.get("host")
+                port = device.get("metrics_port", 9100)
+                prev    = _metrics_cache.get(did)
+                metrics = await fetch_metrics(host, port, prev)
+                _metrics_cache[did] = metrics
+                if metrics.get("error"):
+                    _debug_write(f"METRICS [{did}] {host}:{port} → {metrics['error']}")
+                public = {k: v for k, v in metrics.items() if not k.startswith("_")}
+                await ws_mgr.broadcast({"type": "metrics", "device_id": did, "data": public})
+        await asyncio.sleep(METRICS_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +213,14 @@ async def ws_endpoint(ws: WebSocket):
             public = {k: v for k, v in m.items() if not k.startswith("_")}
             await ws.send_text(json.dumps({"type": "metrics", "device_id": did, "data": public}))
         while True:
-            await ws.receive_text()   # keep-alive; we ignore client messages
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            if msg.get("type") == "select_device":
+                global _selected_device_id
+                _selected_device_id = msg.get("id")
     except WebSocketDisconnect:
         pass
     finally:
@@ -257,6 +269,9 @@ async def upsert_device(body: DeviceIn):
 
 @app.delete("/api/devices/{device_id}")
 async def delete_device(device_id: str):
+    global _selected_device_id
+    if _selected_device_id == device_id:
+        _selected_device_id = None
     devices = [d for d in _load() if d["id"] != device_id]
     _save(devices)
     ssh_mgr.disconnect(device_id)

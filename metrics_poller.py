@@ -8,8 +8,6 @@ import time
 import httpx
 from typing import Optional
 
-POLL_INTERVAL = 10  # seconds between polls
-
 # Filesystem types that are virtual/pseudo — not worth showing on disk panel
 _EXCLUDE_FS = {
     "tmpfs", "devtmpfs", "squashfs", "overlay", "ramfs",
@@ -67,6 +65,7 @@ def _scalar(parsed: dict, name: str) -> Optional[float]:
 
 def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
     out: dict = {}
+    out["_timestamp"] = time.time()
 
     # --- System info ---
     uname_entries = parsed.get("node_uname_info", [])
@@ -190,15 +189,17 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
         net_raw[iface] = {"rx": rx_map.get(iface, 0), "tx": tx_map.get(iface, 0)}
     out["_net_raw"] = net_raw
 
-    if prev and "_net_raw" in prev:
-        rates = {}
-        for iface, vals in net_raw.items():
-            if iface in prev["_net_raw"]:
-                p = prev["_net_raw"][iface]
-                rx_kbs = max(0, vals["rx"] - p["rx"]) / POLL_INTERVAL / 1024
-                tx_kbs = max(0, vals["tx"] - p["tx"]) / POLL_INTERVAL / 1024
-                rates[iface] = {"rx_kbs": round(rx_kbs, 1), "tx_kbs": round(tx_kbs, 1)}
-        out["network"] = rates
+    if prev and "_net_raw" in prev and "_timestamp" in prev:
+        elapsed = out["_timestamp"] - prev["_timestamp"]
+        if elapsed > 0:
+            rates = {}
+            for iface, vals in net_raw.items():
+                if iface in prev["_net_raw"]:
+                    p = prev["_net_raw"][iface]
+                    rx_kbs = max(0, vals["rx"] - p["rx"]) / elapsed / 1024
+                    tx_kbs = max(0, vals["tx"] - p["tx"]) / elapsed / 1024
+                    rates[iface] = {"rx_kbs": round(rx_kbs, 1), "tx_kbs": round(tx_kbs, 1)}
+            out["network"] = rates
 
     return out
 

@@ -985,7 +985,7 @@ function wireCard(card, d) {
       const r = await DELETE(`/api/devices/${id}`);
       if (r.ok) {
         DEVICES = r.devices;
-        if (currentDeviceId === id) { currentDeviceId = null; }
+        if (currentDeviceId === id) { currentDeviceId = null; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'select_device', id: null})); }
         if (openTabs[id]) closeTab(id);
       }
     });
@@ -1075,6 +1075,7 @@ function wireCard(card, d) {
 function selectDevice(id) {
   if (currentDeviceId === id) return;
   currentDeviceId = id;
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'select_device', id}));
   applySelection();
   renderStats();
   renderLibrary();
