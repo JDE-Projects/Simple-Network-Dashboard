@@ -1,0 +1,16 @@
+Simple Network Dashboard: Third-Party Licenses
+===============================================
+
+This app installs the libraries below via pip. The license for each is noted
+with a source link; full license texts are not reproduced here.
+
+fastapi      MIT           github.com/tiangolo/fastapi
+uvicorn      BSD-3-Clause  github.com/encode/uvicorn
+paramiko     LGPL-2.1+     github.com/paramiko/paramiko
+httpx        BSD-3-Clause  github.com/encode/httpx
+
+# Required notices
+fastapi   Copyright (c) 2018 Sebastián Ramírez
+uvicorn   Copyright (c) 2017-present, Encode OSS Ltd.
+paramiko  Copyright (c) 2003-2009 Robey Pointer; Copyright (c) 2013-2024 Jeff Forcier
+httpx     Copyright (c) 2019, Encode OSS Ltd.

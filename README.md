@@ -62,4 +62,4 @@ sudo bash install.sh
 This project was built with AI assistance. The design decisions, feature direction, and real-world testing were directed by me. The code was written and revised with an AI assistant against that direction.
 
 ## License
-Released under the MIT license. See LICENSE.
+Released under the PolyForm Noncommercial License 1.0.0. See LICENSE.
