@@ -10,51 +10,39 @@ Built by [JDE-Projects](https://github.com/JDE-Projects).
 - No login required — designed for private LAN use only
 
 ## How it works
-- Backend: Python 3 + FastAPI, served by Uvicorn on an Ubuntu server
+- Backend: Python 3 + FastAPI, served by Uvicorn on a Linux server (Ubuntu, Raspberry Pi OS, etc.)
 - Metrics: polls `http://device-ip:9100/metrics` (Node Exporter, Prometheus format) on a 10-second interval
 - SSH: Paramiko with trust-on-first-use host key pinning; passwords memory-only
 - Real-time push: WebSocket delivers metric updates and SSH console output to the browser instantly
 - Config: `devices.json` holds device names, hosts, usernames, Node Exporter ports, and command libraries — no credentials
 
-## Deploy to server
+## Deploy
 
 **Prerequisites — on each device you want to monitor (Ubuntu / Raspberry Pi OS):**
 ```bash
 sudo apt install prometheus-node-exporter
 ```
 
-**One-time setup on your Ubuntu server:**
+**On the server that will host the dashboard (requires Python 3.10+):**
 ```bash
-git clone https://github.com/JDE-Projects/Simple-Network-Dashboard.git ~/simple-network-dashboard
-cd ~/simple-network-dashboard
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-venv/bin/python main.py
+git clone https://github.com/JDE-Projects/Simple-Network-Dashboard.git
+cd Simple-Network-Dashboard
+sudo bash install.sh
 ```
 
 Then open `http://<server-ip>:3000` in your browser.
 
-To run the dashboard automatically on boot, set it up as a systemd service:
-```bash
-sudo nano /etc/systemd/system/simple-network-dashboard.service
-```
-```ini
-[Unit]
-Description=Simple Network Dashboard
-After=network.target
+The install script creates a dedicated `snd` service account with no login shell, installs the app to `/opt/simple-network-dashboard`, and sets up a systemd service that starts automatically on boot. Your personal account is added to the `snd` group so you can deploy updates — log out and back in after the first install for that to take effect.
 
-[Service]
-User=<your-user>
-WorkingDirectory=/home/<your-user>/simple-network-dashboard
-ExecStart=/home/<your-user>/simple-network-dashboard/venv/bin/python main.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
+**If you have a firewall enabled:**
 ```bash
-sudo systemctl enable simple-network-dashboard
-sudo systemctl start simple-network-dashboard
+sudo ufw allow 3000/tcp
+```
+
+**To update to a newer version:**
+```bash
+git pull
+sudo bash install.sh
 ```
 
 ## Using it
@@ -67,6 +55,7 @@ sudo systemctl start simple-network-dashboard
 ## Security and privacy
 - SSH passwords are never written to disk. They are held in server memory only while a session is active and wiped immediately on disconnect.
 - `devices.json` contains only device names, hosts, usernames, Node Exporter ports, and command libraries — no credentials of any kind.
+- The dashboard runs as a dedicated `snd` service account — isolated from your personal account, no login shell.
 - The dashboard has no authentication and is intended for use on a private, trusted LAN only. Do not expose port 3000 to the internet.
 
 ## A note on how this was built
