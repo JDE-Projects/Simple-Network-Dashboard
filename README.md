@@ -66,3 +66,5 @@ Released under the [PolyForm Noncommercial License 1.0.0](LICENSE).
 Personal and noncommercial use, modification, and redistribution are
 permitted; commercial use is not. See [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt)
 for notices on bundled dependencies.
+
+For commercial licensing, open a [GitHub issue](https://github.com/JDE-Projects/Simple-Network-Dashboard/issues) with the title "Commercial License Inquiry".
