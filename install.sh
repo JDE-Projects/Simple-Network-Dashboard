@@ -52,7 +52,7 @@ if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
 fi
 
 # Copy app files
-cp main.py metrics_poller.py ssh_manager.py requirements.txt "$APP_DIR/"
+cp main.py metrics_poller.py ssh_manager.py requirements.txt uninstall.sh "$APP_DIR/"
 cp static/index.html "$APP_DIR/static/"
 
 # Create venv if it doesn't exist, then install/update requirements
@@ -86,6 +86,7 @@ SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo ""
 echo "Simple Network Dashboard is running."
 echo "Open http://${SERVER_IP}:3000 in your browser."
+echo "To uninstall later: sudo bash $APP_DIR/uninstall.sh"
 if [ "$ADDED_TO_GROUP" = true ]; then
     echo ""
     echo "Note: $INSTALL_USER was added to the snd group. Log out and back in for this to take effect."

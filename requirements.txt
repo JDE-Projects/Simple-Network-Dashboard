@@ -1,4 +1,8 @@
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-paramiko>=3.3.0
-httpx>=0.25.0
+# Pinned runtime dependencies for Simple Network Dashboard.
+# Exact == pins so every install resolves the same set. Dependabot opens
+# review-PRs when newer releases appear (paramiko is held at the 3.x line that
+# the SSH code was written against; a 4.x/5.x bump goes through a tested PR).
+fastapi==0.137.2
+uvicorn[standard]==0.49.0
+paramiko==3.5.1
+httpx==0.28.1

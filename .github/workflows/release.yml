@@ -1,0 +1,13 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@10ec01bde0ddd25813619af1196e20497a3c1110
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    with:
+      app_name: simple-network-dashboard
