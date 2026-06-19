@@ -24,9 +24,13 @@ sudo apt install prometheus-node-exporter
 ```
 
 **On the server that will host the dashboard (requires Python 3.10+):**
+
+1. Download the latest release tarball (`simple-network-dashboard-vX.Y.Z.tar.gz`) from the [Releases](https://github.com/JDE-Projects/Simple-Network-Dashboard/releases) page.
+2. Optionally [verify the download](#verify-this-download-optional).
+3. Extract and install:
 ```bash
-git clone https://github.com/JDE-Projects/Simple-Network-Dashboard.git
-cd Simple-Network-Dashboard
+tar -xzf simple-network-dashboard-vX.Y.Z.tar.gz
+cd simple-network-dashboard-vX.Y.Z
 sudo bash install.sh
 ```
 
@@ -39,11 +43,31 @@ The install script creates a dedicated `snd` service account with no login shell
 sudo ufw allow 3000/tcp
 ```
 
-**To update to a newer version:**
+### Verify this download (optional)
+
+Check the SHA-256 checksum:
 ```bash
-git pull
+sha256sum -c simple-network-dashboard-vX.Y.Z.tar.gz.sha256
+```
+
+Check the build attestation (requires the [GitHub CLI](https://cli.github.com/)):
+```bash
+gh attestation verify simple-network-dashboard-vX.Y.Z.tar.gz \
+  --repo JDE-Projects/Simple-Network-Dashboard \
+  --signer-repo JDE-Projects/Build-Tools
+```
+
+This proves the tarball was packaged by the published GitHub Actions pipeline from this public source, not on a personal machine. The `--signer-repo` flag is required because the workflow lives in a separate repository.
+
+**To update to a newer version:**
+
+Download the new release tarball, extract it, and re-run the installer:
+```bash
+tar -xzf simple-network-dashboard-vX.Y.Z.tar.gz
+cd simple-network-dashboard-vX.Y.Z
 sudo bash install.sh
 ```
+The install script stops the running service, refreshes the app files, and restarts it.
 
 ## Using it
 1. Click **Add Device** and enter the display name, IP address, SSH username, and Node Exporter port (default 9100).
@@ -51,6 +75,17 @@ sudo bash install.sh
 3. To manage a device via SSH, enter the password for that device and click **Connect**.
 4. Use the **Command Library** to save, pin, and reuse commands per device.
 5. Pinned commands appear as quick-run buttons directly on the device card.
+
+## Uninstall
+
+Run the uninstaller from the extracted release folder or from an installed system:
+```bash
+sudo bash uninstall.sh
+# or, on an installed system:
+sudo bash /opt/simple-network-dashboard/uninstall.sh
+```
+
+The script removes the systemd service, the `/opt/simple-network-dashboard` directory (including the venv), and the `snd` service account. Before removing anything it offers to back up `devices.json` and `known_hosts`, and asks for confirmation. Pass `--yes` for non-interactive runs (backs up config and proceeds without prompting).
 
 ## Security and privacy
 - SSH passwords are never written to disk. They are held in server memory only while a session is active and wiped immediately on disconnect.
