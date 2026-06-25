@@ -1,8 +1,10 @@
 # Pinned runtime dependencies for Simple Network Dashboard.
 # Exact == pins so every install resolves the same set. Dependabot opens
-# review-PRs when newer releases appear (paramiko is held at the 3.x line that
-# the SSH code was written against; a 4.x/5.x bump goes through a tested PR).
+# review-PRs when newer releases appear; 4.x/5.x major bumps go through a
+# tested PR before merging. paramiko is on the 5.x line, matching the sibling
+# SSH/SFTP tools; the 3.x -> 5.x bump was live-tested against a real device
+# and on the Pi deployment.
 fastapi==0.138.0
 uvicorn[standard]==0.49.0
-paramiko==3.5.1
+paramiko==5.0.0
 httpx==0.28.1
