@@ -24,7 +24,7 @@ from ssh_manager import SSHManager
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
 
 APP_NAME    = "Simple Network Dashboard"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
 
