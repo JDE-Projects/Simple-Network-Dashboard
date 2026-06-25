@@ -4,5 +4,5 @@
 # the SSH code was written against; a 4.x/5.x bump goes through a tested PR).
 fastapi==0.138.0
 uvicorn[standard]==0.49.0
-paramiko==3.5.1
+paramiko==5.0.0
 httpx==0.28.1
