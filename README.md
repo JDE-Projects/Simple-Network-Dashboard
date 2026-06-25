@@ -61,7 +61,7 @@ gh attestation verify simple-network-dashboard-vX.Y.Z.tar.gz \
 
 This proves the tarball was packaged by the published GitHub Actions pipeline from this public source, not on a personal machine. The `--signer-repo` flag is required because the workflow lives in a separate repository.
 
-**To update to a newer version:**
+### Updating
 
 Download the new release tarball, extract it, and re-run the installer:
 ```bash
@@ -70,6 +70,8 @@ cd simple-network-dashboard-vX.Y.Z
 sudo bash install.sh
 ```
 The install script stops the running service, refreshes the app files, and restarts it.
+
+The dashboard's bottom bar also has a **Check for updates** button that tells you when a newer release is available.
 
 ## Using it
 1. Click **Add Device** and enter the display name, IP address, SSH username, and Node Exporter port (default 9100).
