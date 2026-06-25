@@ -4,7 +4,7 @@ on:
     tags: ['v*']
 jobs:
   release:
-    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@10ec01bde0ddd25813619af1196e20497a3c1110
+    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@e12bd20ecdf575c7bdf241c5bc6e6a1c95ffdf61
     permissions:
       id-token: write
       attestations: write
