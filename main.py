@@ -8,6 +8,7 @@ and pushes real-time metrics + SSH events over a WebSocket.
 import asyncio
 import json
 import os
+import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -24,7 +25,7 @@ from ssh_manager import SSHManager
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
 
 APP_NAME    = "Simple Network Dashboard"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
 
@@ -390,6 +391,55 @@ async def toggle_debug(body: DebugIn):
         _debug_file.close()
         _debug_file = None
     return {"ok": True, "enabled": False}
+
+
+# ---------------------------------------------------------------------------
+# Update check
+# ---------------------------------------------------------------------------
+
+GITHUB_RELEASES_URL = (
+    "https://api.github.com/repos/JDE-Projects/Simple-Network-Dashboard/releases/latest"
+)
+
+
+def _version_tuple(v: str) -> tuple:
+    """Turn '1.2.3' into (1, 2, 3).  Non-numeric parts default to 0."""
+    parts = []
+    for p in v.split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _fetch_latest_version() -> str:
+    """Blocking call — must be run in an executor.  Returns the latest release version (no leading 'v')."""
+    req = urllib.request.Request(
+        GITHUB_RELEASES_URL,
+        headers={
+            "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["tag_name"].lstrip("vV")
+
+
+@app.get("/api/check-update")
+async def check_update():
+    try:
+        loop = asyncio.get_running_loop()
+        latest = await loop.run_in_executor(None, _fetch_latest_version)
+        return {
+            "ok": True,
+            "current": APP_VERSION,
+            "latest": latest,
+            "update_available": _version_tuple(latest) > _version_tuple(APP_VERSION),
+        }
+    except Exception:
+        return {"ok": False}
 
 
 # ---------------------------------------------------------------------------

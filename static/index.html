@@ -337,7 +337,10 @@
   .copy-item .ci-meta { font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; }
 
   /* ---- library footer ---- */
-  .lib-foot { display: flex; align-items: center; gap: 11px; padding: 9px 16px; border-top: 1px solid var(--border); flex: none; }
+  .lib-foot { display: flex; align-items: center; padding: 9px 16px; border-top: 1px solid var(--border); flex: none; position: relative; }
+  .lib-foot-left  { display: flex; align-items: center; gap: 11px; flex: none; }
+  .lib-foot-center { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; }
+  .lib-foot-right  { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
   .dbg-toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
   .dbg-toggle input { position: absolute; opacity: 0; pointer-events: none; }
   .dbg-track { width: 32px; height: 17px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border-2); position: relative; transition: all 0.14s; }
@@ -345,6 +348,20 @@
   .dbg-toggle input:checked + .dbg-track { background: var(--accent); border-color: var(--accent); }
   .dbg-toggle input:checked + .dbg-track::after { left: 16px; background: #042b27; }
   .dbg-label { font-size: 11.5px; color: var(--text-dim); }
+
+  #updateNotice { font-size: 11.5px; color: var(--text-dim); transition: opacity 0.5s ease; }
+  #updateNotice a { color: var(--accent); text-decoration: none; font-weight: 500; }
+  #updateNotice a:hover { text-decoration: underline; }
+  #verLabel { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
+  #updateBtn {
+    font-family: inherit; font-size: 11.5px; font-weight: 500; color: var(--text-dim);
+    background: transparent; border: 1px solid var(--border-2);
+    border-radius: var(--radius-sm); padding: 4px 10px;
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  }
+  #updateBtn:hover { border-color: var(--accent); color: var(--text); transform: translateY(-1px); }
+  #updateBtn:active { transform: translateY(0); }
+  #updateBtn:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
 
   /* ---- ws status dot (inside status button) ---- */
   .ws-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); display: inline-block; flex: none; margin-left: 5px; transition: background 0.3s; }
@@ -451,11 +468,20 @@
       <div class="lib-empty">Select a device to manage its commands.</div>
     </div>
     <div class="lib-foot">
-      <label class="dbg-toggle" title="Write a timestamped debug log next to the app on the server. Passwords are never written.">
-        <input type="checkbox" id="debugChk" />
-        <span class="dbg-track"></span>
-        <span class="dbg-label">Server debug log</span>
-      </label>
+      <div class="lib-foot-left">
+        <label class="dbg-toggle" title="Write a timestamped debug log next to the app on the server. Passwords are never written.">
+          <input type="checkbox" id="debugChk" />
+          <span class="dbg-track"></span>
+          <span class="dbg-label">Server debug log</span>
+        </label>
+      </div>
+      <div class="lib-foot-center">
+        <span id="updateNotice"></span>
+      </div>
+      <div class="lib-foot-right">
+        <span id="verLabel"></span>
+        <button id="updateBtn">Check for updates</button>
+      </div>
     </div>
   </div>
 </div>
@@ -597,6 +623,7 @@ function connectWS() {
     switch (msg.type) {
       case 'init':
         DEVICES = msg.devices || [];
+        if (msg.version) $('verLabel').textContent = 'v' + msg.version;
         $('debugChk').checked = !!msg.debug;
         // Restore SSH state from server (e.g. after page refresh)
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
@@ -1456,6 +1483,43 @@ $('clearBtn').onclick = () => {
 $('debugChk').addEventListener('change', () => {
   POST('/api/debug', {enabled: $('debugChk').checked});
 });
+
+/* ============================================================
+   Update check
+   ============================================================ */
+$('updateBtn').onclick = async () => {
+  const btn    = $('updateBtn');
+  const notice = $('updateNotice');
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  notice.style.opacity = '1';
+  notice.innerHTML = '';
+  try {
+    const r = await GET('/api/check-update');
+    if (r.ok && r.update_available) {
+      notice.innerHTML = 'Update available: <a href="https://github.com/JDE-Projects/Simple-Network-Dashboard/blob/main/README.md#updating" target="_blank" rel="noopener">v' + esc(r.latest) + '</a>';
+    } else if (r.ok) {
+      notice.textContent = 'No update available';
+      fadeNotice();
+    } else {
+      notice.textContent = "Couldn’t reach GitHub";
+      fadeNotice();
+    }
+  } catch (e) {
+    notice.textContent = "Couldn’t reach GitHub";
+    fadeNotice();
+  }
+  btn.disabled = false;
+  btn.textContent = 'Check for updates';
+};
+
+function fadeNotice() {
+  const notice = $('updateNotice');
+  setTimeout(() => {
+    notice.style.opacity = '0';
+    setTimeout(() => { notice.textContent = ''; notice.style.opacity = '1'; }, 500);
+  }, 5000);
+}
 
 /* ============================================================
    Boot
