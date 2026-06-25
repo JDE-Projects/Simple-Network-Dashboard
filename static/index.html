@@ -195,7 +195,9 @@
   .cmd-row input[type=text]:focus { outline: none; border-color: var(--accent); }
   .sudo-tog { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); cursor: pointer; user-select: none; border: 1px solid var(--border-2); border-radius: var(--radius-sm); padding: 0 9px; white-space: nowrap; }
   .sudo-tog input { accent-color: var(--accent); width: 13px; height: 13px; }
-  .bottom-row { display: flex; gap: 7px; justify-content: flex-end; }
+  .bottom-row { display: flex; gap: 7px; align-items: stretch; }
+  .bottom-row [data-disconnect] { margin-left: auto; }
+  .bottom-row [data-run], .bottom-row .stop-btn { min-width: 64px; justify-content: center; }
   .stop-btn { display: none; }
 
   /* ---- stats panel ---- */
@@ -932,8 +934,10 @@ function handleSSHStatus(id, state) {
 
 function cardRunning(card, running) {
   const stop  = card.querySelector('.stop-btn');
+  const run   = card.querySelector('[data-run]');
   const ctrls = card.querySelectorAll('.ssh-actions .btn:not(.stop-btn), .ssh-actions input');
   ctrls.forEach(b => { b.disabled = running; });
+  if (run)  run.style.display  = running ? 'none' : 'inline-flex';
   if (stop) stop.style.display = running ? 'inline-flex' : 'none';
 }
 
@@ -997,10 +1001,10 @@ function buildCard(d) {
       <div class="cmd-row">
         <input type="text" data-custom placeholder="Custom command…" />
         <label class="sudo-tog"><input type="checkbox" data-sudo />sudo</label>
-        <button class="btn tiny" data-run>Run</button>
-        <button class="btn danger tiny stop-btn" data-cancel>Stop</button>
       </div>
       <div class="bottom-row">
+        <button class="btn tiny" data-run>Run</button>
+        <button class="btn danger tiny stop-btn" data-cancel>Stop</button>
         <button class="btn danger ghost tiny" data-disconnect>Disconnect</button>
       </div>
     </div>`;
