@@ -30,6 +30,17 @@
     --purple:    #b48cff;
     --radius:    14px;
     --radius-sm: 9px;
+    --btn-text:  #042b27;
+  }
+
+  /* JDE Light Teal (opt-in via body.light) */
+  body.light {
+    --bg:#eef3f4; --bg-2:#e4ebed; --panel:#ffffff; --panel-2:#f5f9fa;
+    --border:#d3dee1; --border-2:#bcccd0;
+    --text:#16212c; --text-dim:#4f606d; --text-faint:#8593a0;
+    --accent:#178577; --accent-2:#0f6b5f; --glow:rgba(23,133,119,0.20);
+    --amber:#e0900a; --red:#cf3b50; --green:#1c9560; --blue:#2b6fd0; --purple:#6f48cf;
+    --btn-text:#ffffff;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -43,6 +54,12 @@
     background:
       radial-gradient(900px 500px at 12% -10%, rgba(77,214,193,0.09), transparent 60%),
       radial-gradient(800px 500px at 100% 0%, rgba(109,179,255,0.06), transparent 55%),
+      var(--bg);
+  }
+  body.light {
+    background:
+      radial-gradient(900px 500px at 12% -10%, rgba(23,133,119,0.08), transparent 60%),
+      radial-gradient(800px 500px at 100% 0%, rgba(43,111,208,0.06), transparent 55%),
       var(--bg);
   }
 
@@ -77,19 +94,30 @@
     display: inline-flex; align-items: center; gap: 7px;
     cursor: pointer; transition: all 0.15s; white-space: nowrap;
   }
-  .btn:hover { border-color: var(--accent); color: #fff; transform: translateY(-1px); }
+  .btn:hover { border-color: var(--accent); color: var(--text); transform: translateY(-1px); }
   .btn:active { transform: translateY(0); }
   .btn svg { width: 14px; height: 14px; flex: none; }
   .btn.primary {
     background: linear-gradient(145deg, var(--accent), var(--accent-2));
-    color: #042b27; border: none; font-weight: 600;
+    color: var(--btn-text); border: none; font-weight: 600;
     box-shadow: 0 4px 16px var(--glow);
   }
-  .btn.primary:hover { filter: brightness(1.08); color: #042b27; }
+  .btn.primary:hover { filter: brightness(1.08); color: var(--btn-text); }
   .btn.ghost  { background: transparent; }
   .btn.danger:hover { border-color: var(--red); color: var(--red); }
   .btn.tiny   { padding: 5px 10px; font-size: 12px; }
   .btn:disabled { opacity: 0.38; cursor: not-allowed; transform: none; }
+
+  .theme-btn {
+    background:transparent; border:1px solid var(--border-2); border-radius:var(--radius-sm);
+    width:36px; height:36px; display:flex; align-items:center; justify-content:center;
+    cursor:pointer; color:var(--text-dim); transition:.15s; flex:0 0 auto;
+  }
+  .theme-btn:hover { border-color:var(--accent); color:var(--accent); transform:translateY(-1px); }
+  .theme-btn svg { width:18px; height:18px; }
+  .icon-moon { display:none; }
+  body.light .icon-sun { display:none; }
+  body.light .icon-moon { display:block; }
 
   /* ---- shared panel shell ---- */
   .panel {
@@ -333,6 +361,9 @@
 </style>
 </head>
 <body>
+<script>
+  try { if (localStorage.getItem("snd-theme") === "light") document.body.classList.add("light"); } catch(e){}
+</script>
 <div class="app">
 
   <!-- top bar -->
@@ -350,6 +381,15 @@
       </div>
     </div>
     <div class="top-actions">
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+        </svg>
+      </button>
       <button class="btn ghost tiny" id="verBtn"><span id="verText">Status</span><span class="ws-dot err" id="wsChip"></span></button>
     </div>
   </div>
@@ -495,6 +535,21 @@
 </div>
 
 <script>
+/* ============================================================
+   Theme
+   ============================================================ */
+let currentTheme = "dark";
+function applyTheme(theme){
+  currentTheme = (theme === "light") ? "light" : "dark";
+  document.body.classList.toggle("light", currentTheme === "light");
+}
+function toggleTheme(){
+  const next = currentTheme === "light" ? "dark" : "light";
+  applyTheme(next);
+  try { localStorage.setItem("snd-theme", next); } catch(e){}
+}
+applyTheme(localStorage.getItem("snd-theme") || "dark");
+
 /* ============================================================
    State
    ============================================================ */
