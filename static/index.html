@@ -372,6 +372,19 @@
     50%      { opacity:0.25; box-shadow: 0 0 0 4px rgba(77,214,193,0);   }
   }
 
+  /* ---- idle warning modal ---- */
+  .idle-overlay { position: fixed; inset: 0; background: rgba(4,7,12,0.82); display: none; place-items: center; z-index: 60; }
+  .idle-overlay.show { display: grid; }
+  .idle-modal { width: 380px; max-width: 92vw; background: var(--panel); border: 1px solid var(--border-2); border-radius: var(--radius); padding: 22px; box-shadow: 0 24px 60px rgba(0,0,0,0.6); animation: rise 0.18s ease; text-align: center; }
+  .idle-modal h3 { font-size: 16px; margin-bottom: 10px; }
+  .idle-modal .idle-text { font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
+  .idle-modal .idle-count { font-size: 28px; font-family: 'JetBrains Mono', monospace; font-weight: 600; color: var(--amber); margin-bottom: 16px; }
+  .idle-modal .idle-actions { display: flex; gap: 9px; justify-content: center; }
+
+  /* ---- in-use banner ---- */
+  .in-use-msg { display: none; margin-top: 11px; font-size: 12px; color: var(--amber); }
+  .in-use-msg.show { display: block; }
+
   /* scrollbars */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 6px; }
@@ -562,6 +575,19 @@
   </div>
 </div>
 
+<!-- idle warning modal -->
+<div class="idle-overlay" id="idleOverlay">
+  <div class="idle-modal">
+    <h3 id="idleTitle">Idle warning</h3>
+    <div class="idle-text" id="idleText">Disconnecting in</div>
+    <div class="idle-count" id="idleCount"></div>
+    <div class="idle-actions" id="idleActions">
+      <button class="btn primary" id="idleStay">Stay connected</button>
+      <button class="btn danger" id="idleDisconnect">Disconnect now</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ============================================================
    Theme
@@ -579,11 +605,21 @@ function toggleTheme(){
 applyTheme(localStorage.getItem("snd-theme") || "dark");
 
 /* ============================================================
+   Browser identity
+   ============================================================ */
+let BROWSER_ID = '';
+try {
+  BROWSER_ID = localStorage.getItem('snd_browser_id') || '';
+  if (!BROWSER_ID) { BROWSER_ID = crypto.randomUUID(); localStorage.setItem('snd_browser_id', BROWSER_ID); }
+} catch(e) { BROWSER_ID = crypto.randomUUID(); }
+
+/* ============================================================
    State
    ============================================================ */
 let DEVICES   = [];
 let METRICS   = {};          // device_id -> metrics dict (no _raw fields)
 let SSH_STATE = {};          // device_id -> 'connected'|'running'|'idle'
+let SSH_LOCKS = {};          // device_id -> true (locked by any browser)
 let currentDeviceId = null;
 let activeTabId     = null;
 const openTabs = {};
@@ -605,7 +641,7 @@ let ws = null;
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?bid=${encodeURIComponent(BROWSER_ID)}`);
 
   ws.onopen = () => {
     $('wsChip').className = 'ws-dot ok';
@@ -627,6 +663,9 @@ function connectWS() {
         $('debugChk').checked = !!msg.debug;
         // Restore SSH state from server (e.g. after page refresh)
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
+        // Track which devices are locked (in use by any browser)
+        SSH_LOCKS = {};
+        (msg.ssh_locked || []).forEach(id => { SSH_LOCKS[id] = true; });
         updateDisconnectAllBtn();
         renderDevices();
         renderStats();
@@ -643,6 +682,17 @@ function connectWS() {
       case 'ssh_status':
         handleSSHStatus(msg.device_id, msg.state);
         break;
+      case 'ssh_lock':
+        if (msg.locked) SSH_LOCKS[msg.device_id] = true;
+        else delete SSH_LOCKS[msg.device_id];
+        updateLockUI(msg.device_id);
+        break;
+      case 'ssh_idle_warning':
+        showIdleWarning(msg.seconds || 30);
+        break;
+      case 'ssh_idle_timeout':
+        showIdleTimeout();
+        break;
       case 'devices':
         DEVICES = msg.devices || [];
         renderDevices();
@@ -656,8 +706,10 @@ function connectWS() {
 /* ============================================================
    API helpers
    ============================================================ */
-async function api(method, path, body) {
-  const opts = { method, headers: {'Content-Type': 'application/json'} };
+async function api(method, path, body, extraHeaders) {
+  const headers = {'Content-Type': 'application/json'};
+  if (extraHeaders) Object.assign(headers, extraHeaders);
+  const opts = { method, headers };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const r = await fetch(path, opts);
   return r.json();
@@ -666,6 +718,11 @@ const GET    = path       => api('GET',    path);
 const POST   = (path, b)  => api('POST',   path, b);
 const PUT    = (path, b)  => api('PUT',    path, b);
 const DELETE = path       => api('DELETE', path);
+
+// SSH endpoints include the browser id header
+function sshPost(path, body) {
+  return api('POST', path, body, {'X-Browser-Id': BROWSER_ID});
+}
 
 /* ============================================================
    Stats helpers
@@ -911,7 +968,7 @@ function closeTab(id) {
   if (wasConn) {
     const name = (dev(id) || {}).name || 'this device';
     askConfirm('Close tab', `Close this tab and disconnect from ${name}?`, async () => {
-      await POST('/api/ssh/disconnect', {device_id: id});
+      await sshPost('/api/ssh/disconnect', {device_id: id});
       doClose();
     }, 'Disconnect & close', 'Cancel');
   } else {
@@ -979,13 +1036,14 @@ function renderDevices() {
     return;
   }
   DEVICES.forEach(d => list.appendChild(buildCard(d)));
-  // Apply current SSH / metrics state
+  // Apply current SSH / metrics / lock state
   DEVICES.forEach(d => {
     const card = document.querySelector(`[data-card="${d.id}"]`);
     if (!card) return;
     if (SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') card.classList.add('ssh-on');
     const sDot = card.querySelector('.dot.ssh');
     if (sDot && SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') sDot.classList.add('ssh-connected');
+    updateLockUI(d.id);
   });
   applySelection();
 }
@@ -1023,6 +1081,7 @@ function buildCard(d) {
       <button class="btn primary tiny" data-connect>Connect</button>
     </div>
     <div class="cerr" data-cerr></div>
+    <div class="in-use-msg" data-inuse>In use by another session.</div>
     <div class="ssh-actions">
       <div class="pins" data-pins></div>
       <div class="cmd-row">
@@ -1092,9 +1151,10 @@ function wireCard(card, d) {
   async function tryConnect() {
     err.classList.remove('show'); err.textContent = '';
     connectBtn.disabled = true; connectBtn.textContent = 'Connecting…';
-    const r = await POST('/api/ssh/connect', {device_id: id, password: pwInput.value});
+    const r = await sshPost('/api/ssh/connect', {device_id: id, password: pwInput.value});
     connectBtn.disabled = false; connectBtn.textContent = 'Connect';
     if (r.ok) { pwInput.value = ''; setActiveTab(id); return; }
+    if (r.in_use) { err.textContent = r.error || 'This device is in use by another session.'; err.classList.add('show'); return; }
     if (r.host_key_unknown) {
       askConfirm('Unknown host key',
         `First connection to ${r.host}.\n\nType: ${r.key_type}\nFingerprint: ${r.fingerprint}\n\nAccept and remember this host?`,
@@ -1121,11 +1181,11 @@ function wireCard(card, d) {
   connectBtn.onclick = e => { e.stopPropagation(); tryConnect(); };
   pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') connectBtn.click(); });
 
-  card.querySelector('[data-cancel]').onclick     = e => { e.stopPropagation(); POST('/api/ssh/cancel', {device_id: id}); };
+  card.querySelector('[data-cancel]').onclick     = e => { e.stopPropagation(); sshPost('/api/ssh/cancel', {device_id: id}); };
   card.querySelector('[data-disconnect]').onclick = e => {
     e.stopPropagation();
     askConfirm('Disconnect', `Disconnect from ${d.name}?`, async () => {
-      await POST('/api/ssh/disconnect', {device_id: id});
+      await sshPost('/api/ssh/disconnect', {device_id: id});
       if (openTabs[id]) {
         askConfirm('Console tab', `Keep the console history for ${d.name} open?`, () => {
           delete openTabs[id];
@@ -1150,7 +1210,7 @@ function wireCard(card, d) {
     const cmd   = input.value.trim();
     if (!cmd) return;
     ensureTab(id); setActiveTab(id);
-    POST('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command'});
+    sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command'});
     input.value = '';
     maybeOfferSave(id, cmd, sudo);
   };
@@ -1185,6 +1245,8 @@ function renderLibrary() {
   $('libTitle').innerHTML = `Command Library <span class="dev">· ${esc(d.name)}</span>`;
   const cmds   = d.commands || [];
   const isConn = !!(SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle');
+  const locked = isLockedByOther(d.id);
+  const runTitle = isConn ? 'Run' : (locked ? 'In use by another session' : 'Connect first');
   if (!cmds.length) {
     $('libBody').innerHTML = `<div class="lib-empty">No commands saved for ${esc(d.name)}. Click "Add Command".</div>`;
     return;
@@ -1204,7 +1266,7 @@ function renderLibrary() {
         ${c.sudo    ? '<span class="cc-badge sudo">sudo</span>'    : ''}
         ${c.confirm ? '<span class="cc-badge confirm">confirm</span>' : ''}
         <div class="cc-actions">
-          <button class="run"  title="${isConn?'Run':'Connect first'}" ${isConn?'':'disabled'}>
+          <button class="run"  title="${runTitle}" ${isConn?'':'disabled'}>
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
           </button>
           <button class="edit" title="Edit">
@@ -1236,7 +1298,7 @@ function runLibCmd(deviceId, index) {
   const c = (d.commands || [])[index]; if (!c) return;
   const go = () => {
     ensureTab(deviceId); setActiveTab(deviceId);
-    POST('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name});
+    sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name});
   };
   if (c.confirm) askConfirm(c.name, c.confirm, go);
   else go();
@@ -1519,6 +1581,91 @@ function fadeNotice() {
     notice.style.opacity = '0';
     setTimeout(() => { notice.textContent = ''; notice.style.opacity = '1'; }, 500);
   }, 5000);
+}
+
+/* ============================================================
+   Lock visibility
+   ============================================================ */
+function isLockedByOther(deviceId) {
+  // Locked by someone AND this browser does not own it
+  return !!SSH_LOCKS[deviceId] && !(SSH_STATE[deviceId] && SSH_STATE[deviceId] !== 'idle');
+}
+
+function updateLockUI(deviceId) {
+  const card = document.querySelector(`[data-card="${deviceId}"]`);
+  if (!card) return;
+  const locked = isLockedByOther(deviceId);
+  const inUse  = card.querySelector('[data-inuse]');
+  const connectBtn = card.querySelector('[data-connect]');
+  if (inUse) inUse.classList.toggle('show', locked);
+  if (connectBtn) connectBtn.disabled = locked;
+  // Also disable library run buttons for this device if locked
+  if (deviceId === currentDeviceId) renderLibrary();
+}
+
+/* ============================================================
+   Idle warning / timeout
+   ============================================================ */
+let _idleTimer = null;
+let _idleCount = 0;
+
+function showIdleWarning(seconds) {
+  clearIdleTimer();
+  _idleCount = seconds;
+  $('idleTitle').textContent = 'Idle warning';
+  $('idleText').textContent = 'Disconnecting in';
+  $('idleText').style.display = '';
+  $('idleCount').textContent = _idleCount;
+  $('idleCount').style.display = '';
+  $('idleActions').innerHTML = '';
+  const stayBtn = document.createElement('button');
+  stayBtn.className = 'btn primary';
+  stayBtn.textContent = 'Stay connected';
+  stayBtn.onclick = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'stay_connected'}));
+    clearIdleTimer();
+    $('idleOverlay').classList.remove('show');
+  };
+  const discBtn = document.createElement('button');
+  discBtn.className = 'btn danger';
+  discBtn.textContent = 'Disconnect now';
+  discBtn.onclick = () => {
+    clearIdleTimer();
+    $('idleOverlay').classList.remove('show');
+    // Disconnect all devices this browser owns
+    const owned = Object.keys(SSH_STATE).filter(id => SSH_STATE[id] && SSH_STATE[id] !== 'idle');
+    owned.forEach(id => sshPost('/api/ssh/disconnect', {device_id: id}));
+  };
+  $('idleActions').appendChild(stayBtn);
+  $('idleActions').appendChild(discBtn);
+  $('idleOverlay').classList.add('show');
+  _idleTimer = setInterval(() => {
+    _idleCount--;
+    $('idleCount').textContent = _idleCount;
+    if (_idleCount <= 0) {
+      clearIdleTimer();
+      // Leave the popup open; server will send ssh_idle_timeout
+    }
+  }, 1000);
+}
+
+function showIdleTimeout() {
+  clearIdleTimer();
+  $('idleTitle').textContent = 'Session timed out';
+  $('idleText').textContent = 'Disconnected due to idle timeout.';
+  $('idleText').style.display = '';
+  $('idleCount').style.display = 'none';
+  $('idleActions').innerHTML = '';
+  const okBtn = document.createElement('button');
+  okBtn.className = 'btn primary';
+  okBtn.textContent = 'OK';
+  okBtn.onclick = () => { $('idleOverlay').classList.remove('show'); };
+  $('idleActions').appendChild(okBtn);
+  $('idleOverlay').classList.add('show');
+}
+
+function clearIdleTimer() {
+  if (_idleTimer) { clearInterval(_idleTimer); _idleTimer = null; }
 }
 
 /* ============================================================

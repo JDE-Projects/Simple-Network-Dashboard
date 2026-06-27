@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -37,13 +37,23 @@ DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
 class _WSManager:
     def __init__(self):
         self._connections: list[WebSocket] = []
+        self._owners: dict[WebSocket, str] = {}  # ws -> owner (browser id)
 
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws: WebSocket, owner_id: str = None):
         await ws.accept()
         self._connections.append(ws)
+        if owner_id:
+            self._owners[ws] = owner_id
 
     def drop(self, ws: WebSocket):
         self._connections = [c for c in self._connections if c is not ws]
+        self._owners.pop(ws, None)
+
+    def owner_of(self, ws: WebSocket) -> str:
+        return self._owners.get(ws)
+
+    def owner_count(self, owner_id: str) -> int:
+        return sum(1 for o in self._owners.values() if o == owner_id)
 
     async def broadcast(self, msg: dict):
         if not self._connections:
@@ -51,6 +61,21 @@ class _WSManager:
         data = json.dumps(msg)
         dead = []
         for ws in self._connections:
+            try:
+                await ws.send_text(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.drop(ws)
+
+    async def send_to_owner(self, owner_id: str, msg: dict):
+        if not self._connections or not owner_id:
+            return
+        data = json.dumps(msg)
+        dead = []
+        for ws in self._connections:
+            if self._owners.get(ws) != owner_id:
+                continue
             try:
                 await ws.send_text(data)
             except Exception:
@@ -81,7 +106,9 @@ def _debug_write(text: str):
 
 
 async def _broadcast(msg: dict):
-    """Broadcast wrapper that also writes SSH events to the debug log."""
+    """Broadcast wrapper that also writes SSH events to the debug log.
+    If msg contains a private '_owner' key, route to that owner only;
+    otherwise broadcast to everyone.  The key is popped before sending."""
     if _debug_file is not None:
         t   = msg.get("type", "")
         did = msg.get("device_id", "")
@@ -89,7 +116,11 @@ async def _broadcast(msg: dict):
             _debug_write(f"SSH [{did}] {msg.get('level', 'out').upper()}: {msg.get('text', '')}")
         elif t == "ssh_status":
             _debug_write(f"SSH [{did}] → {msg.get('state', '')}")
-    await ws_mgr.broadcast(msg)
+    owner = msg.pop("_owner", None)
+    if owner:
+        await ws_mgr.send_to_owner(owner, msg)
+    else:
+        await ws_mgr.broadcast(msg)
 
 
 ssh_mgr = SSHManager(_broadcast)
@@ -167,6 +198,12 @@ async def _metrics_loop():
         await asyncio.sleep(METRICS_INTERVAL)
 
 
+async def _idle_loop():
+    while True:
+        ssh_mgr.tick_idle()
+        await asyncio.sleep(2)
+
+
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
@@ -176,9 +213,11 @@ async def lifespan(app: FastAPI):
     global _devices_cache
     _devices_cache = _load()
     ssh_mgr.set_loop(asyncio.get_running_loop())
-    task = asyncio.create_task(_metrics_loop())
+    metrics_task = asyncio.create_task(_metrics_loop())
+    idle_task    = asyncio.create_task(_idle_loop())
     yield
-    task.cancel()
+    metrics_task.cancel()
+    idle_task.cancel()
     ssh_mgr.disconnect_all()
     if _debug_file is not None:
         _debug_write("=== Debug log closed (server shutdown) ===")
@@ -200,13 +239,17 @@ async def root():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    await ws_mgr.connect(ws)
+    owner = ws.query_params.get("bid") or ""
+    await ws_mgr.connect(ws, owner)
     try:
         # Push current state so a fresh page load (or reconnect) is in sync
         devices = _load()
+        # ssh_connected = devices this owner currently owns
+        own_connected = [did for did, s in ssh_mgr.sessions.items() if s.owner == owner]
         await ws.send_text(json.dumps({
             "type": "init", "devices": devices, "version": APP_VERSION,
-            "ssh_connected": list(ssh_mgr.sessions.keys()),
+            "ssh_connected": own_connected,
+            "ssh_locked": ssh_mgr.locked_device_ids(),
             "debug": _debug_file is not None,
         }))
         # Push cached metrics so the stats panel fills immediately
@@ -222,10 +265,14 @@ async def ws_endpoint(ws: WebSocket):
             if msg.get("type") == "select_device":
                 global _selected_device_id
                 _selected_device_id = msg.get("id")
+            elif msg.get("type") == "stay_connected":
+                ssh_mgr.stay_connected(owner)
     except WebSocketDisconnect:
         pass
     finally:
         ws_mgr.drop(ws)
+        if owner and ws_mgr.owner_count(owner) == 0:
+            ssh_mgr.release_owner(owner)
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +354,9 @@ class ConnectIn(BaseModel):
 
 
 @app.post("/api/ssh/connect")
-async def ssh_connect(body: ConnectIn):
+async def ssh_connect(body: ConnectIn, x_browser_id: str = Header(None)):
+    if not x_browser_id:
+        return {"ok": False, "error": "Missing browser id."}
     devices = _load()
     device  = next((d for d in devices if d["id"] == body.device_id), None)
     if not device:
@@ -315,7 +364,8 @@ async def ssh_connect(body: ConnectIn):
     if not body.password:
         return {"ok": False, "error": "Password is required."}
     loop   = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, ssh_mgr.connect, body.device_id, body.password, device)
+    result = await loop.run_in_executor(
+        None, ssh_mgr.connect, body.device_id, body.password, device, x_browser_id)
     return result
 
 
@@ -324,8 +374,10 @@ class DeviceIdIn(BaseModel):
 
 
 @app.post("/api/ssh/disconnect")
-async def ssh_disconnect(body: DeviceIdIn):
-    return ssh_mgr.disconnect(body.device_id)
+async def ssh_disconnect(body: DeviceIdIn, x_browser_id: str = Header(None)):
+    if not x_browser_id:
+        return {"ok": False, "error": "Missing browser id."}
+    return ssh_mgr.disconnect(body.device_id, x_browser_id)
 
 
 @app.post("/api/ssh/disconnect_all")
@@ -341,13 +393,17 @@ class RunIn(BaseModel):
 
 
 @app.post("/api/ssh/run")
-async def ssh_run(body: RunIn):
-    return ssh_mgr.run_command(body.device_id, body.command, body.use_sudo, body.label)
+async def ssh_run(body: RunIn, x_browser_id: str = Header(None)):
+    if not x_browser_id:
+        return {"ok": False, "error": "Missing browser id."}
+    return ssh_mgr.run_command(body.device_id, body.command, body.use_sudo, body.label, x_browser_id)
 
 
 @app.post("/api/ssh/cancel")
-async def ssh_cancel(body: DeviceIdIn):
-    return ssh_mgr.cancel(body.device_id)
+async def ssh_cancel(body: DeviceIdIn, x_browser_id: str = Header(None)):
+    if not x_browser_id:
+        return {"ok": False, "error": "Missing browser id."}
+    return ssh_mgr.cancel(body.device_id, x_browser_id)
 
 
 class TrustIn(BaseModel):
