@@ -9,8 +9,12 @@ import hashlib
 import os
 import re
 import threading
+import time
 
 import paramiko
+
+IDLE_WARN_SECONDS    = 270   # send warning after 4.5 minutes idle
+IDLE_TIMEOUT_SECONDS = 300   # disconnect after 5 minutes idle
 
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
 KNOWN_HOSTS_FILE = os.path.join(BASE_DIR, "known_hosts")
@@ -65,13 +69,15 @@ class _TofuPolicy(paramiko.MissingHostKeyPolicy):
 
 
 class _Session:
-    def __init__(self, device: dict, password: str):
-        self.device    = device
-        self.password  = password   # memory-only
-        self.client    = None
-        self.busy      = False
-        self.channel   = None
-        self.cancelled = False
+    def __init__(self, device: dict, password: str, owner: str = None):
+        self.device      = device
+        self.password    = password   # memory-only
+        self.client      = None
+        self.busy        = False
+        self.channel     = None
+        self.cancelled   = False
+        self.owner       = owner
+        self.last_active = time.monotonic()
 
     def connect(self):
         c = paramiko.SSHClient()
@@ -122,6 +128,7 @@ class SSHManager:
         self._loop      = None          # set via set_loop() after uvicorn starts
         self.sessions: dict[str, _Session] = {}
         self._pending: dict[str, tuple]    = {}  # device_id -> (host, key)
+        self._owner_activity: dict[str, dict] = {}  # owner -> {"last_active": float, "warned": bool}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
@@ -132,11 +139,29 @@ class SSHManager:
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(self._broadcast(msg), self._loop)
 
-    def _log(self, device_id: str, text: str, level: str = "out"):
-        self._push({"type": "ssh_log", "device_id": device_id, "text": text, "level": level})
+    def _log(self, device_id: str, text: str, level: str = "out", owner: str = None):
+        msg = {"type": "ssh_log", "device_id": device_id, "text": text, "level": level}
+        if owner is None:
+            sess = self.sessions.get(device_id)
+            if sess:
+                owner = sess.owner
+        if owner:
+            msg["_owner"] = owner
+        self._push(msg)
 
-    def _status(self, device_id: str, state: str):
-        self._push({"type": "ssh_status", "device_id": device_id, "state": state})
+    def _status(self, device_id: str, state: str, owner: str = None):
+        msg = {"type": "ssh_status", "device_id": device_id, "state": state}
+        if owner is None:
+            sess = self.sessions.get(device_id)
+            if sess:
+                owner = sess.owner
+        if owner:
+            msg["_owner"] = owner
+        self._push(msg)
+
+    def _lock(self, device_id: str, locked: bool):
+        """Broadcast lock signal to everyone (no _owner key)."""
+        self._push({"type": "ssh_lock", "device_id": device_id, "locked": locked})
 
     # ---- host-key helpers -------------------------------------------------
 
@@ -174,12 +199,16 @@ class SSHManager:
 
     # ---- connection -------------------------------------------------------
 
-    def connect(self, device_id: str, password: str, device: dict) -> dict:
+    def connect(self, device_id: str, password: str, device: dict, owner: str) -> dict:
         """Synchronous — run via run_in_executor from the async route handler."""
-        if device_id in self.sessions:
+        existing = self.sessions.get(device_id)
+        if existing:
+            if existing.owner != owner:
+                return {"ok": False, "in_use": True,
+                        "error": "This device is in use by another session."}
             self._close(device_id)
 
-        sess = _Session(device, password)
+        sess = _Session(device, password, owner)
         try:
             sess.connect()
         except UnknownHostKey as e:
@@ -204,30 +233,44 @@ class SSHManager:
 
         self._pending.pop(device_id, None)
         self.sessions[device_id] = sess
-        self._log(device_id, f"Connected to {device['host']} as {device['username']}.", "ok")
-        self._status(device_id, "connected")
+        now = time.monotonic()
+        self._owner_activity[owner] = {"last_active": now, "warned": False}
+        self._log(device_id, f"Connected to {device['host']} as {device['username']}.", "ok", owner)
+        self._status(device_id, "connected", owner)
+        self._lock(device_id, True)
         return {"ok": True}
 
     def _close(self, device_id: str):
         sess = self.sessions.pop(device_id, None)
+        owner = sess.owner if sess else None
         if sess:
             sess.close()
-            self._log(device_id, "Disconnected. Password cleared from memory.", "muted")
-        self._status(device_id, "idle")
+            self._log(device_id, "Disconnected. Password cleared from memory.", "muted", owner)
+        self._status(device_id, "idle", owner)
+        self._lock(device_id, False)
 
-    def disconnect(self, device_id: str) -> dict:
+    def disconnect(self, device_id: str, owner: str = None) -> dict:
+        if owner is not None:
+            sess = self.sessions.get(device_id)
+            if sess and sess.owner != owner:
+                return {"ok": False, "not_owner": True,
+                        "error": "This device is in use by another session."}
         self._close(device_id)
         return {"ok": True}
 
     def disconnect_all(self) -> dict:
         for did in list(self.sessions):
             self._close(did)
+        self._owner_activity.clear()
         return {"ok": True}
 
-    def cancel(self, device_id: str) -> dict:
+    def cancel(self, device_id: str, owner: str = None) -> dict:
         sess = self.sessions.get(device_id)
         if not sess or not sess.channel:
             return {"ok": False}
+        if owner is not None and sess.owner != owner:
+            return {"ok": False, "not_owner": True,
+                    "error": "This device is in use by another session."}
         sess.cancelled = True
         try:
             sess.channel.close()
@@ -237,10 +280,14 @@ class SSHManager:
 
     # ---- command execution ------------------------------------------------
 
-    def run_command(self, device_id: str, raw_cmd: str, use_sudo: bool, label: str = None) -> dict:
+    def run_command(self, device_id: str, raw_cmd: str, use_sudo: bool,
+                    label: str = None, owner: str = None) -> dict:
         sess = self.sessions.get(device_id)
         if not sess:
             return {"ok": False, "error": "Not connected."}
+        if owner is not None and sess.owner != owner:
+            return {"ok": False, "not_owner": True,
+                    "error": "This device is in use by another session."}
         raw_cmd = (raw_cmd or "").strip()
         if not raw_cmd:
             return {"ok": False, "error": "Empty command."}
@@ -329,4 +376,60 @@ class SSHManager:
             if sess:
                 sess.busy    = False
                 sess.channel = None
+                # Reset idle clock after command finishes
+                owner = sess.owner
+                if owner and owner in self._owner_activity:
+                    self._owner_activity[owner]["last_active"] = time.monotonic()
+                    self._owner_activity[owner]["warned"] = False
             self._status(device_id, "connected")
+
+    # ---- idle timeout --------------------------------------------------------
+
+    def tick_idle(self):
+        """Called from the asyncio idle loop every 2 s.  Warns and disconnects idle owners."""
+        now = time.monotonic()
+        for owner in list(self._owner_activity):
+            # Gather this owner's sessions
+            owned = [(did, s) for did, s in self.sessions.items() if s.owner == owner]
+            if not owned:
+                self._owner_activity.pop(owner, None)
+                continue
+
+            # If any session is busy, treat the owner as active
+            if any(s.busy for _, s in owned):
+                self._owner_activity[owner]["last_active"] = now
+                self._owner_activity[owner]["warned"] = False
+                continue
+
+            info    = self._owner_activity[owner]
+            idle    = now - info["last_active"]
+
+            if idle >= IDLE_TIMEOUT_SECONDS:
+                # Disconnect all sessions for this owner
+                for did, s in owned:
+                    self._log(did, "Disconnected due to idle timeout.", "warn", owner)
+                    self._close(did)
+                self._push({"type": "ssh_idle_timeout", "_owner": owner})
+                self._owner_activity.pop(owner, None)
+            elif idle >= IDLE_WARN_SECONDS and not info["warned"]:
+                remaining = int(IDLE_TIMEOUT_SECONDS - idle)
+                self._push({"type": "ssh_idle_warning", "seconds": remaining, "_owner": owner})
+                info["warned"] = True
+
+    def stay_connected(self, owner: str) -> dict:
+        """Reset idle clock for a browser that clicked 'Stay connected'."""
+        info = self._owner_activity.get(owner)
+        if info:
+            info["last_active"] = time.monotonic()
+            info["warned"] = False
+        return {"ok": True}
+
+    def release_owner(self, owner: str):
+        """Close all sessions owned by a browser (used when its last WS tab closes)."""
+        for did in [d for d, s in self.sessions.items() if s.owner == owner]:
+            self._close(did)
+        self._owner_activity.pop(owner, None)
+
+    def locked_device_ids(self) -> list:
+        """Return list of device IDs that currently have an active SSH session."""
+        return list(self.sessions.keys())
