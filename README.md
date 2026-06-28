@@ -4,6 +4,12 @@ Built by [JDE-Projects](https://github.com/JDE-Projects).
 
 If you enjoyed this project and would like to buy me a coffee, check out my [Ko-fi](https://ko-fi.com/jdeprojects).
 
+## Preview
+<p align="center">
+  <img src="screenshots/network-dashboard-light-dark.png" width="900" alt="Simple Network Dashboard in dark and light themes">
+  <br><em>Dark and light themes</em>
+</p>
+
 ## Highlights
 - Live device stats (CPU, RAM, disk, temperature, network) polled every 10 seconds — no credentials needed for metrics
 - SSH management per device — run saved commands or one-off custom commands with live console output
