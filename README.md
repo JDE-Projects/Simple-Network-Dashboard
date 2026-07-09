@@ -99,7 +99,7 @@ The script removes the systemd service, the `/opt/simple-network-dashboard` dire
 
 ## Security and privacy
 - SSH passwords are never written to disk. They are held in server memory only while a session is active and wiped immediately on disconnect.
-- `devices.json` contains only device names, hosts, usernames, Node Exporter ports, and command libraries, no credentials of any kind.
+- `devices.json` contains only device names, hosts, usernames, Node Exporter ports, and command libraries, no credentials of any kind. Treat it as sensitive: it maps your internal hosts and accounts, so don't share it publicly (in a bug report, forum post, or public repo).
 - The dashboard runs as a dedicated `snd` service account, isolated from your personal account, with no login shell.
 - The dashboard has no authentication and is intended for use on a private, trusted LAN only. Do not expose port 3000 to the internet.
 
