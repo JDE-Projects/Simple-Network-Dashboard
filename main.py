@@ -23,6 +23,7 @@ from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
 
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
+WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
 
 APP_NAME    = "Simple Network Dashboard"
 APP_VERSION = "1.3.2"
@@ -95,6 +96,26 @@ _selected_device_id: Optional[str] = None
 # In-memory device list — seeded from disk at startup, kept in sync by _save()
 _devices_cache: list = []
 
+# True if devices.json exists but is not writable (checked once at startup)
+_storage_warning = False
+
+# Pending SSH-release tasks per owner, scheduled when their last socket drops
+_pending_releases: dict[str, asyncio.Task] = {}
+
+
+def _cancel_pending_release(owner: str):
+    task = _pending_releases.pop(owner, None)
+    if task:
+        task.cancel()
+
+
+async def _release_after_grace(owner: str):
+    await asyncio.sleep(WS_RELEASE_GRACE_SECONDS)
+    _pending_releases.pop(owner, None)
+    # Re-check in case a reconnect arrived but cancellation hasn't landed yet
+    if ws_mgr.owner_count(owner) == 0:
+        ssh_mgr.release_owner(owner)
+
 # Debug log file handle — None when disabled
 _debug_file = None
 
@@ -142,6 +163,10 @@ def _load() -> list:
         return []
 
 
+# Shared error message for endpoints that fail to persist a device change
+_SAVE_ERROR = "Server could not write devices.json (check file ownership/permissions on the server)."
+
+
 def _save(devices: list) -> bool:
     global _devices_cache
     try:
@@ -149,7 +174,10 @@ def _save(devices: list) -> bool:
             json.dump({"_app": APP_NAME, "devices": devices}, f, indent=2)
         _devices_cache = list(devices)
         return True
-    except Exception:
+    except Exception as e:
+        msg = f"SAVE FAILED: {e}"
+        _debug_write(msg)
+        print(msg, flush=True)  # always visible in the systemd journal, even with debug logging off
         return False
 
 
@@ -210,8 +238,11 @@ async def _idle_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _devices_cache
+    global _devices_cache, _storage_warning
     _devices_cache = _load()
+    if os.path.exists(DEVICES_FILE) and not os.access(DEVICES_FILE, os.W_OK):
+        _storage_warning = True
+        print(f"WARNING: {DEVICES_FILE} is not writable. Device and command changes will NOT be saved.", flush=True)
     ssh_mgr.set_loop(asyncio.get_running_loop())
     metrics_task = asyncio.create_task(_metrics_loop())
     idle_task    = asyncio.create_task(_idle_loop())
@@ -241,6 +272,9 @@ async def root():
 async def ws_endpoint(ws: WebSocket):
     owner = ws.query_params.get("bid") or ""
     await ws_mgr.connect(ws, owner)
+    if owner:
+        # Reconnecting within the grace window keeps the owner's SSH sessions
+        _cancel_pending_release(owner)
     try:
         # Push current state so a fresh page load (or reconnect) is in sync
         devices = _load()
@@ -251,6 +285,7 @@ async def ws_endpoint(ws: WebSocket):
             "ssh_connected": own_connected,
             "ssh_locked": ssh_mgr.locked_device_ids(),
             "debug": _debug_file is not None,
+            "storage_warning": _storage_warning,
         }))
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
@@ -272,7 +307,10 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         ws_mgr.drop(ws)
         if owner and ws_mgr.owner_count(owner) == 0:
-            ssh_mgr.release_owner(owner)
+            # Don't release immediately: a page refresh reconnects moments
+            # later and should keep its SSH sessions
+            _cancel_pending_release(owner)
+            _pending_releases[owner] = asyncio.create_task(_release_after_grace(owner))
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +348,8 @@ async def upsert_device(body: DeviceIn):
     else:
         d["id"] = "dev_" + uuid.uuid4().hex[:12]
         devices.append(_norm(d))
-    _save(devices)
+    if not _save(devices):
+        return {"ok": False, "error": _SAVE_ERROR}
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
 
@@ -321,7 +360,8 @@ async def delete_device(device_id: str):
     if _selected_device_id == device_id:
         _selected_device_id = None
     devices = [d for d in _load() if d["id"] != device_id]
-    _save(devices)
+    if not _save(devices):
+        return {"ok": False, "error": _SAVE_ERROR}
     ssh_mgr.disconnect(device_id)
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
@@ -339,7 +379,8 @@ async def update_commands(device_id: str, body: CommandsIn):
             d["commands"] = body.commands
             devices[i] = _norm(d)
             break
-    _save(devices)
+    if not _save(devices):
+        return {"ok": False, "error": _SAVE_ERROR}
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
 
