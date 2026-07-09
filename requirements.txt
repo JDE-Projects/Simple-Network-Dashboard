@@ -4,7 +4,7 @@
 # tested PR before merging. paramiko is on the 5.x line, matching the sibling
 # SSH/SFTP tools; the 3.x -> 5.x bump was live-tested against a real device
 # and on the Pi deployment.
-fastapi==0.138.2
+fastapi==0.139.0
 uvicorn[standard]==0.49.0
 paramiko==5.0.0
 httpx==0.28.1
