@@ -385,6 +385,26 @@
   .in-use-msg { display: none; margin-top: 11px; font-size: 12px; color: var(--amber); }
   .in-use-msg.show { display: block; }
 
+  /* ---- error banner (server/save failures) ---- */
+  #errorBanners {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 100; display: flex; flex-direction: column; align-items: center; gap: 8px;
+    max-width: 90vw;
+  }
+  .error-banner {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--panel); border: 1px solid var(--red);
+    border-radius: var(--radius-sm); padding: 11px 14px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,107,122,0.15);
+    animation: rise 0.18s ease;
+  }
+  .error-banner .eb-text { font-size: 13px; color: var(--text); line-height: 1.4; }
+  .error-banner .eb-close {
+    flex: none; background: none; border: none; color: var(--text-faint);
+    cursor: pointer; font-size: 17px; line-height: 1; padding: 2px 4px;
+  }
+  .error-banner .eb-close:hover { color: var(--red); }
+
   /* scrollbars */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 6px; }
@@ -396,6 +416,7 @@
 <script>
   try { if (localStorage.getItem("snd-theme") === "light") document.body.classList.add("light"); } catch(e){}
 </script>
+<div id="errorBanners"></div>
 <div class="app">
 
   <!-- top bar -->
@@ -676,6 +697,9 @@ function connectWS() {
         DEVICES = msg.devices || [];
         if (msg.version) $('verLabel').textContent = 'v' + msg.version;
         $('debugChk').checked = !!msg.debug;
+        if (msg.storage_warning) {
+          showErrorBanner('Server cannot write devices.json: device and command changes will NOT survive a restart. Fix file permissions on the server.');
+        }
         // Restore SSH state from server (e.g. after page refresh)
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
         // Track which devices are locked (in use by any browser)
@@ -924,6 +948,19 @@ function addLine(id, text, level) {
   if (id === activeTabId) con.scrollTop = con.scrollHeight;
 }
 
+/* Prominent, dismissable red banner for failures the user must not miss
+   (e.g. a save that silently failed to persist). Stacks if called more than once. */
+function showErrorBanner(text) {
+  // Skip duplicates so WS reconnects don't stack identical banners
+  if ([...$('errorBanners').children].some(b => b.querySelector('.eb-text').textContent === text)) return;
+  const el = document.createElement('div');
+  el.className = 'error-banner';
+  el.innerHTML = '<span class="eb-text"></span><button class="eb-close" title="Dismiss">&times;</button>';
+  el.querySelector('.eb-text').textContent = text;
+  el.querySelector('.eb-close').onclick = () => el.remove();
+  $('errorBanners').appendChild(el);
+}
+
 function renderTabs() {
   const strip = $('tablist');
   strip.innerHTML = '';
@@ -1147,6 +1184,8 @@ function wireCard(card, d) {
         DEVICES = r.devices;
         if (currentDeviceId === id) { currentDeviceId = null; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'select_device', id: null})); }
         if (openTabs[id]) closeTab(id);
+      } else {
+        showErrorBanner(r.error || 'Delete failed: the device was NOT removed.');
       }
     });
   };
@@ -1320,8 +1359,18 @@ function runLibCmd(deviceId, index) {
 }
 
 async function persistDevice(d) {
-  const r = await POST('/api/devices', d);
-  if (r.ok) DEVICES = r.devices;
+  try {
+    const r = await POST('/api/devices', d);
+    if (r.ok) {
+      DEVICES = r.devices;
+    } else {
+      showErrorBanner(r.error || 'Save failed: your change was NOT stored.');
+      DEVICES = await GET('/api/devices');  // roll back the optimistic local edit
+    }
+  } catch (e) {
+    showErrorBanner('Save failed: could not reach the server. Your change was NOT stored.');
+    try { DEVICES = await GET('/api/devices'); } catch (e2) { /* server unreachable, keep current DEVICES */ }
+  }
   renderDevices();
   renderLibrary();
 }

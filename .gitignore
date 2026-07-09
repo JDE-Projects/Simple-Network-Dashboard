@@ -17,3 +17,6 @@ Debug_Log_*.txt
 
 # Claude project context (local only)
 CLAUDE.md
+
+# Local roadmap notes (local only)
+roadmap.md
