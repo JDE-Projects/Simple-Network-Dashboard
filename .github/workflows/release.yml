@@ -4,10 +4,11 @@ on:
     tags: ['v*']
 jobs:
   release:
-    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@368e641e28009262f686b74f444a2a0b8600fabd # Build-Tools main (checkout v7)
+    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@43a559e52a6e6f821e909e03805fb2757897ca54 # Build-Tools main (CI checks: ruff, import, pytest)
     permissions:
       id-token: write
       attestations: write
       contents: write
     with:
       app_name: simple-network-dashboard
+      entry_script: "main.py"
