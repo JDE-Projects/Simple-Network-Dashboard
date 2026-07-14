@@ -406,7 +406,7 @@ class SSHManager:
 
             if idle >= IDLE_TIMEOUT_SECONDS:
                 # Disconnect all sessions for this owner
-                for did, s in owned:
+                for did, _s in owned:
                     self._log(did, "Disconnected due to idle timeout.", "warn", owner)
                     self._close(did)
                 self._push({"type": "ssh_idle_timeout", "_owner": owner})
