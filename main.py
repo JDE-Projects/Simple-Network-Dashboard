@@ -8,6 +8,7 @@ and pushes real-time metrics + SSH events over a WebSocket.
 import asyncio
 import json
 import os
+import sys
 import urllib.request
 import uuid
 from contextlib import asynccontextmanager
@@ -543,6 +544,33 @@ async def check_update():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _parse_port(argv: list) -> int:
+    """Pull --port N / --port=N out of the CLI args.  Defaults to 3000 when
+    absent.  Invalid values exit loudly instead of silently falling back."""
+    port = 3000
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--port":
+            if i + 1 >= len(argv):
+                sys.exit("ERROR: --port requires a value.")
+            raw = argv[i + 1]
+            i += 2
+        elif arg.startswith("--port="):
+            raw = arg[len("--port="):]
+            i += 1
+        else:
+            i += 1
+            continue
+        try:
+            port = int(raw)
+        except ValueError:
+            sys.exit(f"ERROR: --port requires a numeric port, got '{raw}'.")
+        if not (1 <= port <= 65535):
+            sys.exit(f"ERROR: --port must be between 1 and 65535, got {port}.")
+    return port
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=3000, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=_parse_port(sys.argv[1:]), reload=False)

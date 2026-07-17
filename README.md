@@ -46,7 +46,9 @@ Then open `http://<server-ip>:3000` in your browser.
 
 The install script creates a dedicated `snd` service account with no login shell, installs the app to `/opt/simple-network-dashboard`, and sets up a systemd service that starts automatically on boot. Your personal account is added to the `snd` group so you can deploy updates; log out and back in after the first install for that to take effect.
 
-**If you have a firewall enabled:**
+The installer picks the first free port in the 3000-3010 range automatically. To force a specific port, run `sudo bash install.sh --port N`. The service keeps using the same port on later re-installs (updates), so it won't move around on you.
+
+**If you have a firewall enabled**, allow the port the installer printed (3000 by default):
 ```bash
 sudo ufw allow 3000/tcp
 ```
