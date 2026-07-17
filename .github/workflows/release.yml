@@ -4,7 +4,7 @@ on:
     tags: ['v*']
 jobs:
   release:
-    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@96756957ca5f5a0c15235730ee745d38f9f09440 # Build-Tools main (CI checks: ruff, import, pytest)
+    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@9067b829eb12e53e7b819e2d42e3b40262bde6f3 # Build-Tools main (CI checks + RC tags auto-marked prerelease)
     permissions:
       id-token: write
       attestations: write
