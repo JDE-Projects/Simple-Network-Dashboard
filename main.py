@@ -27,7 +27,7 @@ METRICS_INTERVAL = 2  # seconds between polls for the selected device
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
 
 APP_NAME    = "Simple Network Dashboard"
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.4.0"
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
 
