@@ -14,3 +14,16 @@ fastapi   Copyright (c) 2018 Sebastián Ramírez
 uvicorn   Copyright (c) 2017-present, Encode OSS Ltd.
 paramiko  Copyright (c) 2003-2009 Robey Pointer; Copyright (c) 2013-2024 Jeff Forcier
 httpx     Copyright (c) 2019, Encode OSS Ltd.
+
+# Bundled fonts (static/fonts/, shipped in the repo and tarball)
+Sora
+  Copyright 2019 The Sora Project Authors
+  License: SIL Open Font License 1.1 (OFL-1.1)
+  https://github.com/sora-xor/sora-font
+  https://openfontlicense.org
+
+JetBrains Mono
+  Copyright 2020 The JetBrains Mono Project Authors
+  License: SIL Open Font License 1.1 (OFL-1.1)
+  https://github.com/JetBrains/JetBrainsMono
+  https://openfontlicense.org
