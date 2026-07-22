@@ -1,0 +1,10 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  ci:
+    uses: JDE-Projects/Build-Tools/.github/workflows/ci.yml@77aa61f85e3353a42645e6362f44c2d6e5956e24 # Build-Tools main (ruff, import check, pytest)
+    with:
+      entry_script: "main.py"
