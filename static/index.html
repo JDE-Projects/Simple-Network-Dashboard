@@ -101,7 +101,7 @@
   }
 
   /* ---- top bar ---- */
-  .topbar { grid-area: top; display: flex; align-items: center; justify-content: space-between; }
+  .app-header { grid-area: top; display: flex; align-items: center; justify-content: space-between; }
   .brand  { display: flex; align-items: center; gap: 13px; }
   .brand .mark {
     width: 38px; height: 38px; border-radius: 10px;
@@ -110,9 +110,11 @@
     box-shadow: 0 0 22px var(--glow), inset 0 1px 0 rgba(255,255,255,0.22);
   }
   .brand .mark svg { width: 20px; height: 20px; }
-  .brand h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.2px; }
-  .brand .sub { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
-  .top-actions { display: flex; gap: 9px; }
+  .brand .title { font-size: 17px; font-weight: 600; letter-spacing: 0.2px; color: var(--text); }
+  .brand .byline { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
+  .brand .byline a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .brand .byline a:hover { text-decoration: underline; }
+  .head-right { display: flex; align-items: center; gap: 9px; }
 
   /* ---- buttons ---- */
   .btn {
@@ -448,7 +450,7 @@
 <div class="app">
 
   <!-- top bar -->
-  <div class="topbar">
+  <div class="app-header">
     <div class="brand">
       <div class="mark">
         <svg viewBox="0 0 24 24" fill="none" stroke="#042b27" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -457,11 +459,12 @@
         </svg>
       </div>
       <div>
-        <h1>Simple Network Dashboard</h1>
-        <div class="sub">github.com/JDE-Projects</div>
+        <h1 class="title">Simple Network Dashboard</h1>
+        <div class="byline">by <a href="https://github.com/JDE-Projects" target="_blank" rel="noopener">JDE-Projects</a></div>
       </div>
     </div>
-    <div class="top-actions">
+    <div class="head-right">
+      <button class="btn ghost tiny" id="verBtn"><span id="verText">Status</span><span class="ws-dot err" id="wsChip"></span></button>
       <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
           <circle cx="12" cy="12" r="4"/>
@@ -471,7 +474,6 @@
           <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
         </svg>
       </button>
-      <button class="btn ghost tiny" id="verBtn"><span id="verText">Status</span><span class="ws-dot err" id="wsChip"></span></button>
     </div>
   </div>
 
