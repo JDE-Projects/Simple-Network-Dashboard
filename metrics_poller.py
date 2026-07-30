@@ -18,8 +18,12 @@ _EXCLUDE_FS = {
 
 # Network interfaces to skip (loopback, virtual, container, tunnel)
 _EXCLUDE_IFACE = re.compile(
-    r"^(lo|veth|docker|br-|virbr|tun|tap|dummy|bond|team|flannel|cali|cilium)"
+    r"^(lo|veth|docker|br-|virbr|tun|tap|sit|dummy|bond|team|flannel|cali|cilium)"
 )
+
+# Block devices whose mounts are never real storage (squashfs images, DSM
+# service mounts under /tmp, snap loops)
+_EXCLUDE_DEVICE = re.compile(r"^/dev/loop\d+")
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +141,8 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
         mountpoint = lbl.get("mountpoint", "")
         device     = lbl.get("device", "")
         if fstype in _EXCLUDE_FS or mountpoint in seen:
+            continue
+        if _EXCLUDE_DEVICE.match(device):
             continue
         seen.add(mountpoint)
         size  = e["value"]
