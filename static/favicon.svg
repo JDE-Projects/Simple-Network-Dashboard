@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="plate" x1="3" y1="2" x2="29" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4dd6c1"/>
+      <stop offset="1" stop-color="#2bb6a3"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="url(#plate)"/>
+  <g fill="none" stroke="#042b27" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 11.5v4.3M8.5 19v-3.2h15V19"/>
+  </g>
+  <g fill="#042b27">
+    <rect x="12" y="5" width="8" height="7" rx="2.2"/>
+    <rect x="4.5" y="19" width="8" height="7" rx="2.2"/>
+    <rect x="19.5" y="19" width="8" height="7" rx="2.2"/>
+  </g>
+</svg>
