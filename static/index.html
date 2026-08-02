@@ -100,18 +100,28 @@
     height: 100vh; gap: 14px; padding: 16px;
   }
 
-  /* ---- top bar ---- */
-  .app-header { grid-area: top; display: flex; align-items: center; justify-content: space-between; }
-  .brand  { display: flex; align-items: center; gap: 13px; }
-  .brand .mark {
-    width: 40px; height: 40px; border-radius: 11px; flex: none;
-    box-shadow: 0 0 22px var(--glow);
+  /* ---- standard app header ---- */
+  .app-header {
+    grid-area: top; display: flex; align-items: flex-start;
+    justify-content: space-between; gap: 18px;
   }
-  .brand .title { font-size: 17px; font-weight: 600; letter-spacing: 0.2px; color: var(--text); }
-  .brand .byline { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
-  .brand .byline a { color: var(--accent); text-decoration: none; cursor: pointer; }
-  .brand .byline a:hover { text-decoration: underline; }
-  .head-right { display: flex; align-items: center; gap: 9px; }
+  .app-header .brand { display: flex; align-items: center; gap: 13px; }
+  .app-header .app-glyph {
+    width: 40px; height: 40px; border-radius: 11px;
+    flex: 0 0 auto; display: block;
+    box-shadow: 0 0 24px var(--glow);
+  }
+  .app-header .title {
+    font-size: 18px; font-weight: 700; letter-spacing: 0.2px;
+    color: var(--text); line-height: 1.25;
+  }
+  .app-header .byline {
+    font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+    color: var(--text-dim); margin-top: 3px;
+  }
+  .app-header .byline a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  .app-header .byline a:hover { text-decoration: underline; }
+  .app-header .head-right { display: flex; align-items: center; gap: 12px; }
 
   /* ---- buttons ---- */
   .btn {
@@ -447,9 +457,9 @@
 <div class="app">
 
   <!-- top bar -->
-  <div class="app-header">
+  <header class="app-header">
     <div class="brand">
-      <img class="mark" src="/static/favicon.svg?v=1" alt="" />
+      <img class="app-glyph" src="/static/favicon.svg?v=1" alt="" />
       <div>
         <h1 class="title">Simple Network Dashboard</h1>
         <div class="byline">by <a href="https://github.com/JDE-Projects" target="_blank" rel="noopener">JDE-Projects</a></div>
@@ -467,7 +477,7 @@
         </svg>
       </button>
     </div>
-  </div>
+  </header>
 
   <!-- devices -->
   <div class="panel devices">
