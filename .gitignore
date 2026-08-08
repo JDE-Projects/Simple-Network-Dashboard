@@ -6,6 +6,7 @@ known_hosts
 
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 .venv/
