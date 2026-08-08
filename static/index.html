@@ -616,6 +616,17 @@
   </div>
 </div>
 
+<!-- update check failure modal -->
+<div class="overlay" id="updateErrModal">
+  <div class="modal" style="width:400px;">
+    <h3>Couldn't check for updates</h3>
+    <p class="hint" id="updateErrMsg" style="white-space:pre-line; overflow-wrap:anywhere;"></p>
+    <div class="modal-actions">
+      <button class="btn primary" id="updateErrClose">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- copy-to-device picker -->
 <div class="overlay" id="copyModal">
   <div class="modal" style="width:400px;">
@@ -1645,6 +1656,13 @@ $('debugChk').addEventListener('change', () => {
 /* ============================================================
    Update check
    ============================================================ */
+function openUpdateErrorModal(reason) {
+  $('updateErrMsg').textContent = reason || "The app couldn't run the update check.";
+  $('updateErrModal').classList.add('show');
+}
+
+$('updateErrClose').onclick = () => $('updateErrModal').classList.remove('show');
+
 $('updateBtn').onclick = async () => {
   const btn    = $('updateBtn');
   const notice = $('updateNotice');
@@ -1660,12 +1678,14 @@ $('updateBtn').onclick = async () => {
       notice.textContent = "You're on the latest version (v" + esc(r.current) + ")";
       fadeNotice();
     } else {
-      notice.textContent = "Couldn’t reach GitHub to check for updates";
+      notice.textContent = "Couldn't reach GitHub to check for updates.";
       fadeNotice();
+      openUpdateErrorModal(r.reason);
     }
   } catch (e) {
-    notice.textContent = "Couldn’t reach GitHub to check for updates";
+    notice.textContent = "Couldn't reach GitHub to check for updates.";
     fadeNotice();
+    openUpdateErrorModal();
   }
   btn.disabled = false;
   btn.textContent = 'Check for updates';
