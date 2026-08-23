@@ -627,8 +627,8 @@
 "Show commands" writes the exact text you entered. "Hide commands" replaces each with "Custom Command" so nothing you typed lands in the file.</p>
     <div class="modal-actions">
       <button class="btn ghost" id="exportCancel">Cancel</button>
-      <button class="btn ghost" id="exportHide">Hide commands</button>
-      <button class="btn primary" id="exportShow">Show commands</button>
+      <button class="btn ghost" id="exportShow">Show commands</button>
+      <button class="btn primary" id="exportHide">Hide commands</button>
     </div>
   </div>
 </div>
@@ -1349,16 +1349,24 @@ function wireCard(card, d) {
     }, 'Disconnect', 'Cancel');
   };
 
-  const runCustom = e => {
+  const runCustom = async e => {
     if (e) e.stopPropagation();
     const input = card.querySelector('[data-custom]');
     const sudo  = card.querySelector('[data-sudo]').checked;
     const cmd   = input.value.trim();
     if (!cmd) return;
     ensureTab(id); setActiveTab(id);
-    (customCmdQueue[id] = customCmdQueue[id] || []).push(cmd);
-    sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command'});
     input.value = '';
+    // Only remember the typed text after the server confirms it will run the
+    // command (and therefore echo "$ Custom command" back). Queuing before that
+    // lets a refused command (busy, not connected, owned by another session)
+    // orphan an entry and misattribute every later reveal on this device.
+    const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command'});
+    if (r && r.ok) {
+      (customCmdQueue[id] = customCmdQueue[id] || []).push(cmd);
+    } else if (r && r.error) {
+      addLine(id, r.error, 'err');
+    }
     maybeOfferSave(id, cmd, sudo);
   };
   card.querySelector('[data-run]').onclick = runCustom;
