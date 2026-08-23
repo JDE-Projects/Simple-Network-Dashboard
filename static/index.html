@@ -316,6 +316,8 @@
   .ln .tag { flex: none; color: var(--text-faint); font-size: 10px; width: 64px; text-align: right; opacity: 0.7; padding-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ln .msg { flex: 1; }
   .ln.cmd  .msg { color: var(--accent); font-weight: 600; }
+  .ln.cmd .reveal-toggle { cursor: pointer; text-decoration: underline; opacity: 0.75; }
+  .ln.cmd .reveal-toggle:hover { opacity: 1; }
   .ln.ok   .msg { color: var(--green); }
   .ln.err  .msg { color: var(--red); }
   .ln.warn .msg { color: var(--amber); }
@@ -616,6 +618,21 @@
   </div>
 </div>
 
+<!-- export console prompt -->
+<div class="overlay" id="exportPrompt">
+  <div class="modal" style="width:440px;">
+    <h3>Export console</h3>
+    <p class="hint" style="white-space:pre-line; overflow-wrap:anywhere;">This console includes custom commands you typed. Choose how they appear in the exported file.
+
+"Show commands" writes the exact text you entered. "Hide commands" replaces each with "Custom Command" so nothing you typed lands in the file.</p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="exportCancel">Cancel</button>
+      <button class="btn ghost" id="exportHide">Hide commands</button>
+      <button class="btn primary" id="exportShow">Show commands</button>
+    </div>
+  </div>
+</div>
+
 <!-- update check failure modal -->
 <div class="overlay" id="updateErrModal">
   <div class="modal" style="width:400px;">
@@ -705,6 +722,8 @@ const openTabs = {};
 let askSaveCustom = true;
 let confirmCb = null;
 let cmdCtx    = null;   // {deviceId, index|null}
+const customCmdQueue = {};   // device_id -> array of typed custom commands awaiting their echoed console line (client-side only, never sent to server)
+const customCmdText = new WeakMap();   // .ln element -> the real typed command (memory only, never in the DOM or persisted unless the user picks Show on export)
 let saveCtx   = null;   // {deviceId, command, sudo}
 let copyState = null;   // {srcId, idx}
 const MAX_LINES = 1500;
@@ -977,6 +996,28 @@ function consoleFor(id) {
   return el;
 }
 
+/* Builds the console line for a custom-command echo without ever putting the
+   real typed command into stored/exportable text. The real command (if known
+   for this session) lives only in this closure and toggles on/off on click. */
+function renderCustomCmd(msgEl, real) {
+  if (real === null) {
+    msgEl.textContent = '$ Custom Command';
+    return;
+  }
+  let shown = false;
+  const label  = document.createElement('span');
+  const toggle = document.createElement('span');
+  toggle.className = 'reveal-toggle';
+  function paint() {
+    label.textContent  = shown ? ('$ ' + real + ' ') : '$ Custom Command ';
+    toggle.textContent = shown ? '(hide)' : '(click to reveal)';
+  }
+  toggle.onclick = () => { shown = !shown; paint(); };
+  paint();
+  msgEl.appendChild(label);
+  msgEl.appendChild(toggle);
+}
+
 function addLine(id, text, level) {
   ensureTab(id);
   const con = consoleFor(id);
@@ -985,7 +1026,15 @@ function addLine(id, text, level) {
   const t  = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
   ln.innerHTML = '<span class="tag"></span><span class="msg"></span>';
   ln.querySelector('.tag').textContent = t;
-  ln.querySelector('.msg').textContent = text;
+  const msgEl = ln.querySelector('.msg');
+  if (level === 'cmd' && text === '$ Custom command') {
+    ln.classList.add('custom-cmd');
+    const real = (customCmdQueue[id] && customCmdQueue[id].length) ? customCmdQueue[id].shift() : null;
+    if (real !== null) customCmdText.set(ln, real);
+    renderCustomCmd(msgEl, real);
+  } else {
+    msgEl.textContent = text;
+  }
   con.appendChild(ln);
   while (con.children.length > MAX_LINES) con.removeChild(con.firstChild);
   if (id === activeTabId) con.scrollTop = con.scrollHeight;
@@ -1307,6 +1356,7 @@ function wireCard(card, d) {
     const cmd   = input.value.trim();
     if (!cmd) return;
     ensureTab(id); setActiveTab(id);
+    (customCmdQueue[id] = customCmdQueue[id] || []).push(cmd);
     sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command'});
     input.value = '';
     maybeOfferSave(id, cmd, sudo);
@@ -1620,14 +1670,18 @@ $('endAllBtn').onclick = () => {
   });
 };
 
-$('exportBtn').onclick = () => {
-  if (!activeTabId) return;
+function doExport(showCustom) {
   const d    = dev(activeTabId);
   const name = d ? d.name : 'Console';
   const con  = document.querySelector(`[data-console="${activeTabId}"]`);
   const lines = con ? Array.from(con.querySelectorAll('.ln')).map(ln => {
     const t = ln.querySelector('.tag').textContent;
-    const m = ln.querySelector('.msg').textContent;
+    let m;
+    if (ln.classList.contains('custom-cmd')) {
+      m = (showCustom && customCmdText.has(ln)) ? ('$ ' + customCmdText.get(ln)) : '$ Custom Command';
+    } else {
+      m = ln.querySelector('.msg').textContent;
+    }
     return `${t}  ${name} · ${m}`;
   }) : [];
   if (!lines.length) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
@@ -1638,7 +1692,20 @@ $('exportBtn').onclick = () => {
   a.download = `${name.replace(/[^a-z0-9]/gi,'_')}_Console.txt`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+$('exportBtn').onclick = () => {
+  if (!activeTabId) return;
+  const con = document.querySelector(`[data-console="${activeTabId}"]`);
+  if (!con || !con.querySelector('.ln')) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
+  const hasCustom = !!con.querySelector('.ln.custom-cmd');
+  if (!hasCustom) { doExport(false); return; }
+  $('exportPrompt').classList.add('show');
 };
+
+$('exportCancel').onclick = () => { $('exportPrompt').classList.remove('show'); };
+$('exportHide').onclick   = () => { $('exportPrompt').classList.remove('show'); doExport(false); };
+$('exportShow').onclick   = () => { $('exportPrompt').classList.remove('show'); doExport(true); };
 
 $('clearBtn').onclick = () => {
   if (!activeTabId) return;
