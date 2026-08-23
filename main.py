@@ -456,9 +456,19 @@ class TrustIn(BaseModel):
     device_id: str
 
 
+def _log_and_strip_detail(result: dict) -> dict:
+    """Send any internal 'detail' from the ssh manager to the debug log and
+    remove it before the result reaches the browser, so raw exception text
+    never surfaces in the UI."""
+    detail = result.pop("detail", None)
+    if detail:
+        _debug_write(detail)
+    return result
+
+
 @app.post("/api/ssh/trust_key")
 async def ssh_trust_key(body: TrustIn):
-    return ssh_mgr.trust_host_key(body.device_id)
+    return _log_and_strip_detail(ssh_mgr.trust_host_key(body.device_id))
 
 
 @app.get("/api/ssh/host_key/{host}")
@@ -468,7 +478,7 @@ async def ssh_host_key(host: str):
 
 @app.delete("/api/ssh/host_key/{host}")
 async def ssh_forget_key(host: str):
-    return ssh_mgr.forget_host_key(host)
+    return _log_and_strip_detail(ssh_mgr.forget_host_key(host))
 
 
 # ---------------------------------------------------------------------------
