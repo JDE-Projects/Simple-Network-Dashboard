@@ -185,7 +185,9 @@ class SSHManager:
             hk.save(KNOWN_HOSTS_FILE)
             return {"ok": True, "host": host, "fingerprint": _fp(key)}
         except Exception as e:
-            return {"ok": False, "error": f"Could not save host key: {e}"}
+            return {"ok": False,
+                    "error": "Could not save the host key.",
+                    "detail": f"trust_host_key failed: {type(e).__name__}: {e}"}
 
     def forget_host_key(self, host: str) -> dict:
         try:
@@ -195,7 +197,9 @@ class SSHManager:
                 hk.save(KNOWN_HOSTS_FILE)
             return {"ok": True}
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False,
+                    "error": "Could not forget the host key.",
+                    "detail": f"forget_host_key failed: {type(e).__name__}: {e}"}
 
     # ---- connection -------------------------------------------------------
 
