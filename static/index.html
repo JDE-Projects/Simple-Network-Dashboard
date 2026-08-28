@@ -722,7 +722,8 @@ const openTabs = {};
 let askSaveCustom = true;
 let confirmCb = null;
 let cmdCtx    = null;   // {deviceId, index|null}
-const customCmdQueue = {};   // device_id -> array of typed custom commands awaiting their echoed console line (client-side only, never sent to server)
+const customCmdById = new Map();   // tag -> the real typed command, awaiting its echoed console line (client-side only, never sent to server, never persisted)
+let _cmdSeq = 0;
 const customCmdText = new WeakMap();   // .ln element -> the real typed command (memory only, never in the DOM or persisted unless the user picks Show on export)
 let saveCtx   = null;   // {deviceId, command, sudo}
 let copyState = null;   // {srcId, idx}
@@ -778,7 +779,7 @@ function connectWS() {
         if (msg.device_id === currentDeviceId) renderStats();
         break;
       case 'ssh_log':
-        addLine(msg.device_id, msg.text, msg.level);
+        addLine(msg.device_id, msg.text, msg.level, msg.cmd_id);
         break;
       case 'ssh_status':
         handleSSHStatus(msg.device_id, msg.state);
@@ -997,8 +998,9 @@ function consoleFor(id) {
 }
 
 /* Builds the console line for a custom-command echo without ever putting the
-   real typed command into stored/exportable text. The real command (if known
-   for this session) lives only in this closure and toggles on/off on click. */
+   real typed command into stored/exportable text. The real command is looked
+   up by its tag (see customCmdById) rather than pulled from a queue, so it
+   toggles on/off on click without depending on message order or timing. */
 function renderCustomCmd(msgEl, real) {
   if (real === null) {
     msgEl.textContent = '$ Custom Command';
@@ -1018,7 +1020,7 @@ function renderCustomCmd(msgEl, real) {
   msgEl.appendChild(toggle);
 }
 
-function addLine(id, text, level) {
+function addLine(id, text, level, cmdId) {
   ensureTab(id);
   const con = consoleFor(id);
   const ln  = document.createElement('div');
@@ -1027,9 +1029,10 @@ function addLine(id, text, level) {
   ln.innerHTML = '<span class="tag"></span><span class="msg"></span>';
   ln.querySelector('.tag').textContent = t;
   const msgEl = ln.querySelector('.msg');
-  if (level === 'cmd' && text === '$ Custom command') {
+  if (level === 'cmd' && cmdId != null) {
     ln.classList.add('custom-cmd');
-    const real = (customCmdQueue[id] && customCmdQueue[id].length) ? customCmdQueue[id].shift() : null;
+    const real = customCmdById.has(cmdId) ? customCmdById.get(cmdId) : null;
+    customCmdById.delete(cmdId);
     if (real !== null) customCmdText.set(ln, real);
     renderCustomCmd(msgEl, real);
   } else {
@@ -1357,15 +1360,19 @@ function wireCard(card, d) {
     if (!cmd) return;
     ensureTab(id); setActiveTab(id);
     input.value = '';
-    // Only remember the typed text after the server confirms it will run the
-    // command (and therefore echo "$ Custom command" back). Queuing before that
-    // lets a refused command (busy, not connected, owned by another session)
-    // orphan an entry and misattribute every later reveal on this device.
-    const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command'});
+    // Tag this command with a unique id and remember the typed text under that
+    // tag before sending, so the echoed console line can be matched to it
+    // regardless of ordering or timing. If the server refuses the command
+    // (busy, not connected, owned by another session), remove the tag so it
+    // can never be attached to a later, unrelated line.
+    const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
+    customCmdById.set(cmdId, cmd);
+    const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId});
     if (r && r.ok) {
-      (customCmdQueue[id] = customCmdQueue[id] || []).push(cmd);
-    } else if (r && r.error) {
-      addLine(id, r.error, 'err');
+      // stored above; its echoed line will consume the tag
+    } else {
+      customCmdById.delete(cmdId);
+      if (r && r.error) addLine(id, r.error, 'err');
     }
     maybeOfferSave(id, cmd, sudo);
   };

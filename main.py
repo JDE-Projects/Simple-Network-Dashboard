@@ -436,13 +436,14 @@ class RunIn(BaseModel):
     command:   str
     use_sudo:  bool = False
     label:     Optional[str] = None
+    cmd_id:    Optional[str] = None
 
 
 @app.post("/api/ssh/run")
 async def ssh_run(body: RunIn, x_browser_id: str = Header(None)):
     if not x_browser_id:
         return {"ok": False, "error": "Missing browser id."}
-    return ssh_mgr.run_command(body.device_id, body.command, body.use_sudo, body.label, x_browser_id)
+    return ssh_mgr.run_command(body.device_id, body.command, body.use_sudo, body.label, x_browser_id, cmd_id=body.cmd_id)
 
 
 @app.post("/api/ssh/cancel")

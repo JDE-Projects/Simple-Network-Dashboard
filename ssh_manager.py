@@ -139,8 +139,10 @@ class SSHManager:
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(self._broadcast(msg), self._loop)
 
-    def _log(self, device_id: str, text: str, level: str = "out", owner: str = None):
+    def _log(self, device_id: str, text: str, level: str = "out", owner: str = None, cmd_id: str = None):
         msg = {"type": "ssh_log", "device_id": device_id, "text": text, "level": level}
+        if cmd_id is not None:
+            msg["cmd_id"] = cmd_id
         if owner is None:
             sess = self.sessions.get(device_id)
             if sess:
@@ -285,7 +287,7 @@ class SSHManager:
     # ---- command execution ------------------------------------------------
 
     def run_command(self, device_id: str, raw_cmd: str, use_sudo: bool,
-                    label: str = None, owner: str = None) -> dict:
+                    label: str = None, owner: str = None, cmd_id: str = None) -> dict:
         sess = self.sessions.get(device_id)
         if not sess:
             return {"ok": False, "error": "Not connected."}
@@ -310,10 +312,10 @@ class SSHManager:
             cmd  = raw_cmd
             feed = False
 
-        threading.Thread(target=self._exec, args=(device_id, cmd, label, feed), daemon=True).start()
+        threading.Thread(target=self._exec, args=(device_id, cmd, label, feed, cmd_id), daemon=True).start()
         return {"ok": True}
 
-    def _exec(self, device_id: str, cmd: str, label: str, feed_sudo: bool):
+    def _exec(self, device_id: str, cmd: str, label: str, feed_sudo: bool, cmd_id: str = None):
         sess = self.sessions.get(device_id)
         if not sess or not sess.client:
             self._log(device_id, "Not connected.", "err")
@@ -323,7 +325,7 @@ class SSHManager:
         password   = sess.password if needs_sudo else None
 
         self._status(device_id, "running")
-        self._log(device_id, f"$ {label}", "cmd")
+        self._log(device_id, f"$ {label}", "cmd", cmd_id=cmd_id)
         sess.busy      = True
         sess.cancelled = False
 
