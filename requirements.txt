@@ -5,6 +5,6 @@
 # SSH/SFTP tools; the 3.x -> 5.x bump was live-tested against a real device
 # and on the Pi deployment.
 fastapi==0.141.1
-uvicorn[standard]==0.52.3
+uvicorn[standard]==0.52.4
 paramiko==5.0.0
 httpx==0.28.1
