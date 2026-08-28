@@ -122,9 +122,12 @@ class _Session:
 # ---------------------------------------------------------------------------
 
 class SSHManager:
-    def __init__(self, broadcast_fn):
-        """broadcast_fn: async coroutine function that pushes a dict to all WS clients."""
-        self._broadcast = broadcast_fn
+    def __init__(self, broadcast_fn, debug_write=None):
+        """broadcast_fn: async coroutine function that pushes a dict to all WS clients.
+        debug_write: optional callable(str) used to log internal exception detail
+        that must not reach the browser; defaults to a no-op."""
+        self._broadcast   = broadcast_fn
+        self._debug_write = debug_write if debug_write is not None else (lambda _text: None)
         self._loop      = None          # set via set_loop() after uvicorn starts
         self.sessions: dict[str, _Session] = {}
         self._pending: dict[str, tuple]    = {}  # device_id -> (host, key)
@@ -139,8 +142,10 @@ class SSHManager:
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(self._broadcast(msg), self._loop)
 
-    def _log(self, device_id: str, text: str, level: str = "out", owner: str = None):
+    def _log(self, device_id: str, text: str, level: str = "out", owner: str = None, cmd_id: str = None):
         msg = {"type": "ssh_log", "device_id": device_id, "text": text, "level": level}
+        if cmd_id is not None:
+            msg["cmd_id"] = cmd_id
         if owner is None:
             sess = self.sessions.get(device_id)
             if sess:
@@ -185,9 +190,8 @@ class SSHManager:
             hk.save(KNOWN_HOSTS_FILE)
             return {"ok": True, "host": host, "fingerprint": _fp(key)}
         except Exception as e:
-            return {"ok": False,
-                    "error": "Could not save the host key.",
-                    "detail": f"trust_host_key failed: {type(e).__name__}: {e}"}
+            self._debug_write(f"trust_host_key failed: {type(e).__name__}: {e}")
+            return {"ok": False, "error": "Could not save the host key."}
 
     def forget_host_key(self, host: str) -> dict:
         try:
@@ -197,9 +201,8 @@ class SSHManager:
                 hk.save(KNOWN_HOSTS_FILE)
             return {"ok": True}
         except Exception as e:
-            return {"ok": False,
-                    "error": "Could not forget the host key.",
-                    "detail": f"forget_host_key failed: {type(e).__name__}: {e}"}
+            self._debug_write(f"forget_host_key failed: {type(e).__name__}: {e}")
+            return {"ok": False, "error": "Could not forget the host key."}
 
     # ---- connection -------------------------------------------------------
 
@@ -285,7 +288,7 @@ class SSHManager:
     # ---- command execution ------------------------------------------------
 
     def run_command(self, device_id: str, raw_cmd: str, use_sudo: bool,
-                    label: str = None, owner: str = None) -> dict:
+                    label: str = None, owner: str = None, cmd_id: str = None) -> dict:
         sess = self.sessions.get(device_id)
         if not sess:
             return {"ok": False, "error": "Not connected."}
@@ -310,10 +313,10 @@ class SSHManager:
             cmd  = raw_cmd
             feed = False
 
-        threading.Thread(target=self._exec, args=(device_id, cmd, label, feed), daemon=True).start()
+        threading.Thread(target=self._exec, args=(device_id, cmd, label, feed, cmd_id), daemon=True).start()
         return {"ok": True}
 
-    def _exec(self, device_id: str, cmd: str, label: str, feed_sudo: bool):
+    def _exec(self, device_id: str, cmd: str, label: str, feed_sudo: bool, cmd_id: str = None):
         sess = self.sessions.get(device_id)
         if not sess or not sess.client:
             self._log(device_id, "Not connected.", "err")
@@ -323,7 +326,7 @@ class SSHManager:
         password   = sess.password if needs_sudo else None
 
         self._status(device_id, "running")
-        self._log(device_id, f"$ {label}", "cmd")
+        self._log(device_id, f"$ {label}", "cmd", cmd_id=cmd_id)
         sess.busy      = True
         sess.cancelled = False
 

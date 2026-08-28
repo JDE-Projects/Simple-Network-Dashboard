@@ -31,7 +31,7 @@ METRICS_INTERVAL = 2  # seconds between polls for the selected device
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
 
 APP_NAME    = "Simple Network Dashboard"
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.7"
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
 
@@ -149,7 +149,7 @@ async def _broadcast(msg: dict):
         await ws_mgr.broadcast(msg)
 
 
-ssh_mgr = SSHManager(_broadcast)
+ssh_mgr = SSHManager(_broadcast, _debug_write)
 
 
 # ---------------------------------------------------------------------------
@@ -436,13 +436,14 @@ class RunIn(BaseModel):
     command:   str
     use_sudo:  bool = False
     label:     Optional[str] = None
+    cmd_id:    Optional[str] = None
 
 
 @app.post("/api/ssh/run")
 async def ssh_run(body: RunIn, x_browser_id: str = Header(None)):
     if not x_browser_id:
         return {"ok": False, "error": "Missing browser id."}
-    return ssh_mgr.run_command(body.device_id, body.command, body.use_sudo, body.label, x_browser_id)
+    return ssh_mgr.run_command(body.device_id, body.command, body.use_sudo, body.label, x_browser_id, cmd_id=body.cmd_id)
 
 
 @app.post("/api/ssh/cancel")
@@ -456,19 +457,9 @@ class TrustIn(BaseModel):
     device_id: str
 
 
-def _log_and_strip_detail(result: dict) -> dict:
-    """Send any internal 'detail' from the ssh manager to the debug log and
-    remove it before the result reaches the browser, so raw exception text
-    never surfaces in the UI."""
-    detail = result.pop("detail", None)
-    if detail:
-        _debug_write(detail)
-    return result
-
-
 @app.post("/api/ssh/trust_key")
 async def ssh_trust_key(body: TrustIn):
-    return _log_and_strip_detail(ssh_mgr.trust_host_key(body.device_id))
+    return ssh_mgr.trust_host_key(body.device_id)
 
 
 @app.get("/api/ssh/host_key/{host}")
@@ -478,7 +469,7 @@ async def ssh_host_key(host: str):
 
 @app.delete("/api/ssh/host_key/{host}")
 async def ssh_forget_key(host: str):
-    return _log_and_strip_detail(ssh_mgr.forget_host_key(host))
+    return ssh_mgr.forget_host_key(host)
 
 
 # ---------------------------------------------------------------------------
