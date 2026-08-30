@@ -1,6 +1,6 @@
 # Simple Network Dashboard
 A self-hosted web dashboard for monitoring and managing home lab devices over a private local network.
-Built by [JDE-Projects](https://github.com/JDE-Projects).
+Built by [JDE-Projects](https://jde-projects.com), home of the Simple X Tools suite.
 
 If you enjoyed this project and would like to buy me a coffee, check out my [Ko-fi](https://ko-fi.com/jdeprojects).
 
@@ -104,6 +104,7 @@ The script removes the systemd service, the `/opt/simple-network-dashboard` dire
 - `devices.json` contains only device names, hosts, usernames, Node Exporter ports, and command libraries, no credentials of any kind. Treat it as sensitive: it maps your internal hosts and accounts, so don't share it publicly (in a bug report, forum post, or public repo).
 - The dashboard runs as a dedicated `snd` service account, isolated from your personal account, with no login shell.
 - The dashboard has no authentication and is intended for use on a private, trusted LAN only. Do not expose port 3000 to the internet.
+- **Network use.** Other than the job you ask of it, this app makes one other network call: a check to GitHub for a newer release when you press **Check for updates**, which sends only a version request. It collects and sends no personal data, usage data, or analytics.
 
 ## A note on how this was built
 This project was built with AI assistance. The design decisions, feature direction, and real-world testing were directed by me. The code was written and revised with an AI assistant against that direction. Treat it like any community tool: review and test it before relying on it.
