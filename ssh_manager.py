@@ -16,8 +16,8 @@ import paramiko
 IDLE_WARN_SECONDS    = 270   # send warning after 4.5 minutes idle
 IDLE_TIMEOUT_SECONDS = 300   # disconnect after 5 minutes idle
 
-BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
-KNOWN_HOSTS_FILE = os.path.join(BASE_DIR, "known_hosts")
+DATA_DIR         = "/var/lib/simple-network-dashboard"
+KNOWN_HOSTS_FILE = os.path.join(DATA_DIR, "known_hosts")
 
 # Strip ANSI escape sequences and dpkg progress spam from command output
 _ANSI_RE = re.compile(
@@ -53,6 +53,11 @@ def _load_known_hosts() -> paramiko.HostKeys:
         except Exception:
             pass
     return hk
+
+
+def _save_known_hosts(host_keys: paramiko.HostKeys) -> None:
+    host_keys.save(KNOWN_HOSTS_FILE)
+    os.chmod(KNOWN_HOSTS_FILE, 0o600)
 
 
 class UnknownHostKey(Exception):
@@ -187,7 +192,7 @@ class SSHManager:
             if hk.lookup(host):
                 del hk[host]
             hk.add(host, key.get_name(), key)
-            hk.save(KNOWN_HOSTS_FILE)
+            _save_known_hosts(hk)
             return {"ok": True, "host": host, "fingerprint": _fp(key)}
         except Exception as e:
             self._debug_write(f"trust_host_key failed: {type(e).__name__}: {e}")
@@ -198,7 +203,7 @@ class SSHManager:
             hk = _load_known_hosts()
             if hk.lookup(host):
                 del hk[host]
-                hk.save(KNOWN_HOSTS_FILE)
+                _save_known_hosts(hk)
             return {"ok": True}
         except Exception as e:
             self._debug_write(f"forget_host_key failed: {type(e).__name__}: {e}")
