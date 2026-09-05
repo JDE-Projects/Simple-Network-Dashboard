@@ -272,6 +272,11 @@ repair_runtime_storage() {
     repair_runtime_storage_metadata
 }
 
+copy_application_files() {
+    cp main.py metrics_poller.py ssh_manager.py requirements.txt uninstall.sh "$APP_DIR/"
+    cp -R --no-preserve=ownership static/. "$APP_DIR/static/"
+}
+
 main() {
 if [ "$EUID" -ne 0 ]; then
     echo "Run with sudo: sudo bash install.sh"
@@ -395,8 +400,7 @@ fi
 repair_runtime_storage
 
 # Copy app files
-cp main.py metrics_poller.py ssh_manager.py requirements.txt uninstall.sh "$APP_DIR/"
-cp static/index.html "$APP_DIR/static/"
+copy_application_files
 
 # Create venv if it doesn't exist, then install/update requirements
 if [ ! -d "$APP_DIR/venv" ]; then
