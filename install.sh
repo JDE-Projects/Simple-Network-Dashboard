@@ -4,10 +4,180 @@ set -e
 APP_DIR="/opt/simple-network-dashboard"
 SERVICE_NAME="simple-network-dashboard"
 UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
+INSTALL_STATE_DIR="/etc/simple-network-dashboard"
+INSTALL_STATE="${INSTALL_STATE_DIR}/install-state"
 PORT_MIN=3000
 PORT_MAX=3010
 FORCED_PORT=""
 
+record_install_state() {
+    local temp_state=""
+
+    (
+        umask 077
+        mkdir -p "$INSTALL_STATE_DIR" || exit 1
+        chown root:root "$INSTALL_STATE_DIR" || exit 1
+        chmod 700 "$INSTALL_STATE_DIR" || exit 1
+        temp_state=$(mktemp "${INSTALL_STATE_DIR}/.install-state.XXXXXX") || exit 1
+        trap 'if [ -n "$temp_state" ]; then rm -f -- "$temp_state"; fi' EXIT
+        printf 'SND_UID=%s\nSND_GID=%s\n' "$CURRENT_SND_UID" "$CURRENT_SND_GROUP_GID" > "$temp_state" || exit 1
+        chown root:root "$temp_state" || exit 1
+        chmod 600 "$temp_state" || exit 1
+        mv -f "$temp_state" "$INSTALL_STATE" || exit 1
+        temp_state=""
+    )
+}
+
+read_install_state() {
+    local state_metadata
+    local -a state_lines
+
+    INSTALL_STATE_ERROR=""
+    RECORDED_SND_UID=""
+    RECORDED_SND_GID=""
+
+    if [ -L "$INSTALL_STATE" ] || [ ! -f "$INSTALL_STATE" ]; then
+        INSTALL_STATE_ERROR="unsafe (it must be a regular file)"
+        return 1
+    fi
+
+    state_metadata=$(stat -c '%u:%g:%a' "$INSTALL_STATE") || {
+        INSTALL_STATE_ERROR="unreadable"
+        return 1
+    }
+    if [ "$state_metadata" != "0:0:600" ]; then
+        INSTALL_STATE_ERROR="unsafe (it must be owned by root:root with mode 0600)"
+        return 1
+    fi
+
+    mapfile -t state_lines < "$INSTALL_STATE" || {
+        INSTALL_STATE_ERROR="unreadable"
+        return 1
+    }
+    if [ "${#state_lines[@]}" -ne 2 ] \
+        || [[ ! "${state_lines[0]}" =~ ^SND_UID=[0-9]+$ ]] \
+        || [[ ! "${state_lines[1]}" =~ ^SND_GID=[0-9]+$ ]]; then
+        INSTALL_STATE_ERROR="malformed"
+        return 1
+    fi
+
+    RECORDED_SND_UID="${state_lines[0]#SND_UID=}"
+    RECORDED_SND_GID="${state_lines[1]#SND_GID=}"
+}
+
+read_current_snd_ids() {
+    local group_entry
+
+    CURRENT_SND_UID=""
+    CURRENT_SND_PRIMARY_GID=""
+    CURRENT_SND_GROUP_GID=""
+    if ! id snd &>/dev/null; then
+        return 1
+    fi
+    if ! group_entry=$(getent group snd); then
+        return 1
+    fi
+
+    CURRENT_SND_UID=$(id -u snd)
+    CURRENT_SND_PRIMARY_GID=$(id -g snd)
+    CURRENT_SND_GROUP_GID=$(printf '%s\n' "$group_entry" | awk -F: 'NF >= 3 { print $3; exit }')
+    if [[ ! "$CURRENT_SND_UID" =~ ^[0-9]+$ ]] \
+        || [[ ! "$CURRENT_SND_PRIMARY_GID" =~ ^[0-9]+$ ]] \
+        || [[ ! "$CURRENT_SND_GROUP_GID" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+}
+
+classify_account_state() {
+    local is_fresh_install=false
+    local user_exists=false
+    local group_exists=false
+
+    [ ! -e "$APP_DIR" ] && [ ! -e "$UNIT_DEST" ] \
+        && [ ! -e "$INSTALL_STATE" ] && [ ! -L "$INSTALL_STATE" ] \
+        && is_fresh_install=true
+    id snd &>/dev/null && user_exists=true
+    getent group snd &>/dev/null && group_exists=true
+
+    if [ "$is_fresh_install" = true ]; then
+        if [ "$user_exists" = true ] || [ "$group_exists" = true ]; then
+            echo "Error: fresh install refused because an unmanaged snd user or group already exists."
+            return 1
+        fi
+        ACCOUNT_STATE="fresh"
+        return 0
+    fi
+
+    if [ -e "$INSTALL_STATE" ] || [ -L "$INSTALL_STATE" ]; then
+        if ! read_install_state; then
+            echo "Error: existing installation record is ${INSTALL_STATE_ERROR}. Refusing update."
+            return 1
+        fi
+        if ! read_current_snd_ids; then
+            echo "Error: managed installation is missing a valid snd user or group. Refusing update."
+            return 1
+        fi
+        if [ "$CURRENT_SND_UID" != "$RECORDED_SND_UID" ] \
+            || [ "$CURRENT_SND_PRIMARY_GID" != "$RECORDED_SND_GID" ] \
+            || [ "$CURRENT_SND_GROUP_GID" != "$RECORDED_SND_GID" ]; then
+            echo "Error: snd identity IDs do not match the installation record. Refusing update."
+            return 1
+        fi
+        ACCOUNT_STATE="managed-update"
+        echo "Verified managed snd account ownership for update."
+        return 0
+    fi
+
+    if [ "$user_exists" != true ] || [ "$group_exists" != true ]; then
+        echo "Error: legacy installation has only one or neither snd identity. Refusing update."
+        return 1
+    fi
+    if ! read_current_snd_ids; then
+        echo "Error: legacy installation has invalid snd identity IDs. Refusing update."
+        return 1
+    fi
+    ACCOUNT_STATE="legacy-update"
+    echo "Existing installation ownership is unverified; preserving snd identities without creating a record."
+}
+
+create_managed_snd_account() {
+    local created_group=false
+    local created_user=false
+    local cleanup_failed=false
+
+    if ! groupadd --system snd; then
+        echo "Error: could not create the snd system group."
+        return 1
+    fi
+    created_group=true
+    if ! useradd --system --no-create-home --shell /usr/sbin/nologin --gid snd snd; then
+        echo "Error: could not create the snd system user."
+    else
+        created_user=true
+        if read_current_snd_ids && record_install_state; then
+            echo "Created service account: snd"
+            return 0
+        fi
+        echo "Error: could not verify or record the new snd identities."
+    fi
+
+    if [ "$created_user" = true ] && ! userdel snd; then
+        echo "Error: cleanup could not remove the newly created snd user."
+        cleanup_failed=true
+    fi
+    if [ "$created_group" = true ] && ! groupdel snd; then
+        echo "Error: cleanup could not remove the newly created snd group."
+        cleanup_failed=true
+    fi
+    if [ "$cleanup_failed" = true ]; then
+        echo "Error: snd account creation failed and cleanup was incomplete."
+    else
+        echo "snd account creation failed; newly created identities were removed."
+    fi
+    return 1
+}
+
+main() {
 if [ "$EUID" -ne 0 ]; then
     echo "Run with sudo: sudo bash install.sh"
     exit 1
@@ -101,10 +271,13 @@ if ! python3 -c "import venv" &>/dev/null; then
     exit 1
 fi
 
-# Create snd service account if it doesn't exist
-if ! id snd &>/dev/null; then
-    useradd --system --no-create-home --shell /usr/sbin/nologin snd
-    echo "Created service account: snd"
+# Classify account ownership before any installation mutation.
+if ! classify_account_state; then
+    exit 1
+fi
+
+if [ "$ACCOUNT_STATE" = "fresh" ]; then
+    create_managed_snd_account
 fi
 
 # Add install user to snd group so they can deploy updates via scp
@@ -162,4 +335,9 @@ echo "To uninstall later: sudo bash $APP_DIR/uninstall.sh"
 if [ "$ADDED_TO_GROUP" = true ]; then
     echo ""
     echo "Note: $INSTALL_USER was added to the snd group. Log out and back in for this to take effect."
+fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi

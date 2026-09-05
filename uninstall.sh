@@ -3,13 +3,118 @@ set -e
 
 APP_DIR="/opt/simple-network-dashboard"
 SERVICE_NAME="simple-network-dashboard"
+INSTALL_STATE="/etc/simple-network-dashboard/install-state"
 
+read_install_state() {
+    local state_metadata
+    local -a state_lines
+
+    INSTALL_STATE_ERROR=""
+    RECORDED_SND_UID=""
+    RECORDED_SND_GID=""
+
+    if [ -L "$INSTALL_STATE" ] || [ ! -f "$INSTALL_STATE" ]; then
+        INSTALL_STATE_ERROR="unsafe (it must be a regular file)"
+        return 1
+    fi
+    state_metadata=$(stat -c '%u:%g:%a' "$INSTALL_STATE") || {
+        INSTALL_STATE_ERROR="unreadable"
+        return 1
+    }
+    if [ "$state_metadata" != "0:0:600" ]; then
+        INSTALL_STATE_ERROR="unsafe (it must be owned by root:root with mode 0600)"
+        return 1
+    fi
+    mapfile -t state_lines < "$INSTALL_STATE" || {
+        INSTALL_STATE_ERROR="unreadable"
+        return 1
+    }
+    if [ "${#state_lines[@]}" -ne 2 ] \
+        || [[ ! "${state_lines[0]}" =~ ^SND_UID=[0-9]+$ ]] \
+        || [[ ! "${state_lines[1]}" =~ ^SND_GID=[0-9]+$ ]]; then
+        INSTALL_STATE_ERROR="malformed"
+        return 1
+    fi
+    RECORDED_SND_UID="${state_lines[0]#SND_UID=}"
+    RECORDED_SND_GID="${state_lines[1]#SND_GID=}"
+}
+
+read_current_snd_ids() {
+    local group_entry
+
+    CURRENT_SND_UID=""
+    CURRENT_SND_PRIMARY_GID=""
+    CURRENT_SND_GROUP_GID=""
+    if ! id snd &>/dev/null || ! group_entry=$(getent group snd); then
+        return 1
+    fi
+    CURRENT_SND_UID=$(id -u snd)
+    CURRENT_SND_PRIMARY_GID=$(id -g snd)
+    CURRENT_SND_GROUP_GID=$(printf '%s\n' "$group_entry" | awk -F: 'NF >= 3 { print $3; exit }')
+    [[ "$CURRENT_SND_UID" =~ ^[0-9]+$ ]] \
+        && [[ "$CURRENT_SND_PRIMARY_GID" =~ ^[0-9]+$ ]] \
+        && [[ "$CURRENT_SND_GROUP_GID" =~ ^[0-9]+$ ]]
+}
+
+classify_uninstall_account_state() {
+    REMOVE_SND_IDENTITIES=false
+    RETAIN_SND_REASON=""
+
+    if [ ! -e "$INSTALL_STATE" ] && [ ! -L "$INSTALL_STATE" ]; then
+        RETAIN_SND_REASON="the ownership record is absent"
+    elif ! read_install_state; then
+        RETAIN_SND_REASON="the ownership record is ${INSTALL_STATE_ERROR}"
+    elif ! read_current_snd_ids; then
+        RETAIN_SND_REASON="the snd user or group is missing or has invalid IDs"
+    elif [ "$CURRENT_SND_UID" != "$RECORDED_SND_UID" ] \
+        || [ "$CURRENT_SND_PRIMARY_GID" != "$RECORDED_SND_GID" ] \
+        || [ "$CURRENT_SND_GROUP_GID" != "$RECORDED_SND_GID" ]; then
+        RETAIN_SND_REASON="the current snd IDs do not match the ownership record"
+    else
+        REMOVE_SND_IDENTITIES=true
+    fi
+}
+
+remove_install_state() {
+    if [ -f "$INSTALL_STATE" ] || [ -L "$INSTALL_STATE" ]; then
+        rm -f "$INSTALL_STATE"
+    fi
+}
+
+remove_snd_identities_if_verified() {
+    SND_IDENTITIES_REMOVED=false
+    classify_uninstall_account_state
+    if [ "$REMOVE_SND_IDENTITIES" != true ]; then
+        echo "Retaining snd user and group because ${RETAIN_SND_REASON}."
+        return 0
+    fi
+
+    # No -r: the account was created with --no-create-home.
+    if ! userdel snd; then
+        echo "Error: could not remove the verified snd user; the installation record was retained."
+        return 1
+    fi
+    if ! groupdel snd; then
+        echo "Error: snd user was removed but the snd group remains; the installation record was retained."
+        return 1
+    fi
+    if ! remove_install_state; then
+        echo "Error: snd identities were removed but the installation record could not be removed."
+        return 1
+    fi
+    SND_IDENTITIES_REMOVED=true
+}
+
+main() {
 if [ "$EUID" -ne 0 ]; then
     echo "Run with sudo: sudo bash uninstall.sh"
     exit 1
 fi
 
 INSTALL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo '')}"
+
+# Decide account deletion before any removal mutation.
+classify_uninstall_account_state
 
 # Parse flags
 AUTO_YES=false
@@ -25,7 +130,11 @@ echo ""
 echo "This will remove:"
 echo "  - systemd service: $SERVICE_NAME"
 echo "  - application directory: $APP_DIR (including venv)"
-echo "  - service account and group: snd"
+if [ "$REMOVE_SND_IDENTITIES" = true ]; then
+    echo "  - verified service account and group: snd"
+else
+    echo "  - service account and group: retained because ${RETAIN_SND_REASON}"
+fi
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -111,14 +220,11 @@ if [ -d "$APP_DIR" ]; then
     rm -rf "$APP_DIR"
 fi
 
-# Remove snd user (no -r; account was created with --no-create-home)
-if id snd &>/dev/null; then
-    userdel snd
-fi
-
-# Remove snd group if it still exists
-if getent group snd &>/dev/null; then
-    groupdel snd 2>/dev/null || true
+# Re-check ownership at the point of account deletion, after prompts and removal.
+if ! remove_snd_identities_if_verified; then
+    echo ""
+    echo "Application files were removed, but snd account cleanup was incomplete."
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -128,9 +234,19 @@ fi
 echo ""
 echo "Simple Network Dashboard has been removed."
 echo ""
-echo "If your account was previously added to the snd group, that membership"
-echo "is now gone. Log out and back in to refresh your group state."
+if [ "$SND_IDENTITIES_REMOVED" = true ]; then
+    echo "If your account was previously added to the snd group, that membership"
+    echo "is now gone. Log out and back in to refresh your group state."
+else
+    echo "The snd identities were retained because ${RETAIN_SND_REASON}."
+    echo "Any existing snd group membership remains in place."
+fi
 if [ -n "$BACKUP_DIR" ]; then
     echo ""
     echo "Config backup: $BACKUP_DIR"
+fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
