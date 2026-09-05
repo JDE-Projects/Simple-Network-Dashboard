@@ -44,7 +44,7 @@ sudo bash install.sh
 
 Then open `http://<server-ip>:3000` in your browser.
 
-The install script creates a dedicated `snd` service account with no login shell, installs the app to `/opt/simple-network-dashboard`, and sets up a systemd service that starts automatically on boot. Your personal account is added to the `snd` group so you can deploy updates; log out and back in after the first install for that to take effect.
+The install script creates a dedicated `snd` service account with no login shell, installs the app to `/opt/simple-network-dashboard`, stores private dashboard data in `/var/lib/simple-network-dashboard`, writes debug logs to `/var/log/simple-network-dashboard`, and sets up a systemd service that starts automatically on boot. The private data and log directories are accessible only to `snd`. Your personal account is added to the `snd` group so you can deploy updates; log out and back in after the first install for that to take effect.
 
 The installer picks the first free port in the 3000-3010 range automatically. To force a specific port, run `sudo bash install.sh --port N`. The service keeps using the same port on later re-installs (updates), so it won't move around on you.
 
@@ -97,11 +97,11 @@ sudo bash uninstall.sh
 sudo bash /opt/simple-network-dashboard/uninstall.sh
 ```
 
-The script removes the systemd service, the `/opt/simple-network-dashboard` directory (including the venv), and the `snd` service account. Before removing anything it offers to back up `devices.json` and `known_hosts`, and asks for confirmation. Pass `--yes` for non-interactive runs (backs up config and proceeds without prompting).
+The script removes the systemd service, the `/opt/simple-network-dashboard` directory (including the venv), private data in `/var/lib/simple-network-dashboard`, debug logs in `/var/log/simple-network-dashboard`, and the `snd` service account. Before removing anything it offers to back up `devices.json` and `known_hosts` from the private data directory, and asks for confirmation. Pass `--yes` for non-interactive runs (backs up config and proceeds without prompting).
 
 ## Security and privacy
 - SSH passwords are never written to disk. They are held in server memory only while a session is active and wiped immediately on disconnect.
-- `devices.json` contains only device names, hosts, usernames, Node Exporter ports, and command libraries, no credentials of any kind. Treat it as sensitive: it maps your internal hosts and accounts, so don't share it publicly (in a bug report, forum post, or public repo).
+- `devices.json` contains only device names, hosts, usernames, Node Exporter ports, and command libraries, no credentials of any kind. It is stored privately in `/var/lib/simple-network-dashboard`. Treat it as sensitive: it maps your internal hosts and accounts, so don't share it publicly (in a bug report, forum post, or public repo).
 - The dashboard runs as a dedicated `snd` service account, isolated from your personal account, with no login shell.
 - The dashboard has no authentication and is intended for use on a private, trusted LAN only. Do not expose port 3000 to the internet.
 - **Network use.** Other than the job you ask of it, this app makes one other network call: a check to GitHub for a newer release when you press **Check for updates**, which sends only a version request. It collects and sends no personal data, usage data, or analytics.

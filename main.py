@@ -33,7 +33,9 @@ WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SS
 APP_NAME    = "Simple Network Dashboard"
 APP_VERSION = "1.4.7"
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-DEVICES_FILE = os.path.join(BASE_DIR, "devices.json")
+DATA_DIR = "/var/lib/simple-network-dashboard"
+LOG_DIR = "/var/log/simple-network-dashboard"
+DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +174,24 @@ def _load() -> list:
 _SAVE_ERROR = "Server could not write devices.json (check file ownership/permissions on the server)."
 
 
+def _open_private_file(path: str, *, buffering: int = -1):
+    fd = None
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        file = os.fdopen(fd, "w", encoding="utf-8", buffering=buffering)
+        fd = None
+        return file
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        raise
+
+
 def _save(devices: list) -> bool:
     global _devices_cache
     try:
-        with open(DEVICES_FILE, "w", encoding="utf-8") as f:
+        with _open_private_file(DEVICES_FILE) as f:
             json.dump({"_app": APP_NAME, "devices": devices}, f, indent=2)
         _devices_cache = list(devices)
         return True
@@ -485,8 +501,8 @@ async def toggle_debug(body: DebugIn):
     global _debug_file
     if body.enabled and _debug_file is None:
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        path  = os.path.join(BASE_DIR, f"Debug_Log_{stamp}.txt")
-        _debug_file = open(path, "w", encoding="utf-8", buffering=1)  # line-buffered
+        path  = os.path.join(LOG_DIR, f"Debug_Log_{stamp}.txt")
+        _debug_file = _open_private_file(path, buffering=1)  # line-buffered
         _debug_write("=== Debug log started ===")
         return {"ok": True, "enabled": True, "path": path}
     if not body.enabled and _debug_file is not None:

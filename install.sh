@@ -2,6 +2,8 @@
 set -e
 
 APP_DIR="/opt/simple-network-dashboard"
+DATA_DIR="/var/lib/simple-network-dashboard"
+LOG_DIR="/var/log/simple-network-dashboard"
 SERVICE_NAME="simple-network-dashboard"
 UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
 INSTALL_STATE_DIR="/etc/simple-network-dashboard"
@@ -177,6 +179,99 @@ create_managed_snd_account() {
     return 1
 }
 
+is_safe_runtime_directory() {
+    [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -d "$1" ]; }
+}
+
+is_safe_runtime_file() {
+    [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -f "$1" ]; }
+}
+
+repair_runtime_storage_metadata() {
+    python3 - "$DATA_DIR" "$LOG_DIR" <<'PY'
+import os
+import grp
+import pwd
+import stat
+import sys
+
+data_dir, log_dir = sys.argv[1:]
+uid = pwd.getpwnam("snd").pw_uid
+gid = grp.getgrnam("snd").gr_gid
+
+def repair_directory(path):
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise RuntimeError(f"unsafe runtime directory: {path}")
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise RuntimeError(f"unsafe runtime directory: {path}")
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+def repair_file(path):
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise RuntimeError(f"unsafe runtime file: {path}")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError(f"unsafe runtime file: {path}")
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+
+for directory in (data_dir, log_dir):
+    repair_directory(directory)
+for filename in ("devices.json", "known_hosts"):
+    repair_file(os.path.join(data_dir, filename))
+PY
+}
+
+repair_runtime_storage() {
+    local legacy_file
+    local destination
+
+    for destination in "$DATA_DIR" "$LOG_DIR"; do
+        if ! is_safe_runtime_directory "$destination"; then
+            echo "Error: private runtime directory $destination is unsafe. Refusing install."
+            return 1
+        fi
+    done
+
+    for legacy_file in devices.json known_hosts; do
+        destination="$DATA_DIR/$legacy_file"
+        if ! is_safe_runtime_file "$destination"; then
+            echo "Error: private runtime file $destination is unsafe. Refusing install."
+            return 1
+        fi
+        if [ "$ACCOUNT_STATE" != "fresh" ] && ! is_safe_runtime_file "$APP_DIR/$legacy_file"; then
+            echo "Error: legacy runtime file $APP_DIR/$legacy_file is unsafe. Refusing install."
+            return 1
+        fi
+    done
+
+    mkdir -p "$DATA_DIR" "$LOG_DIR"
+
+    if [ "$ACCOUNT_STATE" != "fresh" ]; then
+        for legacy_file in devices.json known_hosts; do
+            destination="$DATA_DIR/$legacy_file"
+            if [ -f "$APP_DIR/$legacy_file" ] && [ ! -e "$destination" ]; then
+                mv -nT -- "$APP_DIR/$legacy_file" "$destination"
+            fi
+        done
+    fi
+
+    repair_runtime_storage_metadata
+}
+
 main() {
 if [ "$EUID" -ne 0 ]; then
     echo "Run with sudo: sudo bash install.sh"
@@ -296,6 +391,9 @@ if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     systemctl stop "$SERVICE_NAME"
 fi
 
+# Keep private runtime state outside the replaceable application directory.
+repair_runtime_storage
+
 # Copy app files
 cp main.py metrics_poller.py ssh_manager.py requirements.txt uninstall.sh "$APP_DIR/"
 cp static/index.html "$APP_DIR/static/"
@@ -317,6 +415,7 @@ User=snd
 WorkingDirectory=$APP_DIR
 ExecStart=$APP_DIR/venv/bin/python main.py --port ${PORT}
 Restart=always
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

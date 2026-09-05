@@ -2,6 +2,8 @@
 set -e
 
 APP_DIR="/opt/simple-network-dashboard"
+DATA_DIR="/var/lib/simple-network-dashboard"
+LOG_DIR="/var/log/simple-network-dashboard"
 SERVICE_NAME="simple-network-dashboard"
 INSTALL_STATE="/etc/simple-network-dashboard/install-state"
 
@@ -105,6 +107,24 @@ remove_snd_identities_if_verified() {
     SND_IDENTITIES_REMOVED=true
 }
 
+is_private_config_file() {
+    [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+has_private_config() {
+    is_private_config_file "$DATA_DIR/devices.json" \
+        || is_private_config_file "$DATA_DIR/known_hosts"
+}
+
+backup_private_config() {
+    if is_private_config_file "$DATA_DIR/devices.json"; then
+        cp --no-dereference -- "$DATA_DIR/devices.json" "$BACKUP_DIR/"
+    fi
+    if is_private_config_file "$DATA_DIR/known_hosts"; then
+        cp --no-dereference -- "$DATA_DIR/known_hosts" "$BACKUP_DIR/"
+    fi
+}
+
 main() {
 if [ "$EUID" -ne 0 ]; then
     echo "Run with sudo: sudo bash uninstall.sh"
@@ -130,6 +150,8 @@ echo ""
 echo "This will remove:"
 echo "  - systemd service: $SERVICE_NAME"
 echo "  - application directory: $APP_DIR (including venv)"
+echo "  - private runtime data: $DATA_DIR"
+echo "  - debug logs: $LOG_DIR"
 if [ "$REMOVE_SND_IDENTITIES" = true ]; then
     echo "  - verified service account and group: snd"
 else
@@ -144,7 +166,7 @@ echo ""
 BACKUP_DIR=""
 HAS_CONFIG=false
 
-if [ -f "$APP_DIR/devices.json" ] || [ -f "$APP_DIR/known_hosts" ]; then
+if has_private_config; then
     HAS_CONFIG=true
 fi
 
@@ -167,11 +189,10 @@ if [ "$HAS_CONFIG" = true ]; then
         fi
 
         mkdir -p "$BACKUP_DIR"
-        [ -f "$APP_DIR/devices.json" ] && cp "$APP_DIR/devices.json" "$BACKUP_DIR/"
-        [ -f "$APP_DIR/known_hosts" ] && cp "$APP_DIR/known_hosts" "$BACKUP_DIR/"
+        backup_private_config
 
         if [ -n "$INSTALL_USER" ] && [ -d "/home/$INSTALL_USER" ]; then
-            chown -R "$INSTALL_USER:$INSTALL_USER" "$BACKUP_DIR"
+            chown -R --no-dereference -- "$INSTALL_USER:$INSTALL_USER" "$BACKUP_DIR"
         fi
 
         echo "Config backed up to: $BACKUP_DIR"
@@ -218,6 +239,14 @@ systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
 # Remove app directory
 if [ -d "$APP_DIR" ]; then
     rm -rf "$APP_DIR"
+fi
+
+# Remove private state only after the optional backup above completes.
+if [ -d "$DATA_DIR" ]; then
+    rm -rf "$DATA_DIR"
+fi
+if [ -d "$LOG_DIR" ]; then
+    rm -rf "$LOG_DIR"
 fi
 
 # Re-check ownership at the point of account deletion, after prompts and removal.
