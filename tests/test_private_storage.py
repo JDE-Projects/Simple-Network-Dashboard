@@ -247,8 +247,10 @@ def test_uninstaller_references_private_data_and_log_directories() -> None:
     uninstaller = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
     assert 'DATA_DIR="/var/lib/simple-network-dashboard"' in uninstaller
     assert 'LOG_DIR="/var/log/simple-network-dashboard"' in uninstaller
-    assert 'cp --no-dereference -- "$DATA_DIR/devices.json" "$BACKUP_DIR/"' in uninstaller
-    assert 'chown -R --no-dereference --' in uninstaller
+    assert 'create_private_backup_dir()' in uninstaller
+    assert 'mkdir -m 0700 -- "$BACKUP_DIR"' in uninstaller
+    assert 'chmod 0600 -- "$backup_file"' in uninstaller
+    assert 'finalize_private_backup_dir()' in uninstaller
     assert 'rm -rf "$DATA_DIR"' in uninstaller
     assert 'rm -rf "$LOG_DIR"' in uninstaller
 
@@ -272,6 +274,118 @@ printf 'backup_devices=%s backup_hosts=%s\\n' \
 
     assert result.returncode == 0, result.stderr
     assert "backup_devices=no backup_hosts=no" in result.stdout
+
+
+def test_uninstaller_creates_private_backup_for_invoking_user() -> None:
+    result = _run_uninstaller_contract(
+        """
+mkdir -p "$DATA_DIR"
+printf config > "$DATA_DIR/devices.json"
+printf hosts > "$DATA_DIR/known_hosts"
+BACKUP_OWNER=deploy
+BACKUP_GROUP=deploy
+mkdir() { command mkdir "$@"; printf 'mkdir:%s\\n' "$*" >> "$TEST_ROOT/metadata-calls"; }
+chown() { printf 'chown:%s\\n' "$*" >> "$TEST_ROOT/metadata-calls"; }
+chmod() { printf 'chmod:%s\\n' "$*" >> "$TEST_ROOT/metadata-calls"; }
+if ! create_private_backup_dir; then exit 10; fi
+if ! backup_private_config; then exit 11; fi
+if ! finalize_private_backup_dir; then exit 12; fi
+cat "$TEST_ROOT/metadata-calls"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = result.stdout.splitlines()
+    assert calls[0].startswith("mkdir:-m 0700 --")
+    assert any(call.startswith("chmod:0600 --") for call in calls)
+    file_chowns = [
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("chown:--no-dereference -- deploy:deploy")
+    ]
+    directory_chown = next(
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("chown:-- deploy:deploy")
+    )
+    assert file_chowns
+    assert all(calls[index - 1].startswith("chmod:0600 --") for index in file_chowns)
+    assert all(index < directory_chown for index in file_chowns)
+
+
+def test_uninstaller_refuses_to_continue_after_unsafe_backup_failure() -> None:
+    result = _run_uninstaller_contract(
+        """
+mkdir -p "$DATA_DIR" "$BACKUP_DIR"
+printf config > "$DATA_DIR/devices.json"
+BACKUP_OWNER=deploy
+BACKUP_GROUP=deploy
+cp() { return 1; }
+if backup_private_config; then exit 10; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "could not copy private configuration" in result.stdout
+
+
+def test_uninstaller_main_stops_before_removal_when_backup_copy_fails() -> None:
+    result = _run_uninstaller_contract(
+        """
+APP_DIR="$TEST_ROOT/app"
+LOG_DIR="$TEST_ROOT/log"
+INSTALL_STATE="$TEST_ROOT/install-state"
+SUDO_USER=$(id -un)
+mkdir -p "$DATA_DIR"
+printf config > "$DATA_DIR/devices.json"
+id() {
+  if [ "$1" = -gn ] && [ "$2" = "$SUDO_USER" ]; then printf test-group; return 0; fi
+  command id "$@"
+}
+require_root() { :; }
+create_private_backup_dir() { :; }
+cp() { return 1; }
+pwd() { printf '%s\\n' "$TEST_ROOT"; }
+date() { printf fixed; }
+systemctl() { printf systemctl > "$TEST_ROOT/removal-called"; }
+rm() { printf rm > "$TEST_ROOT/removal-called"; }
+userdel() { printf userdel > "$TEST_ROOT/removal-called"; }
+groupdel() { printf groupdel > "$TEST_ROOT/removal-called"; }
+if (main --yes); then exit 10; fi
+printf 'removal=%s\\n' "$(test -e "$TEST_ROOT/removal-called" && cat "$TEST_ROOT/removal-called" || echo no)"
+unset -f rm
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Nothing was removed" in result.stdout
+    assert "removal=no" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX ownership and mode semantics")
+def test_uninstaller_finalizes_private_backup_metadata_on_posix() -> None:
+    result = _run_uninstaller_contract(
+        """
+BACKUP_OWNER=$(id -un)
+BACKUP_GROUP=$(id -gn "$BACKUP_OWNER")
+mkdir -p "$DATA_DIR"
+printf config > "$DATA_DIR/devices.json"
+printf hosts > "$DATA_DIR/known_hosts"
+create_private_backup_dir
+backup_private_config
+finalize_private_backup_dir
+printf 'directory=%s devices=%s hosts=%s\\n' \\
+  "$(stat -c '%u:%g:%a' "$BACKUP_DIR")" \\
+  "$(stat -c '%u:%g:%a' "$BACKUP_DIR/devices.json")" \\
+  "$(stat -c '%u:%g:%a' "$BACKUP_DIR/known_hosts")"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    uid_gid = f"{os.getuid()}:{os.getgid()}"
+    assert f"directory={uid_gid}:700" in result.stdout
+    assert f"devices={uid_gid}:600" in result.stdout
+    assert f"hosts={uid_gid}:600" in result.stdout
 
 
 @pytest.mark.skipif(

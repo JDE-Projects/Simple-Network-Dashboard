@@ -97,7 +97,7 @@ sudo bash uninstall.sh
 sudo bash /opt/simple-network-dashboard/uninstall.sh
 ```
 
-The script removes the systemd service, the `/opt/simple-network-dashboard` directory (including the venv), private data in `/var/lib/simple-network-dashboard`, debug logs in `/var/log/simple-network-dashboard`, and the `snd` service account. Before removing anything it offers to back up `devices.json` and `known_hosts` from the private data directory, and asks for confirmation. Pass `--yes` for non-interactive runs (backs up config and proceeds without prompting).
+The script removes the systemd service, the `/opt/simple-network-dashboard` directory (including the venv), private data in `/var/lib/simple-network-dashboard`, and debug logs in `/var/log/simple-network-dashboard`. It removes the `snd` service account and group only when its protected installation record verifies that their current IDs match the account created by the installer. Otherwise, it retains them and explains why. Before removing anything it offers to back up `devices.json` and `known_hosts` from the private data directory into a private directory owned by the person who ran `sudo`, and asks for confirmation. Pass `--yes` for non-interactive runs (backs up config and proceeds without prompting).
 
 ## Security and privacy
 - SSH passwords are never written to disk. They are held in server memory only while a session is active and wiped immediately on disconnect.

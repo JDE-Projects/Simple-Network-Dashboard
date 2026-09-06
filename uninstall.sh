@@ -116,22 +116,76 @@ has_private_config() {
         || is_private_config_file "$DATA_DIR/known_hosts"
 }
 
+create_private_backup_dir() {
+    if [ -z "${BACKUP_OWNER:-}" ] || [ -z "${BACKUP_GROUP:-}" ]; then
+        echo "Error: could not determine the sudo user's backup ownership."
+        return 1
+    fi
+    if ! mkdir -m 0700 -- "$BACKUP_DIR"; then
+        echo "Error: could not create private backup directory: $BACKUP_DIR"
+        return 1
+    fi
+}
+
+backup_private_config_file() {
+    local source_file="$1"
+    local backup_file="$BACKUP_DIR/${source_file##*/}"
+
+    # The subshell's restrictive umask keeps the root-created copy private
+    # until ownership is transferred to the sudo user below.
+    if ! (umask 077; cp --no-dereference -- "$source_file" "$backup_file"); then
+        echo "Error: could not copy private configuration: $source_file"
+        return 1
+    fi
+    if ! is_private_config_file "$backup_file"; then
+        echo "Error: backup copy is not a regular file: $backup_file"
+        rm -f -- "$backup_file"
+        return 1
+    fi
+    if ! chmod 0600 -- "$backup_file"; then
+        echo "Error: could not set private backup file permissions: $backup_file"
+        return 1
+    fi
+    if ! chown --no-dereference -- "$BACKUP_OWNER:$BACKUP_GROUP" "$backup_file"; then
+        echo "Error: could not set backup file ownership: $backup_file"
+        return 1
+    fi
+}
+
 backup_private_config() {
     if is_private_config_file "$DATA_DIR/devices.json"; then
-        cp --no-dereference -- "$DATA_DIR/devices.json" "$BACKUP_DIR/"
+        backup_private_config_file "$DATA_DIR/devices.json" || return 1
     fi
     if is_private_config_file "$DATA_DIR/known_hosts"; then
-        cp --no-dereference -- "$DATA_DIR/known_hosts" "$BACKUP_DIR/"
+        backup_private_config_file "$DATA_DIR/known_hosts" || return 1
+    fi
+}
+
+finalize_private_backup_dir() {
+    if ! chown -- "$BACKUP_OWNER:$BACKUP_GROUP" "$BACKUP_DIR"; then
+        echo "Error: could not set backup directory ownership: $BACKUP_DIR"
+        return 1
+    fi
+}
+
+require_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "Run with sudo: sudo bash uninstall.sh"
+        return 1
     fi
 }
 
 main() {
-if [ "$EUID" -ne 0 ]; then
-    echo "Run with sudo: sudo bash uninstall.sh"
-    exit 1
+if ! require_root; then
+    return 1
 fi
 
-INSTALL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo '')}"
+INSTALL_USER="${SUDO_USER:-$(logname 2>/dev/null || id -un)}"
+BACKUP_OWNER="$INSTALL_USER"
+BACKUP_GROUP=$(id -gn "$BACKUP_OWNER") || {
+    echo "Error: could not determine the sudo user's backup group."
+    exit 1
+}
 
 # Decide account deletion before any removal mutation.
 classify_uninstall_account_state
@@ -188,11 +242,11 @@ if [ "$HAS_CONFIG" = true ]; then
             echo "Note: could not determine user home directory; backing up to $BACKUP_DIR"
         fi
 
-        mkdir -p "$BACKUP_DIR"
-        backup_private_config
-
-        if [ -n "$INSTALL_USER" ] && [ -d "/home/$INSTALL_USER" ]; then
-            chown -R --no-dereference -- "$INSTALL_USER:$INSTALL_USER" "$BACKUP_DIR"
+        if ! create_private_backup_dir \
+            || ! backup_private_config \
+            || ! finalize_private_backup_dir; then
+            echo "Error: configuration backup could not be completed safely. Nothing was removed."
+            exit 1
         fi
 
         echo "Config backed up to: $BACKUP_DIR"
