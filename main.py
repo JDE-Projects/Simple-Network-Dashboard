@@ -12,6 +12,7 @@ import os
 import socket
 import ssl
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 import uuid
@@ -188,15 +189,67 @@ def _open_private_file(path: str, *, buffering: int = -1):
         raise
 
 
+def _open_private_temp_file() -> tuple[str, object]:
+    """Create a private, same-directory file for an atomic device save."""
+    fd = None
+    path = None
+    try:
+        fd, path = tempfile.mkstemp(prefix=".devices-", suffix=".tmp", dir=DATA_DIR)
+        os.fchmod(fd, 0o600)
+        file = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None
+        return path, file
+    except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if path is not None:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        raise
+
+
+def _fsync_data_directory() -> None:
+    """Persist the replacement entry after the temporary file is replaced."""
+    fd = None
+    try:
+        fd = os.open(DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        os.fsync(fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _save(devices: list) -> bool:
     global _devices_cache
+    temp_path = None
+    replaced = False
     try:
-        with _open_private_file(DEVICES_FILE) as f:
+        temp_path, f = _open_private_temp_file()
+        with f:
             json.dump({"_app": APP_NAME, "devices": devices}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, DEVICES_FILE)
+        replaced = True
+        temp_path = None
         _devices_cache = list(devices)
+        _fsync_data_directory()
         return True
-    except Exception as e:
-        msg = f"SAVE FAILED: {e}"
+    except Exception:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        if replaced:
+            msg = "SAVE FAILED: device configuration was replaced but directory sync did not complete."
+        else:
+            msg = "SAVE FAILED: could not persist device configuration."
         _debug_write(msg)
         print(msg, flush=True)  # always visible in the systemd journal, even with debug logging off
         return False

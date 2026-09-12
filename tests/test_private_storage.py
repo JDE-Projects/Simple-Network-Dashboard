@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 
 import main
@@ -168,15 +170,60 @@ def test_installer_repairs_metadata_through_non_dereferencing_descriptors() -> N
     assert 'chown snd:snd "$DATA_DIR"' not in installer
 
 
-def test_devices_file_is_private_when_created_or_repaired(monkeypatch) -> None:
-    calls = []
-    monkeypatch.setattr(main.os, "open", lambda *args: calls.append(args) or 9)
-    monkeypatch.setattr(main.os, "fchmod", lambda *args: calls.append(args))
-    monkeypatch.setattr(main.os, "fdopen", lambda *_args, **_kwargs: _TextFile())
+def test_devices_save_uses_private_temp_file_and_atomic_replace(monkeypatch) -> None:
+    events = []
+    temp_path = os.path.join(main.DATA_DIR, ".devices-test.tmp")
+    file = _AtomicTextFile(events, 11)
+    monkeypatch.setattr(
+        main.tempfile,
+        "mkstemp",
+        lambda **kwargs: events.append(("mkstemp", kwargs)) or (11, temp_path),
+    )
+    monkeypatch.setattr(main.os, "fchmod", lambda fd, mode: events.append(("fchmod", fd, mode)))
+    monkeypatch.setattr(main.os, "fdopen", lambda fd, *_args, **_kwargs: events.append(("fdopen", fd)) or file)
+    monkeypatch.setattr(main.os, "fsync", lambda fd: events.append(("fsync", fd)))
+    monkeypatch.setattr(main.os, "replace", lambda source, target: events.append(("replace", source, target)))
+    monkeypatch.setattr(main.os, "open", lambda path, flags: events.append(("open", path, flags)) or 12)
+    monkeypatch.setattr(main.os, "close", lambda fd: events.append(("close", fd)))
+    monkeypatch.setattr(main, "_devices_cache", ["old"])
 
-    assert main._save([])
-    assert calls[0] == (main.DEVICES_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    assert calls[1] == (9, 0o600)
+    devices = [{"id": "new"}]
+    assert main._save(devices)
+    assert events == [
+        ("mkstemp", {"prefix": ".devices-", "suffix": ".tmp", "dir": main.DATA_DIR}),
+        ("fchmod", 11, 0o600),
+        ("fdopen", 11),
+        ("flush",),
+        ("fsync", 11),
+        ("close-file",),
+        ("replace", temp_path, main.DEVICES_FILE),
+        ("open", main.DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
+        ("fsync", 12),
+        ("close", 12),
+    ]
+    assert main._devices_cache == devices
+
+
+@pytest.mark.parametrize("existing_payload", [None, "old contents"], ids=["first-save", "replace-existing"])
+def test_devices_save_creates_or_replaces_real_file(monkeypatch, tmp_path, existing_payload) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    if existing_payload is not None:
+        devices_file.write_text(existing_payload, encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+    monkeypatch.setattr(main, "_fsync_data_directory", lambda: None)
+
+    devices = [{"id": "saved"}]
+    assert main._save(devices)
+    assert json.loads(devices_file.read_text(encoding="utf-8")) == {
+        "_app": main.APP_NAME,
+        "devices": devices,
+    }
+    assert list(data_dir.glob(".devices-*.tmp")) == []
+    if os.name != "nt":
+        assert stat.S_IMODE(devices_file.stat().st_mode) == 0o600
 
 
 def test_debug_log_is_created_in_private_log_directory(monkeypatch) -> None:
@@ -198,7 +245,14 @@ def test_debug_log_is_created_in_private_log_directory(monkeypatch) -> None:
 @pytest.mark.parametrize("failure", ["fchmod", "fdopen"])
 def test_private_file_creation_closes_raw_fd_on_setup_failure(monkeypatch, operation, failure) -> None:
     calls = []
-    monkeypatch.setattr(main.os, "open", lambda *_args: 9)
+    if operation == "devices":
+        monkeypatch.setattr(
+            main.tempfile,
+            "mkstemp",
+            lambda **_kwargs: (9, os.path.join(main.DATA_DIR, ".devices-test.tmp")),
+        )
+    else:
+        monkeypatch.setattr(main.os, "open", lambda *_args: 9)
     monkeypatch.setattr(main.os, "close", lambda fd: calls.append(("close", fd)))
     if failure == "fchmod":
         monkeypatch.setattr(main.os, "fchmod", lambda *_args: (_ for _ in ()).throw(OSError("denied")))
@@ -214,6 +268,80 @@ def test_private_file_creation_closes_raw_fd_on_setup_failure(monkeypatch, opera
             asyncio.run(main.toggle_debug(main.DebugIn(enabled=True)))
 
     assert calls == [("close", 9)]
+
+
+def test_private_temp_creation_attempts_cleanup_when_raw_fd_close_fails(monkeypatch) -> None:
+    events = []
+    temp_path = os.path.join(main.DATA_DIR, ".devices-test.tmp")
+    monkeypatch.setattr(main.tempfile, "mkstemp", lambda **_kwargs: (9, temp_path))
+    monkeypatch.setattr(
+        main.os,
+        "fchmod",
+        lambda *_args: (_ for _ in ()).throw(OSError("fchmod denied")),
+    )
+
+    def fail_close(fd):
+        events.append(("close", fd))
+        raise OSError("close failed")
+
+    monkeypatch.setattr(main.os, "close", fail_close)
+    monkeypatch.setattr(main.os, "unlink", lambda path: events.append(("unlink", path)))
+
+    with pytest.raises(OSError, match="fchmod denied"):
+        main._open_private_temp_file()
+
+    assert events == [("close", 9), ("unlink", temp_path)]
+
+
+@pytest.mark.parametrize("failure", ["json", "file-fsync", "replace"])
+def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys, failure) -> None:
+    events = []
+    temp_path = os.path.join(main.DATA_DIR, ".devices-test.tmp")
+    file = _AtomicTextFile(events, 11)
+    monkeypatch.setattr(main, "_open_private_temp_file", lambda: (temp_path, file))
+    monkeypatch.setattr(main.os, "unlink", lambda path: events.append(("unlink", path)))
+    monkeypatch.setattr(main, "_devices_cache", ["old"])
+    if failure == "json":
+        monkeypatch.setattr(
+            main.json,
+            "dump",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("secret configuration")),
+        )
+    elif failure == "file-fsync":
+        monkeypatch.setattr(
+            main.os,
+            "fsync",
+            lambda _fd: (_ for _ in ()).throw(OSError("secret configuration")),
+        )
+    else:
+        monkeypatch.setattr(
+            main.os,
+            "replace",
+            lambda *_args: (_ for _ in ()).throw(OSError("secret configuration")),
+        )
+
+    assert not main._save([{"id": "new"}])
+    assert events[-1] == ("unlink", temp_path)
+    assert main._devices_cache == ["old"]
+    assert "secret configuration" not in capsys.readouterr().out
+
+
+def test_devices_save_keeps_cache_when_replace_succeeds_but_directory_fsync_fails(monkeypatch, capsys) -> None:
+    events = []
+    temp_path = os.path.join(main.DATA_DIR, ".devices-test.tmp")
+    file = _AtomicTextFile(events, 11)
+    monkeypatch.setattr(main, "_open_private_temp_file", lambda: (temp_path, file))
+    monkeypatch.setattr(main.os, "fsync", lambda _fd: None)
+    monkeypatch.setattr(main.os, "replace", lambda source, target: events.append(("replace", source, target)))
+    monkeypatch.setattr(main, "_fsync_data_directory", lambda: (_ for _ in ()).throw(OSError("disk failure")))
+    monkeypatch.setattr(main.os, "unlink", lambda path: events.append(("unlink", path)))
+    monkeypatch.setattr(main, "_devices_cache", ["old"])
+
+    devices = [{"id": "new"}]
+    assert not main._save(devices)
+    assert main._devices_cache == devices
+    assert events == [("flush",), ("close-file",), ("replace", temp_path, main.DEVICES_FILE)]
+    assert "directory sync did not complete" in capsys.readouterr().out
 
 
 def test_known_hosts_file_is_private_when_saved(monkeypatch) -> None:
@@ -241,6 +369,22 @@ class _TextFile:
 
     def close(self) -> None:
         pass
+
+
+class _AtomicTextFile(_TextFile):
+    def __init__(self, events, fd: int):
+        self.events = events
+        self.fd = fd
+
+    def flush(self) -> None:
+        self.events.append(("flush",))
+
+    def fileno(self) -> int:
+        return self.fd
+
+    def __exit__(self, *_args):
+        self.events.append(("close-file",))
+        return False
 
 
 def test_uninstaller_references_private_data_and_log_directories() -> None:
