@@ -159,16 +159,32 @@ ssh_mgr = SSHManager(_broadcast, _debug_write)
 # Device persistence
 # ---------------------------------------------------------------------------
 
+def _parse_devices(contents: str) -> list:
+    """Parse and normalize a devices.json payload."""
+    data = json.loads(contents)
+    devices = data.get("devices", data) if isinstance(data, dict) else data
+    return [_norm(d) for d in devices if isinstance(d, dict)]
+
+
 def _load() -> list:
     if not os.path.exists(DEVICES_FILE):
         return []
     try:
         with open(DEVICES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        devices = data.get("devices", data) if isinstance(data, dict) else data
-        return [_norm(d) for d in devices if isinstance(d, dict)]
+            return _parse_devices(f.read())
     except Exception:
         return []
+
+
+def _read_valid_devices_file() -> str | None:
+    """Return the exact valid primary contents, or None when it cannot be used."""
+    try:
+        with open(DEVICES_FILE, "r", encoding="utf-8") as f:
+            contents = f.read()
+        _parse_devices(contents)
+        return contents
+    except Exception:
+        return None
 
 
 # Shared error message for endpoints that fail to persist a device change
@@ -229,6 +245,17 @@ def _save(devices: list) -> bool:
     temp_path = None
     replaced = False
     try:
+        previous_contents = _read_valid_devices_file() if os.path.exists(DEVICES_FILE) else None
+        if previous_contents is not None:
+            temp_path, f = _open_private_temp_file()
+            with f:
+                f.write(previous_contents)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, f"{DEVICES_FILE}.bak")
+            temp_path = None
+            _fsync_data_directory()
+
         temp_path, f = _open_private_temp_file()
         with f:
             json.dump({"_app": APP_NAME, "devices": devices}, f, indent=2)
