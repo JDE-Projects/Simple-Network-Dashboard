@@ -438,6 +438,51 @@ def test_startup_recovers_valid_backup(
     assert "from-backup" not in capsys.readouterr().out
 
 
+def test_fresh_startup_without_configuration_is_empty_and_writable(monkeypatch, tmp_path) -> None:
+    devices_file = tmp_path / "devices.json"
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+
+    devices, recovered, read_only = main._load_startup_devices()
+
+    assert devices == []
+    assert recovered is False
+    assert read_only is False
+    assert main._recovery_backup_contents is None
+
+
+@pytest.mark.parametrize(
+    ("primary_contents", "backup_contents"),
+    [
+        ("{invalid", None),
+        (None, "{invalid"),
+        ("{invalid", "{also-invalid"),
+    ],
+    ids=["invalid-primary", "invalid-backup", "both-invalid"],
+)
+def test_startup_without_any_valid_configuration_is_empty_and_read_only(
+    monkeypatch, tmp_path, capsys, primary_contents, backup_contents
+) -> None:
+    devices_file = tmp_path / "devices.json"
+    backup_file = tmp_path / "devices.json.bak"
+    if primary_contents is not None:
+        devices_file.write_text(primary_contents, encoding="utf-8")
+    if backup_contents is not None:
+        backup_file.write_text(backup_contents, encoding="utf-8")
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+
+    devices, recovered, read_only = main._load_startup_devices()
+
+    assert devices == []
+    assert recovered is False
+    assert read_only is True
+    assert main._recovery_backup_contents is None
+    output = capsys.readouterr().out
+    assert "Configuration recovery mode" in output
+    for private_contents in (primary_contents, backup_contents):
+        if private_contents is not None:
+            assert private_contents not in output
+
+
 def test_lifespan_latches_recovery_mode_until_restart(monkeypatch) -> None:
     cached = [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
     monkeypatch.setattr(main, "_recovery_mode", False)
@@ -638,7 +683,9 @@ def test_recovery_ui_shows_only_simple_warning_and_restored_notice() -> None:
     assert "notice-banner" in ui
     assert "RECOVERY_NOTICE_SHOWN" in ui
     assert 'id="retryRecovery"' in ui
+    assert 'id="recoveryActions"' in ui
     assert 'id="recoveryRetryStatus" aria-live="polite"' in ui
+    assert "msg.recovery_retry_available" in ui
     assert "POST('/api/retry-recovery', {})" in ui
     assert "button.textContent = 'Trying…'" in ui
     assert "case 'recovery_restored':" in ui

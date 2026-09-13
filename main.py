@@ -194,9 +194,18 @@ def _load_startup_devices() -> tuple[list, bool, bool]:
             with open(f"{DEVICES_FILE}.bak", "r", encoding="utf-8") as f:
                 backup_contents = f.read()
             devices = _parse_devices(backup_contents)
-        except Exception:
-            # Phase 4 will distinguish a fresh install from both copies failing.
-            return [], False, False
+        except Exception as backup_error:
+            if isinstance(primary_error, FileNotFoundError) and isinstance(
+                backup_error, FileNotFoundError
+            ):
+                return [], False, False
+            print(
+                "WARNING: Configuration recovery mode is active. "
+                "Neither configuration copy could be loaded; "
+                "configuration changes are disabled to protect the existing files.",
+                flush=True,
+            )
+            return [], False, True
         try:
             _replace_primary_from_backup(backup_contents)
             with open(DEVICES_FILE, "r", encoding="utf-8") as f:
@@ -235,8 +244,7 @@ def _configuration_failure_reason(error: Exception) -> str:
 # Shared error message for endpoints that fail to persist a device change
 _SAVE_ERROR = "Server could not write devices.json (check file ownership/permissions on the server)."
 _RECOVERY_READ_ONLY_ERROR = (
-    "Configuration changes are unavailable because automatic recovery did not finish. "
-    "Your saved devices and commands remain protected in the backup."
+    "Configuration changes are unavailable while the dashboard is in recovery mode."
 )
 
 
@@ -460,6 +468,7 @@ async def ws_endpoint(ws: WebSocket):
             "debug": _debug_file is not None,
             "storage_warning": _storage_warning,
             "recovery_mode": _recovery_mode,
+            "recovery_retry_available": _recovery_backup_contents is not None,
             "recovered_notice": _recovered_notice,
         }))
         # Push cached metrics so the stats panel fills immediately
@@ -518,7 +527,7 @@ async def retry_recovery():
             msg = "RECOVERY RETRY FAILED: retained payload unavailable."
             _debug_write(msg)
             print(msg, flush=True)
-            return {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
+            return {"ok": False, "error": "No validated backup is available for automatic recovery."}
         try:
             _restore_and_verify_primary(contents)
         except Exception as error:
