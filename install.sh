@@ -570,10 +570,10 @@ start_dashboard_backend() {
 }
 
 export_caddy_root_certificate() {
-    local staged_cert fingerprint root_metadata
+    local staged_cert checksum root_metadata
 
-    if ! command -v openssl &>/dev/null; then
-        echo "Error: OpenSSL is required to validate and export Caddy's public root certificate."
+    if ! command -v openssl &>/dev/null || ! command -v sha256sum &>/dev/null; then
+        echo "Error: OpenSSL and sha256sum are required to validate and export Caddy's public root certificate."
         return 1
     fi
     if [ -L "$CADDY_ROOT_CERT" ] || [ ! -f "$CADDY_ROOT_CERT" ]; then
@@ -597,19 +597,19 @@ export_caddy_root_certificate() {
         rm -f -- "$staged_cert"
         return 1
     fi
-    fingerprint=$(openssl x509 -in "$staged_cert" -noout -fingerprint -sha256) || {
-        echo "Error: Caddy root certificate fingerprint could not be generated."
+    checksum=$(sha256sum "$staged_cert") || {
+        echo "Error: exported Caddy root certificate checksum could not be generated."
         rm -f -- "$staged_cert"
         return 1
     }
-    fingerprint="${fingerprint#*=}"
+    checksum="${checksum%% *}"
     if ! chown snd:snd "$staged_cert" || ! chmod 600 "$staged_cert" \
         || ! mv -fT -- "$staged_cert" "$DASHBOARD_ROOT_CERT"; then
         echo "Error: Caddy root certificate could not be published safely."
         rm -f -- "$staged_cert"
         return 1
     fi
-    echo "Caddy local root certificate SHA-256 fingerprint: $fingerprint"
+    echo "Exported Caddy root certificate file SHA-256 checksum: $checksum"
 }
 
 record_install_state() {
@@ -1012,6 +1012,11 @@ fi
 echo ""
 echo "Simple Network Dashboard is running."
 echo "Open https://${HTTPS_HOST}:${HTTPS_PORT} in your browser."
+echo "Certificate setup: https://${HTTPS_HOST}:${HTTPS_PORT}/certificate-setup"
+echo "Before importing the certificate, compare this command's SHA-256 checksum with the checksum printed above:"
+echo 'Get-FileHash -Path "$env:USERPROFILE\Downloads\caddy-root-ca.crt" -Algorithm SHA256'
+echo "Import it only after the checksums match:"
+echo 'Import-Certificate -FilePath "$env:USERPROFILE\Downloads\caddy-root-ca.crt" -CertStoreLocation Cert:\CurrentUser\Root'
 echo "To uninstall later: sudo bash $APP_DIR/uninstall.sh"
 if [ "$ADDED_TO_GROUP" = true ]; then
     echo ""
