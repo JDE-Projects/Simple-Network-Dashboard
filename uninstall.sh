@@ -6,6 +6,142 @@ DATA_DIR="/var/lib/simple-network-dashboard"
 LOG_DIR="/var/log/simple-network-dashboard"
 SERVICE_NAME="simple-network-dashboard"
 INSTALL_STATE="/etc/simple-network-dashboard/install-state"
+CADDY_APP_CONFIG="/etc/caddy/simple-network-dashboard.caddy"
+CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
+UFW_COMMENT="Simple Network Dashboard HTTPS"
+CADDY_APP_MARKER="# Simple Network Dashboard managed proxy v1"
+CADDY_IMPORT_COMMENT="# Simple Network Dashboard managed Caddy import"
+
+is_owned_caddy_app_config() {
+    local metadata
+    [ -L "$CADDY_APP_CONFIG" ] && return 1
+    [ -f "$CADDY_APP_CONFIG" ] || return 1
+    metadata=$(stat -c '%u:%g:%a' "$CADDY_APP_CONFIG") || return 1
+    [ "$metadata" = "0:0:644" ] || return 1
+    [ "$(head -n 1 "$CADDY_APP_CONFIG")" = "$CADDY_APP_MARKER" ]
+}
+
+count_caddy_imports() {
+    awk -v comment="$CADDY_IMPORT_COMMENT" -v import_line="$CADDY_IMPORT_LINE" '
+        $0 == import_line { total++ }
+        previous == comment && $0 == import_line { managed++ }
+        { previous=$0 }
+        END { printf "%d %d\n", total + 0, managed + 0 }
+    ' "$1"
+}
+
+inspect_caddy_for_cleanup() {
+    local load_state exec_start
+
+    command -v caddy &>/dev/null || {
+        echo "Error: Caddy is unavailable; dashboard proxy cleanup was not attempted."
+        return 1
+    }
+    load_state=$(systemctl show --property=LoadState --value caddy 2>/dev/null) || return 1
+    if [ "$load_state" != "loaded" ]; then
+        echo "Error: Caddy service is not available; dashboard proxy cleanup was not attempted."
+        return 1
+    fi
+    exec_start=$(systemctl show --property=ExecStart --value caddy 2>/dev/null) || return 1
+    if [[ "$exec_start" == *"--resume"* ]] || [[ "$exec_start" == *"--adapter json"* ]] \
+        || [[ "$exec_start" == *".json"* ]] \
+        || [[ ! "$exec_start" =~ caddy[[:space:]]+run[[:space:]] ]] \
+        || [[ ! "$exec_start" =~ --config[[:space:]]+([^[:space:];]+) ]]; then
+        echo "Error: Caddy is not a compatible Caddyfile-managed service; dashboard proxy cleanup was not attempted."
+        return 1
+    fi
+    CADDY_CONFIG_PATH="${BASH_REMATCH[1]}"
+    if [[ "$CADDY_CONFIG_PATH" != *Caddyfile ]] || [ ! -f "$CADDY_CONFIG_PATH" ] \
+        || [ -L "$CADDY_CONFIG_PATH" ]; then
+        echo "Error: Caddyfile path is unsafe or unsupported; dashboard proxy cleanup was not attempted."
+        return 1
+    fi
+    CADDY_BINARY=$(command -v caddy)
+}
+
+remove_dashboard_caddy_integration() {
+    local config_dir staged_caddyfile backup_caddyfile backup_app_config had_app_config=false import_counts import_count managed_import_count
+
+    if { [ -e "$CADDY_APP_CONFIG" ] || [ -L "$CADDY_APP_CONFIG" ]; } && ! is_owned_caddy_app_config; then
+        echo "Error: dashboard Caddy proxy config is not a root-owned marked regular file; refusing to remove it."
+        return 1
+    fi
+    if [ ! -e "$CADDY_APP_CONFIG" ] && ! command -v caddy &>/dev/null; then
+        return 0
+    fi
+    if ! inspect_caddy_for_cleanup; then
+        return 1
+    fi
+    import_counts=$(count_caddy_imports "$CADDY_CONFIG_PATH") || return 1
+    read -r import_count managed_import_count <<< "$import_counts"
+    if [ "$import_count" -ne "$managed_import_count" ]; then
+        echo "Error: Caddyfile contains an unowned dashboard import; refusing cleanup."
+        return 1
+    fi
+    if [ "$managed_import_count" -eq 0 ] && [ ! -e "$CADDY_APP_CONFIG" ]; then
+        return 0
+    fi
+
+    config_dir=$(dirname "$CADDY_CONFIG_PATH")
+    staged_caddyfile=$(mktemp "$config_dir/.simple-network-dashboard-uninstall.XXXXXX") || return 1
+    backup_caddyfile=$(mktemp "$config_dir/.simple-network-dashboard-uninstall-backup.XXXXXX") || {
+        rm -f -- "$staged_caddyfile"
+        return 1
+    }
+    backup_app_config=$(mktemp "$config_dir/.simple-network-dashboard-proxy-backup.XXXXXX") || {
+        rm -f -- "$staged_caddyfile" "$backup_caddyfile"
+        return 1
+    }
+    trap 'rm -f -- "$staged_caddyfile" "$backup_caddyfile" "$backup_app_config"' RETURN
+    awk -v comment="$CADDY_IMPORT_COMMENT" -v import_line="$CADDY_IMPORT_LINE" '
+        $0 == comment { pending=1; next }
+        pending && $0 == import_line { pending=0; next }
+        pending { print comment; pending=0 }
+        $0 != import_line { print }
+        END { if (pending) print comment }
+    ' "$CADDY_CONFIG_PATH" > "$staged_caddyfile" || return 1
+    if ! "$CADDY_BINARY" validate --config "$staged_caddyfile" --adapter caddyfile; then
+        echo "Error: remaining Caddy configuration is invalid; no dashboard proxy configuration was removed."
+        return 1
+    fi
+
+    cp -- "$CADDY_CONFIG_PATH" "$backup_caddyfile" || return 1
+    if [ -f "$CADDY_APP_CONFIG" ]; then
+        had_app_config=true
+    fi
+    if { [ "$had_app_config" = true ] && ! mv -- "$CADDY_APP_CONFIG" "$backup_app_config"; } \
+        || ! install -m 0644 -- "$staged_caddyfile" "$CADDY_CONFIG_PATH"; then
+        echo "Error: Caddy cleanup publication failed; restoring the dashboard proxy configuration."
+        install -m 0644 -- "$backup_caddyfile" "$CADDY_CONFIG_PATH" || echo "Error: previous Caddyfile could not be restored."
+        if [ "$had_app_config" = true ] && [ -f "$backup_app_config" ]; then
+            mv -- "$backup_app_config" "$CADDY_APP_CONFIG" || echo "Error: dashboard proxy config could not be restored."
+        fi
+        return 1
+    fi
+    if ! systemctl reload caddy; then
+        echo "Error: Caddy reload failed; restoring the dashboard proxy configuration."
+        install -m 0644 -- "$backup_caddyfile" "$CADDY_CONFIG_PATH" || echo "Error: previous Caddyfile could not be restored."
+        if [ "$had_app_config" = true ] && [ -f "$backup_app_config" ]; then
+            mv -- "$backup_app_config" "$CADDY_APP_CONFIG" || echo "Error: dashboard proxy config could not be restored."
+        fi
+        systemctl reload caddy || echo "Error: rollback reload of Caddy also failed."
+        return 1
+    fi
+    rm -f -- "$backup_app_config"
+}
+
+remove_dashboard_ufw_rules() {
+    local rule_numbers
+
+    command -v ufw &>/dev/null || return 0
+    rule_numbers=$(ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" '
+        $0 ~ ("# " comment "[[:space:]]*$") { line=$0; sub(/^[[:space:]]*\[/, "", line); sub(/\].*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); print line }
+    ' | sort -rn) || return 1
+    while IFS= read -r rule; do
+        [ -n "$rule" ] || continue
+        ufw --force delete "$rule" || return 1
+    done <<< "$rule_numbers"
+}
 
 read_install_state() {
     local state_metadata
@@ -265,6 +401,18 @@ if [ "$AUTO_YES" = false ]; then
         echo "Aborted. Nothing was removed."
         exit 0
     fi
+fi
+
+# Remove only the dashboard-owned proxy integration and labelled firewall
+# rules before application files are touched.  A failed cleanup leaves the
+# installation in place for an administrator to inspect and retry.
+if ! remove_dashboard_caddy_integration; then
+    echo "Error: dashboard Caddy integration cleanup failed. Application files were not removed."
+    exit 1
+fi
+if ! remove_dashboard_ufw_rules; then
+    echo "Error: dashboard HTTPS firewall cleanup failed. Caddy cleanup may already have completed; application files were not removed."
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
