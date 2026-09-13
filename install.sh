@@ -11,6 +11,253 @@ INSTALL_STATE="${INSTALL_STATE_DIR}/install-state"
 PORT_MIN=3000
 PORT_MAX=3010
 FORCED_PORT=""
+HTTPS_PORT=443
+HTTPS_HOST=""
+HTTPS_HOST_WAS_SET=false
+
+usage() {
+    echo "Usage: $0 [--port N] [--https-host HOST] [--https-port N]"
+}
+
+is_valid_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+is_valid_ipv4() {
+    local address="$1"
+    local part
+    local -a parts
+
+    IFS='.' read -r -a parts <<< "$address"
+    [ "${#parts[@]}" -eq 4 ] || return 1
+    for part in "${parts[@]}"; do
+        [[ "$part" =~ ^[0-9]{1,3}$ ]] || return 1
+        [ "$((10#$part))" -le 255 ] || return 1
+    done
+}
+
+is_lan_ipv4() {
+    local address="$1"
+    local first second
+
+    is_valid_ipv4 "$address" || return 1
+    IFS='.' read -r first second _ <<< "$address"
+    if [ "$first" -eq 10 ]; then
+        return 0
+    fi
+    if [ "$first" -eq 192 ] && [ "$second" -eq 168 ]; then
+        return 0
+    fi
+    if [ "$first" -eq 172 ] && [ "$second" -ge 16 ] && [ "$second" -le 31 ]; then
+        return 0
+    fi
+    return 1
+}
+
+detect_lan_ipv4() {
+    local address
+
+    while IFS= read -r address; do
+        if is_lan_ipv4 "$address"; then
+            printf '%s\n' "$address"
+            return 0
+        fi
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+    return 1
+}
+
+is_valid_https_host() {
+    local host="$1"
+    local label
+    local -a labels
+
+    is_valid_ipv4 "$host" && return 0
+    [[ "$host" =~ ^[0-9]+(\.[0-9]+){3}$ ]] && return 1
+    [ "${#host}" -le 253 ] || return 1
+    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    [[ "$host" != .* ]] && [[ "$host" != *. ]] || return 1
+    IFS='.' read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+        [ -n "$label" ] && [ "${#label}" -le 63 ] || return 1
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+parse_install_arguments() {
+    FORCED_PORT=""
+    HTTPS_PORT=443
+    HTTPS_HOST=""
+    HTTPS_HOST_WAS_SET=false
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port|--https-port|--https-host)
+                if [ $# -lt 2 ] || [ -z "$2" ]; then
+                    echo "Error: $1 requires a value."
+                    usage
+                    return 1
+                fi
+                case "$1" in
+                    --port) FORCED_PORT="$2" ;;
+                    --https-port) HTTPS_PORT="$2" ;;
+                    --https-host) HTTPS_HOST="$2"; HTTPS_HOST_WAS_SET=true ;;
+                esac
+                shift 2
+                ;;
+            --port=*) FORCED_PORT="${1#--port=}"; shift ;;
+            --https-port=*) HTTPS_PORT="${1#--https-port=}"; shift ;;
+            --https-host=*) HTTPS_HOST="${1#--https-host=}"; HTTPS_HOST_WAS_SET=true; shift ;;
+            *)
+                echo "Error: unknown argument '$1'."
+                usage
+                return 1
+                ;;
+        esac
+    done
+
+    if [ -n "$FORCED_PORT" ] && ! is_valid_port "$FORCED_PORT"; then
+        echo "Error: --port must be a numeric port between 1 and 65535, got '$FORCED_PORT'."
+        return 1
+    fi
+    if ! is_valid_port "$HTTPS_PORT"; then
+        echo "Error: --https-port must be a numeric port between 1 and 65535, got '$HTTPS_PORT'."
+        return 1
+    fi
+    if [ "$HTTPS_HOST_WAS_SET" = false ]; then
+        if ! HTTPS_HOST=$(detect_lan_ipv4); then
+            echo "Error: could not detect a non-loopback LAN IPv4 address. Re-run with --https-host HOST."
+            return 1
+        fi
+    fi
+    if ! is_valid_https_host "$HTTPS_HOST"; then
+        echo "Error: --https-host must be a valid IPv4 address or DNS hostname, got '$HTTPS_HOST'."
+        usage
+        return 1
+    fi
+}
+
+listeners_for_port() {
+    local port="$1"
+
+    awk -v port="$port" '
+        $1 == "LISTEN" {
+            endpoint = $4
+            sub(/.*:/, "", endpoint)
+            gsub(/]/, "", endpoint)
+            if (endpoint == port) print
+        }
+    ' <<< "$SS_LISTENERS"
+}
+
+port_is_listening() {
+    [ -n "$(listeners_for_port "$1")" ]
+}
+
+inspect_caddy_state() {
+    local load_state
+
+    CADDY_STATE="fresh"
+    CADDY_BINARY=$(command -v caddy 2>/dev/null || true)
+    CADDY_CONFIG_PATH=""
+    if ! command -v systemctl &>/dev/null; then
+        echo "Error: systemctl is required to inspect existing Caddy management."
+        return 1
+    fi
+    if ! load_state=$(systemctl show --property=LoadState --value caddy 2>/dev/null); then
+        echo "Error: could not inspect the caddy systemd service."
+        return 1
+    fi
+
+    if [ "$load_state" = "not-found" ]; then
+        if [ -n "$CADDY_BINARY" ]; then
+            echo "Error: Caddy binary found at $CADDY_BINARY but no caddy systemd service was found."
+            echo "Refusing to modify an unsupported Caddy setup."
+            return 1
+        fi
+        return 0
+    fi
+    if [ -z "$CADDY_BINARY" ]; then
+        echo "Error: a caddy systemd service exists but its Caddy binary could not be found."
+        echo "Refusing to modify an unsupported Caddy setup."
+        return 1
+    fi
+
+    CADDY_EXEC_START=$(systemctl show --property=ExecStart --value caddy 2>/dev/null) || {
+        echo "Error: could not inspect the caddy systemd service launch command."
+        return 1
+    }
+    if [[ "$CADDY_EXEC_START" == *"--resume"* ]] \
+        || [[ "$CADDY_EXEC_START" == *"--adapter json"* ]] \
+        || [[ "$CADDY_EXEC_START" == *".json"* ]]; then
+        echo "Error: Caddy uses API/resume or JSON configuration and is not supported by this installer."
+        return 1
+    fi
+    if [[ ! "$CADDY_EXEC_START" =~ caddy[[:space:]]+run[[:space:]] ]]; then
+        echo "Error: caddy systemd service is not launched with 'caddy run'."
+        echo "Refusing to modify an unsupported Caddy setup."
+        return 1
+    fi
+    if [[ "$CADDY_EXEC_START" =~ --config[[:space:]]+([^[:space:];]+) ]]; then
+        CADDY_CONFIG_PATH="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$CADDY_CONFIG_PATH" != *Caddyfile ]]; then
+        echo "Error: caddy systemd service does not use a Caddyfile configuration."
+        echo "Refusing to modify an unsupported Caddy setup."
+        return 1
+    fi
+    CADDY_STATE="compatible"
+}
+
+suggest_free_https_port() {
+    local candidate=8443
+
+    while [ "$candidate" -le 8453 ]; do
+        if ! port_is_listening "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        candidate=$((candidate + 1))
+    done
+    return 1
+}
+
+preflight_https() {
+    local listeners
+    local alternative_port
+    local backend_argument=""
+
+    if ! command -v ss &>/dev/null; then
+        echo "Error: ss is required to inspect HTTPS port ${HTTPS_PORT}. Install iproute2 and re-run."
+        return 1
+    fi
+    if ! SS_LISTENERS=$(ss -H -ltnp 2>/dev/null); then
+        echo "Error: could not inspect TCP listeners with ss."
+        return 1
+    fi
+    if ! inspect_caddy_state; then
+        return 1
+    fi
+
+    listeners=$(listeners_for_port "$HTTPS_PORT")
+    if [ -z "$listeners" ]; then
+        return 0
+    fi
+    if [ "$CADDY_STATE" = "compatible" ] && ! grep -qv 'users:(("caddy",' <<< "$listeners"; then
+        return 0
+    fi
+
+    echo "Error: HTTPS port ${HTTPS_PORT} is already in use:"
+    printf '%s\n' "$listeners"
+    if alternative_port=$(suggest_free_https_port); then
+        if [ -n "$FORCED_PORT" ]; then
+            backend_argument=" --port ${FORCED_PORT}"
+        fi
+        echo "Re-run with: sudo bash install.sh --https-host ${HTTPS_HOST} --https-port ${alternative_port}${backend_argument}"
+    else
+        echo "No free alternative HTTPS port was found in range 8443-8453."
+    fi
+    return 1
+}
 
 record_install_state() {
     local temp_state=""
@@ -292,34 +539,14 @@ fi
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --port)
-            FORCED_PORT="$2"
-            shift 2
-            ;;
-        --port=*)
-            FORCED_PORT="${1#--port=}"
-            shift
-            ;;
-        *)
-            echo "Error: unknown argument '$1'. Usage: $0 [--port N]"
-            exit 1
-            ;;
-    esac
-done
+if ! parse_install_arguments "$@"; then
+    exit 1
+fi
 
-if [ -n "$FORCED_PORT" ]; then
-    case "$FORCED_PORT" in
-        ''|*[!0-9]*)
-            echo "Error: --port requires a numeric port, got '$FORCED_PORT'."
-            exit 1
-            ;;
-    esac
-    if [ "$FORCED_PORT" -lt 1 ] || [ "$FORCED_PORT" -gt 65535 ]; then
-        echo "Error: --port must be between 1 and 65535, got '$FORCED_PORT'."
-        exit 1
-    fi
+# This preflight deliberately precedes account classification and every
+# installation mutation so a port or Caddy conflict is safe to resolve.
+if ! preflight_https; then
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
