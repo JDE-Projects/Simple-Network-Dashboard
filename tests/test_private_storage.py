@@ -202,20 +202,28 @@ def test_devices_save_uses_private_temp_file_and_atomic_replace(monkeypatch) -> 
         ("open", main.DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
         ("fsync", 12),
         ("close", 12),
+        ("mkstemp", {"prefix": ".devices-", "suffix": ".tmp", "dir": main.DATA_DIR}),
+        ("fchmod", 11, 0o600),
+        ("fdopen", 11),
+        ("flush",),
+        ("fsync", 11),
+        ("close-file",),
+        ("replace", temp_path, f"{main.DEVICES_FILE}.bak"),
+        ("open", main.DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
+        ("fsync", 12),
+        ("close", 12),
     ]
     assert main._devices_cache == devices
 
 
-def test_devices_save_durably_replaces_backup_before_primary(monkeypatch) -> None:
+def test_devices_save_durably_replaces_primary_before_backup(monkeypatch) -> None:
     events = []
     backup_temp = os.path.join(main.DATA_DIR, ".devices-backup.tmp")
     primary_temp = os.path.join(main.DATA_DIR, ".devices-primary.tmp")
     files = iter([
-        (backup_temp, _AtomicTextFile(events, 21)),
-        (primary_temp, _AtomicTextFile(events, 22)),
+        (primary_temp, _AtomicTextFile(events, 21)),
+        (backup_temp, _AtomicTextFile(events, 22)),
     ])
-    monkeypatch.setattr(main.os.path, "exists", lambda _path: True)
-    monkeypatch.setattr(main, "_read_valid_devices_file", lambda: "exact previous contents")
     monkeypatch.setattr(main, "_open_private_temp_file", lambda: next(files))
     monkeypatch.setattr(main.os, "fsync", lambda fd: events.append(("fsync", fd)))
     monkeypatch.setattr(main.os, "replace", lambda source, target: events.append(("replace", source, target)))
@@ -227,40 +235,79 @@ def test_devices_save_durably_replaces_backup_before_primary(monkeypatch) -> Non
         ("flush",),
         ("fsync", 21),
         ("close-file",),
-        ("replace", backup_temp, f"{main.DEVICES_FILE}.bak"),
+        ("replace", primary_temp, main.DEVICES_FILE),
         ("directory-fsync",),
         ("flush",),
         ("fsync", 22),
         ("close-file",),
-        ("replace", primary_temp, main.DEVICES_FILE),
+        ("replace", backup_temp, f"{main.DEVICES_FILE}.bak"),
         ("directory-fsync",),
     ]
 
 
-def test_backup_staging_failure_cleans_up_and_preserves_primary(monkeypatch, capsys) -> None:
-    events = []
-    backup_temp = os.path.join(main.DATA_DIR, ".devices-backup.tmp")
-    backup_file = _AtomicTextFile(events, 21)
-    monkeypatch.setattr(main.os.path, "exists", lambda _path: True)
-    monkeypatch.setattr(main, "_read_valid_devices_file", lambda: "exact previous contents")
-    monkeypatch.setattr(main, "_open_private_temp_file", lambda: (backup_temp, backup_file))
-    monkeypatch.setattr(
-        main.os,
-        "fsync",
-        lambda _fd: (_ for _ in ()).throw(OSError("secret backup failure")),
-    )
-    monkeypatch.setattr(main.os, "unlink", lambda path: events.append(("unlink", path)))
-    monkeypatch.setattr(main.os, "replace", lambda source, target: events.append(("replace", source, target)))
-    monkeypatch.setattr(main, "_devices_cache", ["old"])
+def test_backup_staging_failure_keeps_new_primary_and_previous_confirmed_backup(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+    monkeypatch.setattr(main, "_fsync_data_directory", lambda: None)
+    assert main._save([{"id": "confirmed"}])
+    confirmed_backup = (data_dir / "devices.json.bak").read_text(encoding="utf-8")
+    real_write = main._write_private_payload
+
+    def fail_backup(path, contents, on_replaced=None):
+        if path == f"{main.DEVICES_FILE}.bak":
+            raise OSError("secret backup failure")
+        return real_write(path, contents, on_replaced)
+
+    monkeypatch.setattr(main, "_write_private_payload", fail_backup)
+    new_devices = [{"id": "new"}]
+
+    assert not main._save(new_devices)
+
+    assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == new_devices
+    assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == confirmed_backup
+    assert main._devices_cache == new_devices
+    output = capsys.readouterr().out
+    assert "durable mirrored save did not complete" in output
+    assert "secret backup failure" not in output
+
+
+def test_primary_pre_replacement_failure_preserves_confirmed_cache(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(main, "_devices_cache", [{"id": "confirmed"}])
+
+    def fail_primary(path, contents, on_replaced=None):
+        calls.append((path, contents))
+        if path == main.DEVICES_FILE:
+            raise OSError("primary staging failed")
+
+    monkeypatch.setattr(main, "_write_private_payload", fail_primary)
 
     assert not main._save([{"id": "new"}])
-
-    assert events == [("flush",), ("close-file",), ("unlink", backup_temp)]
-    assert main._devices_cache == ["old"]
-    assert "secret backup failure" not in capsys.readouterr().out
+    assert [path for path, _contents in calls] == [main.DEVICES_FILE]
+    assert main._devices_cache == [{"id": "confirmed"}]
 
 
-def test_first_devices_save_creates_primary_without_backup(monkeypatch, tmp_path) -> None:
+def test_primary_directory_fsync_failure_keeps_visible_replacement_in_cache(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_devices_cache", [{"id": "confirmed"}])
+
+    def write_then_fail(path, _contents, on_replaced=None):
+        if path == main.DEVICES_FILE:
+            on_replaced()
+            raise OSError("directory sync failed")
+
+    monkeypatch.setattr(main, "_write_private_payload", write_then_fail)
+    devices = [{"id": "new"}]
+
+    assert not main._save(devices)
+    assert main._devices_cache == devices
+
+
+def test_first_devices_save_creates_matching_primary_and_backup(monkeypatch, tmp_path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     devices_file = data_dir / "devices.json"
@@ -274,13 +321,13 @@ def test_first_devices_save_creates_primary_without_backup(monkeypatch, tmp_path
         "_app": main.APP_NAME,
         "devices": devices,
     }
-    assert not (data_dir / "devices.json.bak").exists()
+    assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
     assert list(data_dir.glob(".devices-*.tmp")) == []
     if os.name != "nt":
         assert stat.S_IMODE(devices_file.stat().st_mode) == 0o600
 
 
-def test_devices_save_rotates_exact_valid_primary_to_private_backup(monkeypatch, tmp_path) -> None:
+def test_devices_save_mirrors_exact_new_payload_to_private_backup(monkeypatch, tmp_path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     devices_file = data_dir / "devices.json"
@@ -293,13 +340,13 @@ def test_devices_save_rotates_exact_valid_primary_to_private_backup(monkeypatch,
 
     assert main._save([{"id": "new"}])
 
-    assert backup_file.read_text(encoding="utf-8") == previous_contents
+    assert backup_file.read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
     assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == [{"id": "new"}]
     if os.name != "nt":
         assert stat.S_IMODE(backup_file.stat().st_mode) == 0o600
 
 
-def test_devices_save_replaces_backup_on_later_valid_save(monkeypatch, tmp_path) -> None:
+def test_devices_save_keeps_backup_mirrored_on_later_saves(monkeypatch, tmp_path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     devices_file = data_dir / "devices.json"
@@ -308,12 +355,11 @@ def test_devices_save_replaces_backup_on_later_valid_save(monkeypatch, tmp_path)
     monkeypatch.setattr(main, "_fsync_data_directory", lambda: None)
 
     assert main._save([{"id": "first"}])
-    first_primary = devices_file.read_text(encoding="utf-8")
+    assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
     assert main._save([{"id": "second"}])
-    second_primary = devices_file.read_text(encoding="utf-8")
-    assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == first_primary
+    assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
     assert main._save([{"id": "third"}])
-    assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == second_primary
+    assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -321,7 +367,7 @@ def test_devices_save_replaces_backup_on_later_valid_save(monkeypatch, tmp_path)
     ["{invalid", '{"devices": [{"metrics_port": "not-a-number"}]}'],
     ids=["unparseable", "cannot-normalize"],
 )
-def test_devices_save_preserves_backup_when_primary_is_corrupt(monkeypatch, tmp_path, corrupt_primary) -> None:
+def test_devices_save_replaces_backup_with_new_payload_when_primary_is_corrupt(monkeypatch, tmp_path, corrupt_primary) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     devices_file = data_dir / "devices.json"
@@ -334,11 +380,11 @@ def test_devices_save_preserves_backup_when_primary_is_corrupt(monkeypatch, tmp_
 
     assert main._save([{"id": "new"}])
 
-    assert backup_file.read_text(encoding="utf-8") == "known good backup"
+    assert backup_file.read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
     assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == [{"id": "new"}]
 
 
-def test_devices_save_preserves_backup_when_primary_is_unreadable(monkeypatch, tmp_path) -> None:
+def test_devices_save_replaces_backup_with_new_payload_when_primary_is_unreadable(monkeypatch, tmp_path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     devices_file = data_dir / "devices.json"
@@ -359,8 +405,248 @@ def test_devices_save_preserves_backup_when_primary_is_unreadable(monkeypatch, t
 
     assert main._save([{"id": "new"}])
 
-    assert backup_file.read_text(encoding="utf-8") == "known good backup"
+    assert backup_file.read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
     assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == [{"id": "new"}]
+
+
+@pytest.mark.parametrize(
+    "primary_contents",
+    [None, "{invalid", '{"devices": [{"metrics_port": "not-a-number"}]}'],
+    ids=["missing", "unparseable", "cannot-normalize"],
+)
+def test_startup_recovers_valid_backup(
+    monkeypatch, tmp_path, capsys, primary_contents
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    backup_file = data_dir / "devices.json.bak"
+    if primary_contents is not None:
+        devices_file.write_text(primary_contents, encoding="utf-8")
+    backup_file.write_text('{"devices": [{"id": "from-backup"}]}', encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+    monkeypatch.setattr(main, "_fsync_data_directory", lambda: None)
+
+    devices, recovered, read_only = main._load_startup_devices()
+
+    assert devices == [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
+    assert recovered is True
+    assert read_only is False
+    assert main._recovery_backup_contents is None
+    assert devices_file.read_text(encoding="utf-8") == backup_file.read_text(encoding="utf-8")
+    assert "from-backup" not in capsys.readouterr().out
+
+
+def test_lifespan_latches_recovery_mode_until_restart(monkeypatch) -> None:
+    cached = [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
+    monkeypatch.setattr(main, "_recovery_mode", False)
+    monkeypatch.setattr(main, "_storage_warning", False)
+    monkeypatch.setattr(main, "_load_startup_devices", lambda: (cached, False, True))
+    monkeypatch.setattr(main.os.path, "exists", lambda _path: False)
+
+    async def check_latched_state() -> None:
+        async with main.lifespan(main.app):
+            assert main._devices_cache == cached
+            assert main._recovery_mode is True
+            assert main._storage_warning is True
+
+    asyncio.run(check_latched_state())
+
+
+def test_lifespan_sets_recovered_notice_without_read_only_mode(monkeypatch) -> None:
+    cached = [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
+    monkeypatch.setattr(main, "_recovery_mode", False)
+    monkeypatch.setattr(main, "_storage_warning", False)
+    monkeypatch.setattr(main, "_recovered_notice", False)
+    monkeypatch.setattr(main, "_load_startup_devices", lambda: (cached, True, False))
+    monkeypatch.setattr(main.os.path, "exists", lambda _path: False)
+
+    async def check_notice_state() -> None:
+        async with main.lifespan(main.app):
+            assert main._devices_cache == cached
+            assert main._recovered_notice is True
+            assert main._recovery_mode is False
+            assert main._storage_warning is False
+
+    asyncio.run(check_notice_state())
+
+
+def test_startup_recovery_hides_primary_read_error(monkeypatch, tmp_path, capsys) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    backup_file = data_dir / "devices.json.bak"
+    devices_file.write_text('{"devices": []}', encoding="utf-8")
+    backup_file.write_text('{"devices": [{"id": "from-backup"}]}', encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+    monkeypatch.setattr(main, "_fsync_data_directory", lambda: None)
+    real_open = builtins.open
+
+    def deny_primary_read(path, mode="r", *args, **kwargs):
+        if os.fspath(path) == str(devices_file) and mode == "r":
+            raise PermissionError("private primary detail")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", deny_primary_read)
+
+    devices, recovered, read_only = main._load_startup_devices()
+
+    assert devices[0]["id"] == "from-backup"
+    assert recovered is False
+    assert read_only is True
+    assert main._recovery_backup_contents == backup_file.read_text(encoding="utf-8")
+    output = capsys.readouterr().out
+    assert "Configuration recovery mode" in output
+    assert "private primary detail" not in output
+    assert "from-backup" not in output
+
+
+def test_recovery_mode_uses_cached_devices_and_rejects_all_configuration_mutations(monkeypatch) -> None:
+    cached = [{"id": "saved", "name": "Saved", "commands": [], "metrics_port": 9100}]
+    monkeypatch.setattr(main, "_devices_cache", cached)
+    monkeypatch.setattr(main, "_storage_warning", True)
+    monkeypatch.setattr(main, "_recovery_mode", True)
+    monkeypatch.setattr(main, "_save", lambda _devices: pytest.fail("attempted save in recovery mode"))
+    monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda _device_id: pytest.fail("disconnected during rejected mutation"))
+    monkeypatch.setattr(main.ws_mgr, "broadcast", lambda _message: pytest.fail("broadcast rejected mutation"))
+    monkeypatch.setattr(main, "_selected_device_id", "saved")
+
+    assert asyncio.run(main.get_devices()) == cached
+    add_result = asyncio.run(main.upsert_device(main.DeviceIn(name="New", host="new", username="user")))
+    delete_result = asyncio.run(main.delete_device("saved"))
+    command_result = asyncio.run(main.update_commands("saved", main.CommandsIn(commands=[])))
+
+    assert add_result == {"ok": False, "error": main._RECOVERY_READ_ONLY_ERROR}
+    assert delete_result == {"ok": False, "error": main._RECOVERY_READ_ONLY_ERROR}
+    assert command_result == {"ok": False, "error": main._RECOVERY_READ_ONLY_ERROR}
+    assert main._selected_device_id == "saved"
+
+
+def test_retry_recovery_restores_retained_validated_payload_and_broadcasts(monkeypatch) -> None:
+    payload = '{"devices": [{"id": "from-backup"}]}'
+    restored = []
+    broadcasts = []
+    monkeypatch.setattr(main, "_recovery_mode", True)
+    monkeypatch.setattr(main, "_storage_warning", True)
+    monkeypatch.setattr(main, "_recovery_backup_contents", payload)
+    monkeypatch.setattr(main, "_restore_and_verify_primary", lambda contents: restored.append(contents))
+
+    async def record_broadcast(message):
+        broadcasts.append(message)
+
+    monkeypatch.setattr(main.ws_mgr, "broadcast", record_broadcast)
+
+    result = asyncio.run(main.retry_recovery())
+
+    assert result == {"ok": True, "recovered": True}
+    assert restored == [payload]
+    assert main._recovery_mode is False
+    assert main._storage_warning is False
+    assert main._recovery_backup_contents is None
+    assert broadcasts == [{"type": "recovery_restored"}]
+
+
+def test_retry_recovery_failure_keeps_payload_and_hides_raw_error(monkeypatch, capsys) -> None:
+    payload = '{"devices": [{"id": "from-backup"}]}'
+    monkeypatch.setattr(main, "_recovery_mode", True)
+    monkeypatch.setattr(main, "_recovery_backup_contents", payload)
+    monkeypatch.setattr(
+        main,
+        "_restore_and_verify_primary",
+        lambda _contents: (_ for _ in ()).throw(OSError("private failure detail")),
+    )
+
+    result = asyncio.run(main.retry_recovery())
+
+    assert result == {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
+    assert main._recovery_mode is True
+    assert main._recovery_backup_contents == payload
+    output = capsys.readouterr().out
+    assert "OSError" in output
+    assert "private failure detail" not in output
+    assert "from-backup" not in output
+
+
+def test_retry_recovery_is_serialized_and_idempotent_after_success(monkeypatch) -> None:
+    payload = '{"devices": [{"id": "from-backup"}]}'
+    calls = []
+    broadcasts = []
+    monkeypatch.setattr(main, "_recovery_mode", True)
+    monkeypatch.setattr(main, "_recovery_backup_contents", payload)
+    monkeypatch.setattr(main, "_restore_and_verify_primary", lambda contents: calls.append(contents))
+
+    async def record_broadcast(message):
+        broadcasts.append(message)
+
+    monkeypatch.setattr(main.ws_mgr, "broadcast", record_broadcast)
+
+    async def retry_twice():
+        return await asyncio.gather(main.retry_recovery(), main.retry_recovery())
+
+    assert asyncio.run(retry_twice()) == [
+        {"ok": True, "recovered": True},
+        {"ok": True, "recovered": False},
+    ]
+    assert calls == [payload]
+    assert broadcasts == [{"type": "recovery_restored"}]
+
+
+def test_retry_recovery_is_safe_when_no_recovery_is_active(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_recovery_mode", False)
+
+    assert asyncio.run(main.retry_recovery()) == {"ok": True, "recovered": False}
+
+
+def test_save_defensively_rejects_recovery_mode_without_touching_storage(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(main, "_recovery_mode", True)
+    monkeypatch.setattr(main, "_open_private_temp_file", lambda: pytest.fail("opened storage in recovery mode"))
+
+    assert not main._save([{"id": "replacement"}])
+    assert "read-only until recovery succeeds" in capsys.readouterr().out
+
+
+def test_failed_command_save_does_not_mutate_cached_configuration(monkeypatch) -> None:
+    cached = [{"id": "saved", "commands": [{"name": "Original", "command": "uptime"}]}]
+    monkeypatch.setattr(main, "_devices_cache", cached)
+    monkeypatch.setattr(main, "_recovery_mode", False)
+    monkeypatch.setattr(main, "_save", lambda _devices: False)
+
+    result = asyncio.run(
+        main.update_commands(
+            "saved",
+            main.CommandsIn(commands=[{"name": "Replacement", "command": "hostname"}]),
+        )
+    )
+
+    assert result == {"ok": False, "error": main._SAVE_ERROR}
+    assert main._devices_cache == cached
+    assert main._devices_cache[0]["commands"][0]["name"] == "Original"
+
+
+def test_recovery_ui_shows_only_simple_warning_and_restored_notice() -> None:
+    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="recoveryBanner"' in ui
+    assert "classList.toggle('show', !!msg.recovery_mode)" in ui
+    assert "CONFIG_READ_ONLY = !!msg.recovery_mode" in ui
+    assert "$('addBtn').disabled = CONFIG_READ_ONLY" in ui
+    assert "$('addCmdBtn').disabled = !d || CONFIG_READ_ONLY" in ui
+    assert "msg.recovered_notice" in ui
+    assert "Configuration restored from backup" in ui
+    assert "notice-banner" in ui
+    assert "RECOVERY_NOTICE_SHOWN" in ui
+    assert 'id="retryRecovery"' in ui
+    assert 'id="recoveryRetryStatus" aria-live="polite"' in ui
+    assert "POST('/api/retry-recovery', {})" in ui
+    assert "button.textContent = 'Trying…'" in ui
+    assert "case 'recovery_restored':" in ui
+    assert "handleRecoveryRestored()" in ui
+    assert "Data remains protected" in ui
+    assert "recoveryModal" not in ui
+    assert "recoverySteps" not in ui
+    assert "Copy recovery command" not in ui
 
 
 def test_debug_log_is_created_in_private_log_directory(monkeypatch) -> None:
@@ -430,7 +716,21 @@ def test_private_temp_creation_attempts_cleanup_when_raw_fd_close_fails(monkeypa
     assert events == [("close", 9), ("unlink", temp_path)]
 
 
-@pytest.mark.parametrize("failure", ["json", "file-fsync", "replace"])
+def test_devices_save_serialization_failure_does_not_touch_storage(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        main.json,
+        "dumps",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("secret configuration")),
+    )
+    monkeypatch.setattr(main, "_open_private_temp_file", lambda: pytest.fail("opened storage"))
+    monkeypatch.setattr(main, "_devices_cache", ["old"])
+
+    assert not main._save([{"id": "new"}])
+    assert main._devices_cache == ["old"]
+    assert "secret configuration" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failure", ["file-fsync", "replace"])
 def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys, failure) -> None:
     events = []
     temp_path = os.path.join(main.DATA_DIR, ".devices-test.tmp")
@@ -438,13 +738,7 @@ def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys
     monkeypatch.setattr(main, "_open_private_temp_file", lambda: (temp_path, file))
     monkeypatch.setattr(main.os, "unlink", lambda path: events.append(("unlink", path)))
     monkeypatch.setattr(main, "_devices_cache", ["old"])
-    if failure == "json":
-        monkeypatch.setattr(
-            main.json,
-            "dump",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("secret configuration")),
-        )
-    elif failure == "file-fsync":
+    if failure == "file-fsync":
         monkeypatch.setattr(
             main.os,
             "fsync",
@@ -461,24 +755,6 @@ def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys
     assert events[-1] == ("unlink", temp_path)
     assert main._devices_cache == ["old"]
     assert "secret configuration" not in capsys.readouterr().out
-
-
-def test_devices_save_keeps_cache_when_replace_succeeds_but_directory_fsync_fails(monkeypatch, capsys) -> None:
-    events = []
-    temp_path = os.path.join(main.DATA_DIR, ".devices-test.tmp")
-    file = _AtomicTextFile(events, 11)
-    monkeypatch.setattr(main, "_open_private_temp_file", lambda: (temp_path, file))
-    monkeypatch.setattr(main.os, "fsync", lambda _fd: None)
-    monkeypatch.setattr(main.os, "replace", lambda source, target: events.append(("replace", source, target)))
-    monkeypatch.setattr(main, "_fsync_data_directory", lambda: (_ for _ in ()).throw(OSError("disk failure")))
-    monkeypatch.setattr(main.os, "unlink", lambda path: events.append(("unlink", path)))
-    monkeypatch.setattr(main, "_devices_cache", ["old"])
-
-    devices = [{"id": "new"}]
-    assert not main._save(devices)
-    assert main._devices_cache == devices
-    assert events == [("flush",), ("close-file",), ("replace", temp_path, main.DEVICES_FILE)]
-    assert "directory sync did not complete" in capsys.readouterr().out
 
 
 def test_known_hosts_file_is_private_when_saved(monkeypatch) -> None:

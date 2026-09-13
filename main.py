@@ -6,6 +6,7 @@ and pushes real-time metrics + SSH events over a WebSocket.
 """
 
 import asyncio
+import copy
 import errno
 import json
 import os
@@ -104,8 +105,19 @@ _selected_device_id: Optional[str] = None
 # In-memory device list — seeded from disk at startup, kept in sync by _save()
 _devices_cache: list = []
 
-# True if devices.json exists but is not writable (checked once at startup)
+# True if configuration changes cannot be persisted (checked once at startup)
 _storage_warning = False
+
+# True only when startup recovered the cached configuration from devices.json.bak.
+# It deliberately remains latched until the service is restarted.
+_recovery_mode = False
+
+# True only for a startup that repaired the primary configuration from its backup.
+_recovered_notice = False
+
+# Exact already-validated backup payload retained only while fallback recovery is read-only.
+_recovery_backup_contents: str | None = None
+_recovery_retry_lock = asyncio.Lock()
 
 # Pending SSH-release tasks per owner, scheduled when their last socket drops
 _pending_releases: dict[str, asyncio.Task] = {}
@@ -166,29 +178,66 @@ def _parse_devices(contents: str) -> list:
     return [_norm(d) for d in devices if isinstance(d, dict)]
 
 
-def _load() -> list:
-    if not os.path.exists(DEVICES_FILE):
-        return []
+def _load_startup_devices() -> tuple[list, bool, bool]:
+    """Load the primary once, repairing it from a valid backup when possible.
+
+    Returns devices, whether a repair succeeded, and whether failed repair left
+    the process in restart-latched read-only mode.
+    """
+    global _recovery_backup_contents
+    _recovery_backup_contents = None
     try:
         with open(DEVICES_FILE, "r", encoding="utf-8") as f:
-            return _parse_devices(f.read())
-    except Exception:
-        return []
+            return _parse_devices(f.read()), False, False
+    except Exception as primary_error:
+        try:
+            with open(f"{DEVICES_FILE}.bak", "r", encoding="utf-8") as f:
+                backup_contents = f.read()
+            devices = _parse_devices(backup_contents)
+        except Exception:
+            # Phase 4 will distinguish a fresh install from both copies failing.
+            return [], False, False
+        try:
+            _replace_primary_from_backup(backup_contents)
+            with open(DEVICES_FILE, "r", encoding="utf-8") as f:
+                _parse_devices(f.read())
+        except Exception as repair_error:
+            _recovery_backup_contents = backup_contents
+            print(
+                "WARNING: Configuration recovery mode is active. "
+                "Automatic restoration from the validated backup did not complete "
+                f"({type(repair_error).__name__}); "
+                "configuration changes are disabled until recovery succeeds.",
+                flush=True,
+            )
+            return devices, False, True
+        print(
+            "NOTICE: Configuration was restored automatically from its validated backup because "
+            f"{_configuration_failure_reason(primary_error)}.",
+            flush=True,
+        )
+        return devices, True, False
 
 
-def _read_valid_devices_file() -> str | None:
-    """Return the exact valid primary contents, or None when it cannot be used."""
-    try:
-        with open(DEVICES_FILE, "r", encoding="utf-8") as f:
-            contents = f.read()
-        _parse_devices(contents)
-        return contents
-    except Exception:
-        return None
+def _configuration_failure_reason(error: Exception) -> str:
+    """Describe a primary-load failure without including file contents or raw errors."""
+    if isinstance(error, FileNotFoundError):
+        return "the primary configuration is missing"
+    if isinstance(error, json.JSONDecodeError):
+        return "the primary configuration contains invalid JSON"
+    if isinstance(error, UnicodeError):
+        return "the primary configuration is not valid UTF-8"
+    if isinstance(error, OSError):
+        return f"the primary configuration could not be read ({type(error).__name__})"
+    return f"the primary configuration could not be normalized ({type(error).__name__})"
 
 
 # Shared error message for endpoints that fail to persist a device change
 _SAVE_ERROR = "Server could not write devices.json (check file ownership/permissions on the server)."
+_RECOVERY_READ_ONLY_ERROR = (
+    "Configuration changes are unavailable because automatic recovery did not finish. "
+    "Your saved devices and commands remain protected in the backup."
+)
 
 
 def _open_private_file(path: str, *, buffering: int = -1):
@@ -240,41 +289,64 @@ def _fsync_data_directory() -> None:
             os.close(fd)
 
 
-def _save(devices: list) -> bool:
-    global _devices_cache
+def _write_private_payload(path: str, contents: str, on_replaced=None) -> None:
+    """Durably replace one private configuration file with an exact payload."""
     temp_path = None
-    replaced = False
     try:
-        previous_contents = _read_valid_devices_file() if os.path.exists(DEVICES_FILE) else None
-        if previous_contents is not None:
-            temp_path, f = _open_private_temp_file()
-            with f:
-                f.write(previous_contents)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_path, f"{DEVICES_FILE}.bak")
-            temp_path = None
-            _fsync_data_directory()
-
         temp_path, f = _open_private_temp_file()
         with f:
-            json.dump({"_app": APP_NAME, "devices": devices}, f, indent=2)
+            f.write(contents)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temp_path, DEVICES_FILE)
-        replaced = True
+        os.replace(temp_path, path)
         temp_path = None
-        _devices_cache = list(devices)
+        if on_replaced is not None:
+            on_replaced()
         _fsync_data_directory()
-        return True
-    except Exception:
+    finally:
         if temp_path is not None:
             try:
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+def _replace_primary_from_backup(contents: str) -> None:
+    """Atomically restore the exact validated backup payload to the primary."""
+    _write_private_payload(DEVICES_FILE, contents)
+
+
+def _restore_and_verify_primary(contents: str) -> None:
+    """Restore an already-validated payload and prove the replacement can load."""
+    _replace_primary_from_backup(contents)
+    with open(DEVICES_FILE, "r", encoding="utf-8") as f:
+        _parse_devices(f.read())
+
+
+def _save(devices: list) -> bool:
+    global _devices_cache
+    if _recovery_mode:
+        msg = "SAVE REJECTED: configuration recovery mode is read-only until recovery succeeds."
+        _debug_write(msg)
+        print(msg, flush=True)
+        return False
+    replaced = False
+
+    def primary_replaced() -> None:
+        global _devices_cache
+        nonlocal replaced
+        replaced = True
+        _devices_cache = list(devices)
+
+    try:
+        contents = json.dumps({"_app": APP_NAME, "devices": devices}, indent=2)
+        _parse_devices(contents)
+        _write_private_payload(DEVICES_FILE, contents, primary_replaced)
+        _write_private_payload(f"{DEVICES_FILE}.bak", contents)
+        return True
+    except Exception:
         if replaced:
-            msg = "SAVE FAILED: device configuration was replaced but directory sync did not complete."
+            msg = "SAVE UNCONFIRMED: primary configuration was replaced but the durable mirrored save did not complete."
         else:
             msg = "SAVE FAILED: could not persist device configuration."
         _debug_write(msg)
@@ -339,8 +411,9 @@ async def _idle_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _devices_cache, _storage_warning
-    _devices_cache = _load()
+    global _devices_cache, _storage_warning, _recovery_mode, _recovered_notice
+    _devices_cache, _recovered_notice, _recovery_mode = _load_startup_devices()
+    _storage_warning = _recovery_mode
     if os.path.exists(DEVICES_FILE) and not os.access(DEVICES_FILE, os.W_OK):
         _storage_warning = True
         print(f"WARNING: {DEVICES_FILE} is not writable. Device and command changes will NOT be saved.", flush=True)
@@ -378,15 +451,16 @@ async def ws_endpoint(ws: WebSocket):
         _cancel_pending_release(owner)
     try:
         # Push current state so a fresh page load (or reconnect) is in sync
-        devices = _load()
         # ssh_connected = devices this owner currently owns
         own_connected = [did for did, s in ssh_mgr.sessions.items() if s.owner == owner]
         await ws.send_text(json.dumps({
-            "type": "init", "devices": devices, "version": APP_VERSION,
+            "type": "init", "devices": _devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
             "ssh_locked": ssh_mgr.locked_device_ids(),
             "debug": _debug_file is not None,
             "storage_warning": _storage_warning,
+            "recovery_mode": _recovery_mode,
+            "recovered_notice": _recovered_notice,
         }))
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
@@ -429,13 +503,42 @@ class DeviceIn(BaseModel):
 
 @app.get("/api/devices")
 async def get_devices():
-    return _load()
+    return _devices_cache
+
+
+@app.post("/api/retry-recovery")
+async def retry_recovery():
+    """Retry a failed startup repair using only the retained validated payload."""
+    global _recovery_mode, _storage_warning, _recovery_backup_contents
+    async with _recovery_retry_lock:
+        if not _recovery_mode:
+            return {"ok": True, "recovered": False}
+        contents = _recovery_backup_contents
+        if contents is None:
+            msg = "RECOVERY RETRY FAILED: retained payload unavailable."
+            _debug_write(msg)
+            print(msg, flush=True)
+            return {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
+        try:
+            _restore_and_verify_primary(contents)
+        except Exception as error:
+            msg = f"RECOVERY RETRY FAILED: {type(error).__name__}"
+            _debug_write(msg)
+            print(msg, flush=True)
+            return {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
+        _recovery_mode = False
+        _storage_warning = False
+        _recovery_backup_contents = None
+        await ws_mgr.broadcast({"type": "recovery_restored"})
+        return {"ok": True, "recovered": True}
 
 
 @app.post("/api/devices")
 async def upsert_device(body: DeviceIn):
+    if _recovery_mode:
+        return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
     d       = body.model_dump()
-    devices = _load()
+    devices = copy.deepcopy(_devices_cache)
     if d.get("id"):
         for i, existing in enumerate(devices):
             if existing["id"] == d["id"]:
@@ -458,9 +561,11 @@ async def upsert_device(body: DeviceIn):
 @app.delete("/api/devices/{device_id}")
 async def delete_device(device_id: str):
     global _selected_device_id
+    if _recovery_mode:
+        return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
     if _selected_device_id == device_id:
         _selected_device_id = None
-    devices = [d for d in _load() if d["id"] != device_id]
+    devices = [d for d in _devices_cache if d["id"] != device_id]
     if not _save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     ssh_mgr.disconnect(device_id)
@@ -474,7 +579,9 @@ class CommandsIn(BaseModel):
 
 @app.put("/api/devices/{device_id}/commands")
 async def update_commands(device_id: str, body: CommandsIn):
-    devices = _load()
+    if _recovery_mode:
+        return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
+    devices = copy.deepcopy(_devices_cache)
     for i, d in enumerate(devices):
         if d["id"] == device_id:
             d["commands"] = body.commands
@@ -499,7 +606,7 @@ class ConnectIn(BaseModel):
 async def ssh_connect(body: ConnectIn, x_browser_id: str = Header(None)):
     if not x_browser_id:
         return {"ok": False, "error": "Missing browser id."}
-    devices = _load()
+    devices = _devices_cache
     device  = next((d for d in devices if d["id"] == body.device_id), None)
     if not device:
         return {"ok": False, "error": "Device not found."}

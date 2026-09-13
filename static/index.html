@@ -52,6 +52,8 @@
     --accent-2:  #2bb6a3;
     --glow:      rgba(77,214,193,0.35);
     --amber:     #f0b860;
+    --amber-bg:  rgba(240,184,96,0.10);
+    --amber-line:rgba(240,184,96,0.42);
     --red:       #ff6b7a;
     --green:     #5ce39b;
     --blue:      #6db3ff;
@@ -67,7 +69,8 @@
     --border:#d3dee1; --border-2:#bcccd0;
     --text:#16212c; --text-dim:#4f606d; --text-faint:#8593a0;
     --accent:#178577; --accent-2:#0f6b5f; --glow:rgba(23,133,119,0.20);
-    --amber:#e0900a; --red:#cf3b50; --green:#1c9560; --blue:#2b6fd0; --purple:#6f48cf;
+    --amber:#e0900a; --amber-bg:rgba(224,144,10,0.10); --amber-line:rgba(224,144,10,0.42);
+    --red:#cf3b50; --green:#1c9560; --blue:#2b6fd0; --purple:#6f48cf;
     --btn-text:#ffffff;
   }
 
@@ -103,7 +106,7 @@
   /* ---- standard app header ---- */
   .app-header {
     grid-area: top; display: flex; align-items: flex-start;
-    justify-content: space-between; gap: 18px;
+    justify-content: space-between; gap: 12px 18px; flex-wrap: wrap;
   }
   .app-header .brand { display: flex; align-items: center; gap: 13px; }
   .app-header .app-glyph {
@@ -122,6 +125,16 @@
   .app-header .byline a { color: var(--accent); text-decoration: none; cursor: pointer; }
   .app-header .byline a:hover { text-decoration: underline; }
   .app-header .head-right { display: flex; align-items: center; gap: 12px; }
+  .recovery-banner {
+    display: none; width: 100%; align-items: center; justify-content: space-between; gap: 12px;
+    background: var(--amber-bg); border: 1px solid var(--amber-line);
+    border-radius: var(--radius-sm); padding: 8px 10px 8px 12px;
+  }
+  .recovery-banner.show { display: flex; }
+  .recovery-banner-text { font-size: 12px; line-height: 1.4; color: var(--text-dim); }
+  .recovery-banner strong { color: var(--amber); }
+  .recovery-actions { display: flex; align-items: center; gap: 9px; flex: none; }
+  .recovery-status { min-width: 120px; font-size: 11px; color: var(--text-faint); }
 
   /* ---- buttons ---- */
   .btn {
@@ -338,6 +351,7 @@
   .cc-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cc-pin  { background: none; border: none; cursor: pointer; color: var(--text-faint); padding: 2px; display: grid; place-items: center; }
   .cc-pin svg { width: 14px; height: 14px; }
+  .cc-pin:disabled { opacity: 0.32; cursor: not-allowed; }
   .cc-pin.on { color: var(--accent); }
   .cc-cmd  { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cc-foot { display: flex; align-items: center; gap: 5px; }
@@ -443,6 +457,8 @@
     cursor: pointer; font-size: 17px; line-height: 1; padding: 2px 4px;
   }
   .error-banner .eb-close:hover { color: var(--red); }
+  .error-banner.notice-banner { border-color: var(--accent); box-shadow: 0 12px 32px rgba(0,0,0,0.5), 0 0 0 1px var(--glow); }
+  .error-banner.notice-banner .eb-close:hover { color: var(--accent); }
 
   /* scrollbars */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -479,6 +495,13 @@
         </svg>
       </button>
     </div>
+    <aside class="recovery-banner" id="recoveryBanner" aria-live="polite">
+      <div class="recovery-banner-text"><strong>Configuration needs attention.</strong> Your saved devices and commands are available from the backup, but changes are temporarily disabled because automatic recovery did not finish.</div>
+      <div class="recovery-actions">
+        <span class="recovery-status" id="recoveryRetryStatus" aria-live="polite"></span>
+        <button class="btn tiny" id="retryRecovery" type="button">Try recovery again</button>
+      </div>
+    </aside>
   </header>
 
   <!-- devices -->
@@ -716,6 +739,8 @@ let DEVICES   = [];
 let METRICS   = {};          // device_id -> metrics dict (no _raw fields)
 let SSH_STATE = {};          // device_id -> 'connected'|'running'|'idle'
 let SSH_LOCKS = {};          // device_id -> true (locked by any browser)
+let CONFIG_READ_ONLY = false;
+let RECOVERY_NOTICE_SHOWN = false;
 let currentDeviceId = null;
 let activeTabId     = null;
 const openTabs = {};
@@ -758,9 +783,19 @@ function connectWS() {
     switch (msg.type) {
       case 'init':
         DEVICES = msg.devices || [];
+        CONFIG_READ_ONLY = !!msg.recovery_mode;
         if (msg.version) $('verLabel').textContent = 'v' + msg.version;
         $('debugChk').checked = !!msg.debug;
-        if (msg.storage_warning) {
+        $('recoveryBanner').classList.toggle('show', !!msg.recovery_mode);
+        $('retryRecovery').disabled = false;
+        $('retryRecovery').textContent = 'Try recovery again';
+        $('recoveryRetryStatus').textContent = '';
+        if (!msg.recovered_notice) RECOVERY_NOTICE_SHOWN = false;
+        if (msg.recovered_notice && !RECOVERY_NOTICE_SHOWN) {
+          RECOVERY_NOTICE_SHOWN = true;
+          showNoticeBanner('Configuration restored from backup. Your saved devices and commands are ready.');
+        }
+        if (msg.storage_warning && !msg.recovery_mode) {
           showErrorBanner('Server cannot write devices.json: device and command changes will NOT survive a restart. Fix file permissions on the server.');
         }
         // Restore SSH state from server (e.g. after page refresh)
@@ -800,6 +835,9 @@ function connectWS() {
         renderDevices();
         renderStats();
         renderLibrary();
+        break;
+      case 'recovery_restored':
+        handleRecoveryRestored();
         break;
     }
   };
@@ -1056,6 +1094,50 @@ function showErrorBanner(text) {
   $('errorBanners').appendChild(el);
 }
 
+function showNoticeBanner(text) {
+  if ([...$('errorBanners').children].some(b => b.querySelector('.eb-text').textContent === text)) return;
+  const el = document.createElement('div');
+  el.className = 'error-banner notice-banner';
+  el.innerHTML = '<span class="eb-text"></span><button class="eb-close" title="Dismiss">&times;</button>';
+  el.querySelector('.eb-text').textContent = text;
+  el.querySelector('.eb-close').onclick = () => el.remove();
+  $('errorBanners').appendChild(el);
+  setTimeout(() => el.remove(), 10000);
+}
+
+function handleRecoveryRestored() {
+  CONFIG_READ_ONLY = false;
+  $('recoveryBanner').classList.remove('show');
+  $('recoveryRetryStatus').textContent = '';
+  $('retryRecovery').disabled = false;
+  $('retryRecovery').textContent = 'Try recovery again';
+  showNoticeBanner('Configuration restored from backup. Your saved devices and commands are ready.');
+  renderDevices();
+  renderStats();
+  renderLibrary();
+}
+
+$('retryRecovery').onclick = async () => {
+  const button = $('retryRecovery');
+  button.disabled = true;
+  button.textContent = 'Trying…';
+  $('recoveryRetryStatus').textContent = '';
+  try {
+    const result = await POST('/api/retry-recovery', {});
+    if (result.ok && result.recovered) {
+      handleRecoveryRestored();
+      return;
+    }
+    if (!result.ok) {
+      $('recoveryRetryStatus').textContent = result.error || 'Recovery could not finish. Data remains protected.';
+    }
+  } catch (error) {
+    $('recoveryRetryStatus').textContent = 'Recovery could not finish. Data remains protected.';
+  }
+  button.disabled = false;
+  button.textContent = 'Try recovery again';
+};
+
 function renderTabs() {
   const strip = $('tablist');
   strip.innerHTML = '';
@@ -1177,9 +1259,10 @@ function cardRunning(card, running) {
    ============================================================ */
 function renderDevices() {
   const list = $('deviceList');
+  $('addBtn').disabled = CONFIG_READ_ONLY;
   list.innerHTML = '';
   if (!DEVICES.length) {
-    list.innerHTML = '<div class="lib-empty" style="margin-top:24px;">No devices yet. Click "Add Device".</div>';
+    list.innerHTML = `<div class="lib-empty" style="margin-top:24px;">${CONFIG_READ_ONLY ? 'No devices in the recovered configuration.' : 'No devices yet. Click "Add Device".'}</div>`;
     return;
   }
   DEVICES.forEach(d => list.appendChild(buildCard(d)));
@@ -1219,8 +1302,8 @@ function buildCard(d) {
       </div>
       <div class="card-icons">
         <button class="icon-btn" data-hostkey title="View host key">${SVG.key}</button>
-        <button class="icon-btn" data-edit    title="Edit">${SVG.edit}</button>
-        <button class="icon-btn" data-del     title="Delete">${SVG.del}</button>
+        <button class="icon-btn" data-edit title="Edit" ${CONFIG_READ_ONLY?'disabled':''}>${SVG.edit}</button>
+        <button class="icon-btn" data-del title="Delete" ${CONFIG_READ_ONLY?'disabled':''}>${SVG.del}</button>
       </div>
     </div>
     <div class="pw-row">
@@ -1398,7 +1481,7 @@ function applySelection() {
    ============================================================ */
 function renderLibrary() {
   const d = dev(currentDeviceId);
-  $('addCmdBtn').disabled = !d;
+  $('addCmdBtn').disabled = !d || CONFIG_READ_ONLY;
   if (!d) {
     $('libTitle').innerHTML = 'Command Library';
     $('libBody').innerHTML  = '<div class="lib-empty">Select a device to manage its commands.</div>';
@@ -1410,7 +1493,7 @@ function renderLibrary() {
   const locked = isLockedByOther(d.id);
   const runTitle = isConn ? 'Run' : (locked ? 'In use by another session' : 'Connect first');
   if (!cmds.length) {
-    $('libBody').innerHTML = `<div class="lib-empty">No commands saved for ${esc(d.name)}. Click "Add Command".</div>`;
+    $('libBody').innerHTML = `<div class="lib-empty">No commands saved for ${esc(d.name)}.${CONFIG_READ_ONLY ? '' : ' Click "Add Command".'}</div>`;
     return;
   }
   const grid = document.createElement('div');
@@ -1421,7 +1504,7 @@ function renderLibrary() {
     card.innerHTML = `
       <div class="cc-top">
         <span class="cc-name">${esc(c.name)}</span>
-        <button class="cc-pin ${c.pinned?'on':''}" title="${c.pinned?'Unpin':'Pin'}">${SVG.pin}</button>
+        <button class="cc-pin ${c.pinned?'on':''}" title="${c.pinned?'Unpin':'Pin'}" ${CONFIG_READ_ONLY?'disabled':''}>${SVG.pin}</button>
       </div>
       <div class="cc-cmd" title="${esc(c.command)}">${esc(c.command)}</div>
       <div class="cc-foot">
@@ -1431,13 +1514,13 @@ function renderLibrary() {
           <button class="run"  title="${runTitle}" ${isConn?'':'disabled'}>
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
           </button>
-          <button class="edit" title="Edit">
+          <button class="edit" title="Edit" ${CONFIG_READ_ONLY?'disabled':''}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4v16h16v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>
           </button>
-          <button class="copy" title="Copy to another device">
+          <button class="copy" title="Copy to another device" ${CONFIG_READ_ONLY?'disabled':''}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
           </button>
-          <button class="del"  title="Delete">
+          <button class="del" title="Delete" ${CONFIG_READ_ONLY?'disabled':''}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
           </button>
         </div>
@@ -1538,7 +1621,7 @@ $('addCmdBtn').onclick = () => { if (currentDeviceId) openCmdEditor(currentDevic
    Save-to-library prompt
    ============================================================ */
 function maybeOfferSave(deviceId, command, sudo) {
-  if (!askSaveCustom) return;
+  if (!askSaveCustom || CONFIG_READ_ONLY) return;
   const d = dev(deviceId); if (!d) return;
   if ((d.commands||[]).some(c => c.command === command)) return;
   saveCtx = {deviceId, command, sudo};
