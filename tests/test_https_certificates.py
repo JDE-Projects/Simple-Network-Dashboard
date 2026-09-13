@@ -76,7 +76,7 @@ def test_proxy_uses_internal_ca_without_leaf_lifetime_or_key_configuration() -> 
     assert "key_type" not in snippet
 
 
-def test_export_normalizes_only_the_public_root_and_prints_fingerprint() -> None:
+def test_export_normalizes_only_the_public_root_and_prints_exact_file_checksum() -> None:
     result = _run_install(
         r'''
 tmp=$(mktemp -d)
@@ -89,24 +89,23 @@ openssl() {
     if [[ "$*" == *"-ext basicConstraints"* ]]; then
         echo 'X509v3 Basic Constraints: critical'
         echo 'CA:TRUE'
-    elif [[ "$*" == *"-fingerprint -sha256"* ]]; then
-        echo 'sha256 Fingerprint=AA:BB'
     else
         printf '%s\n' '-----BEGIN CERTIFICATE-----' 'PUBLIC ROOT ONLY' '-----END CERTIFICATE-----' > "${@: -1}"
     fi
 }
 chown() { :; }
 stat() { echo 'caddy:caddy:600'; }
-export_caddy_root_certificate
+export_caddy_root_certificate > "$tmp/export-output"
 grep -Fxq 'PUBLIC ROOT ONLY' "$DASHBOARD_ROOT_CERT"
 [ ! -e "$DASHBOARD_ROOT_CERT" ] || ! grep -q 'PRIVATE KEY' "$DASHBOARD_ROOT_CERT"
 [ ! -e "$DATA_DIR/.caddy-root-ca.XXXXXX" ]
+expected=$(sha256sum "$DASHBOARD_ROOT_CERT" | awk '{print $1}')
+grep -Fqx "Exported Caddy root certificate file SHA-256 checksum: $expected" "$tmp/export-output"
 rm -rf "$tmp"
 '''
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Caddy local root certificate SHA-256 fingerprint: AA:BB" in result.stdout
     installer = (ROOT / "install.sh").read_text(encoding="utf-8")
     assert 'chown snd:snd "$staged_cert"' in installer
     assert 'chmod 600 "$staged_cert"' in installer
@@ -186,8 +185,6 @@ cp "$CADDY_ROOT_CERT" "$tmp/original-root"
 openssl() {
     if [[ "$*" == *"-ext basicConstraints"* ]]; then
         printf 'CA:TRUE\n'
-    elif [[ "$*" == *"-fingerprint -sha256"* ]]; then
-        printf 'sha256 Fingerprint=AA:BB\n'
     else
         printf '%s\n' '-----BEGIN CERTIFICATE-----' 'PUBLIC ROOT' '-----END CERTIFICATE-----' > "${@: -1}"
     fi
@@ -204,7 +201,7 @@ rm -rf "$tmp"
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.count("SHA-256 fingerprint: AA:BB") == 2
+    assert result.stdout.count("Exported Caddy root certificate file SHA-256 checksum:") == 2
 
 
 def test_unsafe_root_certificate_metadata_preserves_an_existing_safe_export() -> None:

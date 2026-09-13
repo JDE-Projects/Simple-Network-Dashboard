@@ -12,6 +12,7 @@ import json
 import os
 import socket
 import ssl
+import stat
 import sys
 import tempfile
 import urllib.error
@@ -21,7 +22,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -38,6 +39,7 @@ BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = "/var/lib/simple-network-dashboard"
 LOG_DIR = "/var/log/simple-network-dashboard"
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
+DASHBOARD_ROOT_CERT = os.path.join(DATA_DIR, "caddy-root-ca.crt")
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +446,32 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 @app.get("/")
 async def root():
     return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
+
+
+@app.get("/certificate-setup")
+async def certificate_setup():
+    return FileResponse(os.path.join(BASE_DIR, "static", "certificate-setup.html"))
+
+
+@app.get("/certificate-setup/caddy-root-ca.crt")
+async def download_caddy_root_certificate():
+    try:
+        certificate_mode = os.lstat(DASHBOARD_ROOT_CERT).st_mode
+    except OSError:
+        raise HTTPException(status_code=404, detail="The exported root certificate is not available yet.") from None
+
+    if not stat.S_ISREG(certificate_mode):
+        raise HTTPException(status_code=404, detail="The exported root certificate is not available yet.")
+
+    return FileResponse(
+        DASHBOARD_ROOT_CERT,
+        media_type="application/x-x509-ca-cert",
+        filename="caddy-root-ca.crt",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
