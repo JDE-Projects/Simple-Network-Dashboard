@@ -307,6 +307,113 @@ def test_primary_directory_fsync_failure_keeps_visible_replacement_in_cache(monk
     assert main._devices_cache == devices
 
 
+@pytest.mark.parametrize("failure", ["write", "flush", "file-fsync", "replace"])
+@pytest.mark.parametrize("payload", ["primary", "backup"])
+def test_payload_write_failures_preserve_the_last_durable_configuration(
+    monkeypatch, tmp_path, capsys, failure, payload
+) -> None:
+    """Every pre-replacement payload failure leaves no staged file behind."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    backup_file = data_dir / "devices.json.bak"
+    confirmed_devices = [{"id": "confirmed"}]
+    new_devices = [{"id": "new"}]
+    confirmed_contents = json.dumps({"_app": main.APP_NAME, "devices": confirmed_devices}, indent=2)
+    devices_file.write_text(confirmed_contents, encoding="utf-8")
+    backup_file.write_text(confirmed_contents, encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+    monkeypatch.setattr(main, "_fsync_data_directory", lambda: None)
+    monkeypatch.setattr(main, "_devices_cache", confirmed_devices)
+
+    real_open_temp = main._open_private_temp_file
+    real_fsync = main.os.fsync
+    real_replace = main.os.replace
+    opened_payloads = 0
+
+    def open_temp_with_failure():
+        nonlocal opened_payloads
+        temp_path, file = real_open_temp()
+        opened_payloads += 1
+        if (payload == "primary" and opened_payloads == 1) or (
+            payload == "backup" and opened_payloads == 2
+        ):
+            return temp_path, _FailingAtomicTextFile(file, failure)
+        return temp_path, file
+
+    def fail_file_fsync(fd):
+        if fd == _FailingAtomicTextFile.FILE_FSYNC_FD:
+            raise OSError("private payload failure")
+        return real_fsync(fd)
+
+    def fail_replace(source, destination):
+        is_primary = destination == str(devices_file)
+        if failure == "replace" and is_primary == (payload == "primary"):
+            raise OSError("private payload failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(main, "_open_private_temp_file", open_temp_with_failure)
+    if failure == "file-fsync":
+        monkeypatch.setattr(main.os, "fsync", fail_file_fsync)
+    if failure == "replace":
+        monkeypatch.setattr(main.os, "replace", fail_replace)
+
+    assert not main._save(new_devices)
+
+    output = capsys.readouterr().out
+    if payload == "primary":
+        assert devices_file.read_text(encoding="utf-8") == confirmed_contents
+        assert backup_file.read_text(encoding="utf-8") == confirmed_contents
+        assert main._devices_cache == confirmed_devices
+        assert "SAVE FAILED" in output
+    else:
+        assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == new_devices
+        assert backup_file.read_text(encoding="utf-8") == confirmed_contents
+        assert main._devices_cache == new_devices
+        assert "durable mirrored save did not complete" in output
+    assert list(data_dir.glob(".devices-*.tmp")) == []
+    assert "private payload failure" not in output
+
+
+@pytest.mark.parametrize("payload", ["primary", "backup"])
+def test_payload_directory_fsync_failures_keep_visible_replacements(monkeypatch, tmp_path, capsys, payload) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    backup_file = data_dir / "devices.json.bak"
+    confirmed_devices = [{"id": "confirmed"}]
+    new_devices = [{"id": "new"}]
+    confirmed_contents = json.dumps({"_app": main.APP_NAME, "devices": confirmed_devices}, indent=2)
+    devices_file.write_text(confirmed_contents, encoding="utf-8")
+    backup_file.write_text(confirmed_contents, encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+    monkeypatch.setattr(main, "_devices_cache", confirmed_devices)
+    directory_syncs = 0
+
+    def fail_selected_directory_sync():
+        nonlocal directory_syncs
+        directory_syncs += 1
+        if directory_syncs == (1 if payload == "primary" else 2):
+            raise OSError("private directory failure")
+
+    monkeypatch.setattr(main, "_fsync_data_directory", fail_selected_directory_sync)
+
+    assert not main._save(new_devices)
+
+    assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == new_devices
+    if payload == "primary":
+        assert backup_file.read_text(encoding="utf-8") == confirmed_contents
+    else:
+        assert json.loads(backup_file.read_text(encoding="utf-8"))["devices"] == new_devices
+    assert main._devices_cache == new_devices
+    assert list(data_dir.glob(".devices-*.tmp")) == []
+    output = capsys.readouterr().out
+    assert "durable mirrored save did not complete" in output
+    assert "private directory failure" not in output
+
+
 def test_first_devices_save_creates_matching_primary_and_backup(monkeypatch, tmp_path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -545,6 +652,38 @@ def test_startup_recovery_hides_primary_read_error(monkeypatch, tmp_path, capsys
     output = capsys.readouterr().out
     assert "Configuration recovery mode" in output
     assert "private primary detail" not in output
+    assert "from-backup" not in output
+
+
+def test_startup_recovery_replacement_failure_latches_read_only_mode(monkeypatch, tmp_path, capsys) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    backup_file = data_dir / "devices.json.bak"
+    corrupt_primary = "{invalid"
+    backup_contents = '{"devices": [{"id": "from-backup"}]}'
+    devices_file.write_text(corrupt_primary, encoding="utf-8")
+    backup_file.write_text(backup_contents, encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+    monkeypatch.setattr(
+        main.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("private replacement failure")),
+    )
+
+    devices, recovered, read_only = main._load_startup_devices()
+
+    assert devices == [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
+    assert recovered is False
+    assert read_only is True
+    assert main._recovery_backup_contents == backup_contents
+    assert devices_file.read_text(encoding="utf-8") == corrupt_primary
+    assert backup_file.read_text(encoding="utf-8") == backup_contents
+    assert list(data_dir.glob(".devices-*.tmp")) == []
+    output = capsys.readouterr().out
+    assert "Configuration recovery mode" in output
+    assert "private replacement failure" not in output
     assert "from-backup" not in output
 
 
@@ -845,6 +984,36 @@ class _AtomicTextFile(_TextFile):
     def __exit__(self, *_args):
         self.events.append(("close-file",))
         return False
+
+
+class _FailingAtomicTextFile:
+    FILE_FSYNC_FD = -999
+
+    def __init__(self, file, failure: str):
+        self.file = file
+        self.failure = failure
+
+    def __enter__(self):
+        self.file.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self.file.__exit__(*args)
+
+    def write(self, contents: str) -> int:
+        if self.failure == "write":
+            raise OSError("private payload failure")
+        return self.file.write(contents)
+
+    def flush(self) -> None:
+        if self.failure == "flush":
+            raise OSError("private payload failure")
+        self.file.flush()
+
+    def fileno(self) -> int:
+        if self.failure == "file-fsync":
+            return self.FILE_FSYNC_FD
+        return self.file.fileno()
 
 
 def test_uninstaller_references_private_data_and_log_directories() -> None:
