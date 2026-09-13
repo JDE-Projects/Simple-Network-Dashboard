@@ -202,7 +202,7 @@ def test_phase_two_uses_official_caddy_repository_and_https_output() -> None:
     assert "apt-get install -y caddy" in installer
     assert 'echo "Open https://${HTTPS_HOST}:${HTTPS_PORT} in your browser."' in installer
     assert "reverse_proxy 127.0.0.1:${PORT}" in installer
-    assert "tls internal" not in installer
+    assert "tls internal" in installer
 
 
 def test_fresh_caddy_install_uses_prerequisites_and_reinspects() -> None:
@@ -472,7 +472,8 @@ def test_uninstall_removes_only_owned_caddy_and_ufw_integration() -> None:
     assert 'awk -v comment="$CADDY_IMPORT_COMMENT" -v import_line="$CADDY_IMPORT_LINE"' in uninstaller
     assert 'validate --config "$staged_caddyfile" --adapter caddyfile' in uninstaller
     assert "apt-get remove" not in uninstaller
-    assert "tls internal" not in uninstaller
+    assert 'CADDY_HOME="/var/lib/caddy"' in uninstaller
+    assert "rm -rf \"$CADDY_HOME\"" not in uninstaller
 
 
 def test_uninstall_executes_owned_cleanup_and_preserves_shared_config() -> None:

@@ -19,6 +19,10 @@ CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
 UFW_COMMENT="Simple Network Dashboard HTTPS"
 CADDY_APP_MARKER="# Simple Network Dashboard managed proxy v1"
 CADDY_IMPORT_COMMENT="# Simple Network Dashboard managed Caddy import"
+CADDY_HOME="/var/lib/caddy"
+CADDY_DATA_HOME="${CADDY_HOME}/.local/share"
+CADDY_ROOT_CERT="${CADDY_DATA_HOME}/caddy/pki/authorities/local/root.crt"
+DASHBOARD_ROOT_CERT="${DATA_DIR}/caddy-root-ca.crt"
 CADDY_ROLLBACK_CADDYFILE=""
 CADDY_ROLLBACK_APP_CONFIG=""
 CADDY_ROLLBACK_HAD_APP_CONFIG=false
@@ -298,6 +302,43 @@ install_caddy_if_fresh() {
     fi
 }
 
+verify_caddy_persistent_storage() {
+    local service_user service_group service_environment account_home item
+    local xdg_data_home_count=0
+    local xdg_data_home_value=""
+    local -a service_environment_items
+
+    service_user=$(systemctl show --property=User --value caddy 2>/dev/null) || return 1
+    service_group=$(systemctl show --property=Group --value caddy 2>/dev/null) || return 1
+    service_environment=$(systemctl show --property=Environment --value caddy 2>/dev/null) || return 1
+    account_home=$(getent passwd caddy | awk -F: '$1 == "caddy" { print $6; exit }') || return 1
+    if [ "$service_user" != "caddy" ] || [ "$service_group" != "caddy" ] \
+        || [ "$account_home" != "$CADDY_HOME" ]; then
+        echo "Error: Caddy must use the standard caddy:caddy systemd identity and persistent data home ${CADDY_DATA_HOME}."
+        echo "Refusing to modify a Caddy installation with non-standard certificate storage."
+        return 1
+    fi
+    read -r -a service_environment_items <<< "$service_environment"
+    for item in "${service_environment_items[@]}"; do
+        item="${item#\"}"
+        item="${item%\"}"
+        if [[ "$item" == XDG_DATA_HOME=* ]]; then
+            xdg_data_home_count=$((xdg_data_home_count + 1))
+            xdg_data_home_value="${item#XDG_DATA_HOME=}"
+        fi
+    done
+    if [ "$xdg_data_home_count" -gt 1 ] \
+        || { [ "$xdg_data_home_count" -eq 1 ] && [ "$xdg_data_home_value" != "$CADDY_DATA_HOME" ]; }; then
+        echo "Error: Caddy has a non-standard XDG_DATA_HOME override."
+        echo "Refusing to modify a Caddy installation with non-standard certificate storage."
+        return 1
+    fi
+    if [ -L "$CADDY_HOME" ] || [ ! -d "$CADDY_HOME" ]; then
+        echo "Error: Caddy persistent home is unsafe or missing: $CADDY_HOME"
+        return 1
+    fi
+}
+
 count_caddy_imports() {
     awk -v comment="$CADDY_IMPORT_COMMENT" -v import_line="$CADDY_IMPORT_LINE" '
         $0 == import_line { total++ }
@@ -396,6 +437,7 @@ write_caddy_proxy_config() {
     if ! cat > "$staged_app_config" <<EOF
 ${CADDY_APP_MARKER}
 ${HTTPS_HOST}:${HTTPS_PORT} {
+    tls internal
     reverse_proxy 127.0.0.1:${PORT}
 }
 EOF
@@ -525,6 +567,49 @@ start_dashboard_backend() {
         echo "Error: dashboard service did not start on its loopback backend; HTTPS proxy was not published."
         return 1
     fi
+}
+
+export_caddy_root_certificate() {
+    local staged_cert fingerprint root_metadata
+
+    if ! command -v openssl &>/dev/null; then
+        echo "Error: OpenSSL is required to validate and export Caddy's public root certificate."
+        return 1
+    fi
+    if [ -L "$CADDY_ROOT_CERT" ] || [ ! -f "$CADDY_ROOT_CERT" ]; then
+        echo "Error: Caddy's generated root certificate is missing or unsafe: $CADDY_ROOT_CERT"
+        return 1
+    fi
+    root_metadata=$(stat -c '%U:%G:%a' "$CADDY_ROOT_CERT") || return 1
+    if [ "$root_metadata" != "caddy:caddy:600" ]; then
+        echo "Error: Caddy's generated root certificate has unsafe ownership or permissions."
+        return 1
+    fi
+    if ! is_safe_runtime_file "$DASHBOARD_ROOT_CERT"; then
+        echo "Error: dashboard root certificate destination is unsafe: $DASHBOARD_ROOT_CERT"
+        return 1
+    fi
+    staged_cert=$(mktemp "${DATA_DIR}/.caddy-root-ca.XXXXXX") || return 1
+    if ! openssl x509 -in "$CADDY_ROOT_CERT" -out "$staged_cert" \
+        || ! openssl x509 -in "$staged_cert" -noout -ext basicConstraints | grep -q 'CA:TRUE' \
+        || ! openssl verify -CAfile "$staged_cert" "$staged_cert"; then
+        echo "Error: Caddy's root certificate could not be validated as a CA certificate."
+        rm -f -- "$staged_cert"
+        return 1
+    fi
+    fingerprint=$(openssl x509 -in "$staged_cert" -noout -fingerprint -sha256) || {
+        echo "Error: Caddy root certificate fingerprint could not be generated."
+        rm -f -- "$staged_cert"
+        return 1
+    }
+    fingerprint="${fingerprint#*=}"
+    if ! chown snd:snd "$staged_cert" || ! chmod 600 "$staged_cert" \
+        || ! mv -fT -- "$staged_cert" "$DASHBOARD_ROOT_CERT"; then
+        echo "Error: Caddy root certificate could not be published safely."
+        rm -f -- "$staged_cert"
+        return 1
+    fi
+    echo "Caddy local root certificate SHA-256 fingerprint: $fingerprint"
 }
 
 record_install_state() {
@@ -819,6 +904,9 @@ fi
 if ! install_caddy_if_fresh; then
     exit 1
 fi
+if ! verify_caddy_persistent_storage; then
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Pick a port
@@ -901,6 +989,13 @@ if ! start_dashboard_backend; then
     exit 1
 fi
 if ! write_caddy_proxy_config; then
+    exit 1
+fi
+if ! export_caddy_root_certificate; then
+    echo "Error: Caddy root certificate export failed; restoring the dashboard proxy configuration before firewall changes."
+    if ! rollback_caddy_proxy_config; then
+        echo "Error: Caddy rollback after certificate export failure was incomplete."
+    fi
     exit 1
 fi
 if ! configure_ufw_https; then

@@ -11,6 +11,7 @@ CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
 UFW_COMMENT="Simple Network Dashboard HTTPS"
 CADDY_APP_MARKER="# Simple Network Dashboard managed proxy v1"
 CADDY_IMPORT_COMMENT="# Simple Network Dashboard managed Caddy import"
+CADDY_HOME="/var/lib/caddy"
 
 is_owned_caddy_app_config() {
     local metadata
@@ -405,7 +406,9 @@ fi
 
 # Remove only the dashboard-owned proxy integration and labelled firewall
 # rules before application files are touched.  A failed cleanup leaves the
-# installation in place for an administrator to inspect and retry.
+# installation in place for an administrator to inspect and retry. The Caddy
+# package and its shared persistent CA storage under $CADDY_HOME are never
+# modified by this uninstaller.
 if ! remove_dashboard_caddy_integration; then
     echo "Error: dashboard Caddy integration cleanup failed. Application files were not removed."
     exit 1
@@ -464,6 +467,7 @@ fi
 
 echo ""
 echo "Simple Network Dashboard has been removed."
+echo "The Caddy package and persistent CA storage at $CADDY_HOME were preserved."
 echo ""
 if [ "$SND_IDENTITIES_REMOVED" = true ]; then
     echo "If your account was previously added to the snd group, that membership"
