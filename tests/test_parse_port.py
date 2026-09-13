@@ -2,6 +2,7 @@
 
 import pytest
 
+import main
 from main import _parse_port
 
 
@@ -38,3 +39,10 @@ def test_unrelated_args_ignored():
 
 def test_unrelated_args_ignored_alongside_port():
     assert _parse_port(["--foo", "bar", "--port=3010", "--baz"]) == 3010
+
+
+def test_uvicorn_entry_point_is_loopback_only():
+    source = open(main.__file__, encoding="utf-8").read()
+
+    assert 'uvicorn.run("main:app", host="127.0.0.1"' in source
+    assert 'uvicorn.run("main:app", host="0.0.0.0"' not in source

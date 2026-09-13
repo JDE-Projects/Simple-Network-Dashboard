@@ -14,6 +14,14 @@ FORCED_PORT=""
 HTTPS_PORT=443
 HTTPS_HOST=""
 HTTPS_HOST_WAS_SET=false
+CADDY_APP_CONFIG="/etc/caddy/simple-network-dashboard.caddy"
+CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
+UFW_COMMENT="Simple Network Dashboard HTTPS"
+CADDY_APP_MARKER="# Simple Network Dashboard managed proxy v1"
+CADDY_IMPORT_COMMENT="# Simple Network Dashboard managed Caddy import"
+CADDY_ROLLBACK_CADDYFILE=""
+CADDY_ROLLBACK_APP_CONFIG=""
+CADDY_ROLLBACK_HAD_APP_CONFIG=false
 
 usage() {
     echo "Usage: $0 [--port N] [--https-host HOST] [--https-port N]"
@@ -257,6 +265,266 @@ preflight_https() {
         echo "No free alternative HTTPS port was found in range 8443-8453."
     fi
     return 1
+}
+
+install_caddy_if_fresh() {
+    local caddy_key caddy_list
+
+    if [ "$CADDY_STATE" != "fresh" ]; then
+        return 0
+    fi
+    if ! command -v apt-get &>/dev/null; then
+        echo "Error: installing Caddy requires apt-get."
+        return 1
+    fi
+
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg || return 1
+    command -v curl &>/dev/null && command -v gpg &>/dev/null || { echo "Error: Caddy prerequisites did not install curl and gpg."; return 1; }
+    caddy_key=$(mktemp) || return 1
+    caddy_list=$(mktemp) || { rm -f -- "$caddy_key"; return 1; }
+    trap 'rm -f -- "$caddy_key" "$caddy_list"' RETURN
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' -o "$caddy_key" || return 1
+    gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg "$caddy_key" || return 1
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o "$caddy_list" || return 1
+    install -m 0644 -- "$caddy_list" /etc/apt/sources.list.d/caddy-stable.list || return 1
+    chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg || return 1
+    chmod o+r /etc/apt/sources.list.d/caddy-stable.list || return 1
+    apt-get update || return 1
+    apt-get install -y caddy || return 1
+
+    if ! inspect_caddy_state || [ "$CADDY_STATE" != "compatible" ]; then
+        echo "Error: installed Caddy is not a compatible Caddyfile-managed systemd service."
+        return 1
+    fi
+}
+
+count_caddy_imports() {
+    awk -v comment="$CADDY_IMPORT_COMMENT" -v import_line="$CADDY_IMPORT_LINE" '
+        $0 == import_line { total++ }
+        previous == comment && $0 == import_line { managed++ }
+        { previous=$0 }
+        END { printf "%d %d\n", total + 0, managed + 0 }
+    ' "$1"
+}
+
+discard_caddy_proxy_rollback() {
+    if [ -n "$CADDY_ROLLBACK_CADDYFILE" ]; then
+        rm -f -- "$CADDY_ROLLBACK_CADDYFILE" || return 1
+    fi
+    if [ -n "$CADDY_ROLLBACK_APP_CONFIG" ]; then
+        rm -f -- "$CADDY_ROLLBACK_APP_CONFIG" || return 1
+    fi
+    CADDY_ROLLBACK_CADDYFILE=""
+    CADDY_ROLLBACK_APP_CONFIG=""
+    CADDY_ROLLBACK_HAD_APP_CONFIG=false
+}
+
+rollback_caddy_proxy_config() {
+    local rollback_failed=false
+
+    if [ -z "$CADDY_ROLLBACK_CADDYFILE" ] || [ -z "$CADDY_ROLLBACK_APP_CONFIG" ]; then
+        echo "Error: Caddy rollback state is unavailable."
+        return 1
+    fi
+    install -m 0644 -- "$CADDY_ROLLBACK_CADDYFILE" "$CADDY_CONFIG_PATH" || {
+        echo "Error: previous Caddyfile could not be restored."
+        rollback_failed=true
+    }
+    if [ "$CADDY_ROLLBACK_HAD_APP_CONFIG" = true ]; then
+        install -m 0644 -- "$CADDY_ROLLBACK_APP_CONFIG" "$CADDY_APP_CONFIG" || {
+            echo "Error: previous dashboard proxy config could not be restored."
+            rollback_failed=true
+        }
+    else
+        rm -f -- "$CADDY_APP_CONFIG" || {
+            echo "Error: partial dashboard proxy config could not be removed."
+            rollback_failed=true
+        }
+    fi
+    systemctl reload caddy || {
+        echo "Error: rollback reload of Caddy failed."
+        rollback_failed=true
+    }
+    if [ "$rollback_failed" = true ]; then
+        echo "Caddy rollback files were retained at: $CADDY_ROLLBACK_CADDYFILE and $CADDY_ROLLBACK_APP_CONFIG"
+        return 1
+    fi
+    discard_caddy_proxy_rollback
+}
+
+is_owned_caddy_app_config() {
+    local metadata
+    [ -L "$CADDY_APP_CONFIG" ] && return 1
+    [ -f "$CADDY_APP_CONFIG" ] || return 1
+    metadata=$(stat -c '%u:%g:%a' "$CADDY_APP_CONFIG") || return 1
+    [ "$metadata" = "0:0:644" ] || return 1
+    [ "$(head -n 1 "$CADDY_APP_CONFIG")" = "$CADDY_APP_MARKER" ]
+}
+
+write_caddy_proxy_config() {
+    local config_dir staged_caddyfile validation_caddyfile staged_app_config backup_caddyfile backup_app_config had_app_config=false import_counts import_count managed_import_count
+
+    config_dir=$(dirname "$CADDY_CONFIG_PATH")
+    if [ ! -f "$CADDY_CONFIG_PATH" ] || [ -L "$CADDY_CONFIG_PATH" ]; then
+        echo "Error: Caddyfile path is not a regular file: $CADDY_CONFIG_PATH"
+        return 1
+    fi
+    if { [ -e "$CADDY_APP_CONFIG" ] || [ -L "$CADDY_APP_CONFIG" ]; } && ! is_owned_caddy_app_config; then
+        echo "Error: existing dashboard Caddy proxy config is not a root-owned marked regular file."
+        return 1
+    fi
+    staged_caddyfile=$(mktemp "$config_dir/.simple-network-dashboard-Caddyfile.XXXXXX") || return 1
+    staged_app_config=$(mktemp "$config_dir/.simple-network-dashboard-proxy.XXXXXX") || {
+        rm -f -- "$staged_caddyfile"
+        return 1
+    }
+    validation_caddyfile=$(mktemp "$config_dir/.simple-network-dashboard-validation.XXXXXX") || { rm -f -- "$staged_caddyfile" "$staged_app_config"; return 1; }
+    backup_caddyfile=$(mktemp "$config_dir/.simple-network-dashboard-Caddyfile-backup.XXXXXX") || { rm -f -- "$staged_caddyfile" "$staged_app_config" "$validation_caddyfile"; return 1; }
+    backup_app_config=$(mktemp "$config_dir/.simple-network-dashboard-proxy-backup.XXXXXX") || { rm -f -- "$staged_caddyfile" "$staged_app_config" "$validation_caddyfile" "$backup_caddyfile"; return 1; }
+    trap 'rm -f -- "$staged_caddyfile" "$validation_caddyfile" "$staged_app_config" "$backup_caddyfile" "$backup_app_config"' RETURN
+
+    cp -- "$CADDY_CONFIG_PATH" "$staged_caddyfile" || return 1
+    import_counts=$(count_caddy_imports "$staged_caddyfile") || return 1
+    read -r import_count managed_import_count <<< "$import_counts"
+    if [ "$import_count" -gt 0 ] && { [ "$import_count" -ne 1 ] || [ "$managed_import_count" -ne 1 ]; }; then
+        echo "Error: Caddyfile contains an unowned or duplicate dashboard import; refusing to modify it."
+        return 1
+    fi
+    if [ "$import_count" -eq 0 ]; then
+        printf '\n%s\n%s\n' "$CADDY_IMPORT_COMMENT" "$CADDY_IMPORT_LINE" >> "$staged_caddyfile" || return 1
+    fi
+    if ! cat > "$staged_app_config" <<EOF
+${CADDY_APP_MARKER}
+${HTTPS_HOST}:${HTTPS_PORT} {
+    reverse_proxy 127.0.0.1:${PORT}
+}
+EOF
+    then
+        return 1
+    fi
+    # Validate the exact combined shape before either managed file is published.
+    # The validation copy alone points at the staged app snippet; the published
+    # Caddyfile retains the stable app-owned import path.
+    sed "s|^import ${CADDY_APP_CONFIG}$|import ${staged_app_config}|" "$staged_caddyfile" > "$validation_caddyfile" || return 1
+    if ! "$CADDY_BINARY" validate --config "$validation_caddyfile" --adapter caddyfile; then
+        echo "Error: staged Caddy configuration is invalid; no Caddy configuration was changed."
+        return 1
+    fi
+
+    cp -- "$CADDY_CONFIG_PATH" "$backup_caddyfile" || return 1
+    if [ -f "$CADDY_APP_CONFIG" ]; then
+        had_app_config=true
+        cp -- "$CADDY_APP_CONFIG" "$backup_app_config" || return 1
+    fi
+    if ! install -m 0644 -- "$staged_app_config" "$CADDY_APP_CONFIG" \
+        || ! install -m 0644 -- "$staged_caddyfile" "$CADDY_CONFIG_PATH"; then
+        echo "Error: Caddy configuration publication failed; restoring the previous state."
+        if ! install -m 0644 -- "$backup_caddyfile" "$CADDY_CONFIG_PATH"; then
+            echo "Error: previous Caddyfile could not be restored."
+        fi
+        if [ "$had_app_config" = true ]; then
+            install -m 0644 -- "$backup_app_config" "$CADDY_APP_CONFIG" || echo "Error: previous dashboard proxy config could not be restored."
+        else
+            rm -f -- "$CADDY_APP_CONFIG" || echo "Error: partial dashboard proxy config could not be removed."
+        fi
+        return 1
+    fi
+    if ! systemctl reload caddy; then
+        echo "Error: Caddy reload failed; restoring the previous dashboard proxy configuration."
+        install -m 0644 -- "$backup_caddyfile" "$CADDY_CONFIG_PATH" || echo "Error: previous Caddyfile could not be restored."
+        if [ "$had_app_config" = true ]; then
+            install -m 0644 -- "$backup_app_config" "$CADDY_APP_CONFIG" || echo "Error: previous dashboard proxy config could not be restored."
+        else
+            rm -f -- "$CADDY_APP_CONFIG" || echo "Error: partial dashboard proxy config could not be removed."
+        fi
+        systemctl reload caddy || echo "Error: rollback reload of Caddy also failed."
+        return 1
+    fi
+    CADDY_ROLLBACK_CADDYFILE="$backup_caddyfile"
+    CADDY_ROLLBACK_APP_CONFIG="$backup_app_config"
+    CADDY_ROLLBACK_HAD_APP_CONFIG="$had_app_config"
+    trap 'rm -f -- "$staged_caddyfile" "$validation_caddyfile" "$staged_app_config"' RETURN
+}
+
+dashboard_ufw_rule_numbers() {
+    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" '
+        $0 ~ ("# " comment "[[:space:]]*$") { line=$0; sub(/^[[:space:]]*\[/, "", line); sub(/\].*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); print line }
+    ' | sort -rn
+}
+
+delete_dashboard_ufw_rule_numbers() {
+    local rule_numbers="$1"
+    while IFS= read -r rule; do
+        [ -n "$rule" ] || continue
+        ufw --force delete "$rule" || return 1
+    done <<< "$rule_numbers"
+}
+
+remove_dashboard_ufw_rules() {
+    local rule_numbers
+    rule_numbers=$(dashboard_ufw_rule_numbers) || return 1
+    delete_dashboard_ufw_rule_numbers "$rule_numbers"
+}
+
+configure_ufw_https() {
+    local status old_rule_numbers
+    if ! command -v ufw &>/dev/null; then
+        return 0
+    fi
+    status=$(ufw status 2>/dev/null) || return 1
+    if ! grep -q '^Status: active' <<< "$status"; then
+        return 0
+    fi
+    old_rule_numbers=$(dashboard_ufw_rule_numbers) || return 1
+    if ! ufw allow "${HTTPS_PORT}/tcp" comment "$UFW_COMMENT"; then
+        echo "Error: could not add the dashboard HTTPS firewall rule; existing dashboard rules were preserved."
+        return 1
+    fi
+    if ! delete_dashboard_ufw_rule_numbers "$old_rule_numbers"; then
+        echo "Error: could not remove existing dashboard HTTPS firewall rules."
+        return 1
+    fi
+}
+
+select_backend_port() {
+    local candidate listening
+
+    # Updates keep the service's existing backend port so its own listener does
+    # not make every reinstall choose a different port.
+    if [ -z "$FORCED_PORT" ] && [ -f "$UNIT_DEST" ]; then
+        FORCED_PORT=$(grep -o -- '--port [0-9]*' "$UNIT_DEST" | awk '{print $2}')
+        # Units installed before --port support always used port 3000.
+        if [ -z "$FORCED_PORT" ]; then
+            FORCED_PORT=3000
+        fi
+    fi
+
+    if [ -n "$FORCED_PORT" ]; then
+        PORT="$FORCED_PORT"
+        return 0
+    fi
+
+    PORT=""
+    listening=$(ss -tln 2>/dev/null || true)
+    candidate=$PORT_MIN
+    while [ "$candidate" -le "$PORT_MAX" ]; do
+        if ! grep -qE ":${candidate}[[:space:]]" <<< "$listening"; then
+            PORT="$candidate"
+            return 0
+        fi
+        candidate=$((candidate + 1))
+    done
+
+    echo "Error: no free port found in range ${PORT_MIN}-${PORT_MAX}."
+    echo "Free one up, or re-run with --port N to pick one manually."
+    return 1
+}
+
+start_dashboard_backend() {
+    if ! systemctl start "$SERVICE_NAME" || ! systemctl is-active --quiet "$SERVICE_NAME"; then
+        echo "Error: dashboard service did not start on its loopback backend; HTTPS proxy was not published."
+        return 1
+    fi
 }
 
 record_install_state() {
@@ -548,40 +816,15 @@ fi
 if ! preflight_https; then
     exit 1
 fi
+if ! install_caddy_if_fresh; then
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Pick a port
 # ---------------------------------------------------------------------------
-# On an update (unit already installed), keep the port the service already
-# uses: probing would see the running service holding its own port and move
-# the app somewhere new on every re-run.
-if [ -z "$FORCED_PORT" ] && [ -f "$UNIT_DEST" ]; then
-    FORCED_PORT=$(grep -o -- '--port [0-9]*' "$UNIT_DEST" | awk '{print $2}')
-    # Legacy installs (from before --port support) have no --port in their
-    # ExecStart, so the grep above finds nothing. Those always ran on 3000.
-    if [ -z "$FORCED_PORT" ]; then
-        FORCED_PORT=3000
-    fi
-fi
-
-if [ -n "$FORCED_PORT" ]; then
-    PORT="$FORCED_PORT"
-else
-    PORT=""
-    LISTENING=$(ss -tln 2>/dev/null || true)
-    candidate=$PORT_MIN
-    while [ "$candidate" -le "$PORT_MAX" ]; do
-        if ! echo "$LISTENING" | grep -qE ":${candidate}[[:space:]]"; then
-            PORT="$candidate"
-            break
-        fi
-        candidate=$((candidate + 1))
-    done
-    if [ -z "$PORT" ]; then
-        echo "Error: no free port found in range ${PORT_MIN}-${PORT_MAX}."
-        echo "Free one up, or re-run with --port N to pick one manually."
-        exit 1
-    fi
+if ! select_backend_port; then
+    exit 1
 fi
 
 echo "Installing Simple Network Dashboard..."
@@ -654,13 +897,26 @@ EOF
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" --quiet
-systemctl start "$SERVICE_NAME"
-
-SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+if ! start_dashboard_backend; then
+    exit 1
+fi
+if ! write_caddy_proxy_config; then
+    exit 1
+fi
+if ! configure_ufw_https; then
+    if ! rollback_caddy_proxy_config; then
+        echo "Error: Caddy rollback after firewall failure was incomplete."
+    fi
+    exit 1
+fi
+if ! discard_caddy_proxy_rollback; then
+    echo "Error: could not remove temporary Caddy rollback files."
+    exit 1
+fi
 
 echo ""
 echo "Simple Network Dashboard is running."
-echo "Open http://${SERVER_IP}:${PORT} in your browser."
+echo "Open https://${HTTPS_HOST}:${HTTPS_PORT} in your browser."
 echo "To uninstall later: sudo bash $APP_DIR/uninstall.sh"
 if [ "$ADDED_TO_GROUP" = true ]; then
     echo ""
