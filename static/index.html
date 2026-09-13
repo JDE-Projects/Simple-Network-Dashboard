@@ -496,8 +496,8 @@
       </button>
     </div>
     <aside class="recovery-banner" id="recoveryBanner" aria-live="polite">
-      <div class="recovery-banner-text"><strong>Configuration needs attention.</strong> Your saved devices and commands are available from the backup, but changes are temporarily disabled because automatic recovery did not finish.</div>
-      <div class="recovery-actions">
+      <div class="recovery-banner-text"><strong>Configuration needs attention.</strong> <span id="recoveryMessage">Changes are temporarily disabled.</span></div>
+      <div class="recovery-actions" id="recoveryActions">
         <span class="recovery-status" id="recoveryRetryStatus" aria-live="polite"></span>
         <button class="btn tiny" id="retryRecovery" type="button">Try recovery again</button>
       </div>
@@ -787,6 +787,10 @@ function connectWS() {
         if (msg.version) $('verLabel').textContent = 'v' + msg.version;
         $('debugChk').checked = !!msg.debug;
         $('recoveryBanner').classList.toggle('show', !!msg.recovery_mode);
+        $('recoveryMessage').textContent = msg.recovery_retry_available
+          ? 'Your saved devices and commands are available from the backup, but changes are temporarily disabled because automatic recovery did not finish.'
+          : 'No valid configuration could be loaded, so changes are disabled to protect the existing files. Repair or replace the configuration on the server, then restart the dashboard.';
+        $('recoveryActions').hidden = !msg.recovery_retry_available;
         $('retryRecovery').disabled = false;
         $('retryRecovery').textContent = 'Try recovery again';
         $('recoveryRetryStatus').textContent = '';
