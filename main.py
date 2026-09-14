@@ -51,6 +51,8 @@ SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 SESSION_COOKIE_NAME = "__Host-snd-session"
 CSRF_COOKIE_NAME = "__Host-snd-csrf"
 CSRF_HEADER_NAME = "x-csrf-token"
+PUBLIC_ORIGIN_ENV = "SND_PUBLIC_ORIGIN"
+WS_POLICY_VIOLATION_CODE = 1008
 _PUBLIC_PATHS = {
     "/login",
     "/api/auth/login",
@@ -629,13 +631,31 @@ def _expire_session_cookie(response: Response) -> None:
     )
 
 
-async def _current_session_is_valid(request: Request) -> bool:
-    token = request.cookies.get(SESSION_COOKIE_NAME)
+async def _session_token_is_valid(token: str | None) -> bool:
     try:
         state = await asyncio.to_thread(load_auth_state, AUTH_FILE)
         return await asyncio.to_thread(_session_store.validate, token, state["session_generation"])
     except (OSError, ValueError, SessionStorageError):
         return False
+
+
+async def _current_session_is_valid(request: Request) -> bool:
+    return await _session_token_is_valid(request.cookies.get(SESSION_COOKIE_NAME))
+
+
+async def _websocket_request_is_valid(ws: WebSocket) -> bool:
+    """Validate the authenticated browser and Caddy-provided public origin."""
+    trusted_origin = os.environ.get(PUBLIC_ORIGIN_ENV)
+    origins = ws.headers.getlist("origin")
+    if not trusted_origin or len(origins) != 1:
+        return False
+    try:
+        origin_matches = hmac.compare_digest(origins[0], trusted_origin)
+    except TypeError:
+        return False
+    if not origin_matches:
+        return False
+    return await _session_token_is_valid(ws.cookies.get(SESSION_COOKIE_NAME))
 
 
 class LoginIn(BaseModel):
@@ -727,6 +747,9 @@ async def download_caddy_root_certificate():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    if not await _websocket_request_is_valid(ws):
+        await ws.close(code=WS_POLICY_VIOLATION_CODE)
+        return
     owner = ws.query_params.get("bid") or ""
     await ws_mgr.connect(ws, owner)
     if owner:

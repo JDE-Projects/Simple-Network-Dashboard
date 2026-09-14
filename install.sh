@@ -15,6 +15,7 @@ HTTPS_PORT=443
 HTTPS_HOST=""
 HTTPS_BIND=""
 HTTPS_HOST_WAS_SET=false
+PUBLIC_ORIGIN=""
 CADDY_APP_CONFIG="/etc/caddy/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
 UFW_COMMENT="Simple Network Dashboard HTTPS"
@@ -1016,6 +1017,10 @@ fi
 if ! parse_install_arguments "$@"; then
     exit 1
 fi
+PUBLIC_ORIGIN="https://${HTTPS_HOST,,}"
+if [ "$HTTPS_PORT" -ne 443 ]; then
+    PUBLIC_ORIGIN="${PUBLIC_ORIGIN}:${HTTPS_PORT}"
+fi
 if ! verify_reset_command_destination; then
     exit 1
 fi
@@ -1111,6 +1116,7 @@ After=network.target
 User=snd
 WorkingDirectory=$APP_DIR
 ExecStart=$APP_DIR/venv/bin/python main.py --port ${PORT}
+Environment=SND_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
 Restart=always
 UMask=0077
 
