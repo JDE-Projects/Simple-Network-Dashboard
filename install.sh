@@ -24,9 +24,13 @@ CADDY_HOME="/var/lib/caddy"
 CADDY_DATA_HOME="${CADDY_HOME}/.local/share"
 CADDY_ROOT_CERT="${CADDY_DATA_HOME}/caddy/pki/authorities/local/root.crt"
 DASHBOARD_ROOT_CERT="${DATA_DIR}/caddy-root-ca.crt"
+AUTH_FILE="${DATA_DIR}/auth.json"
+RESET_COMMAND="/usr/local/sbin/snd-reset-password"
+RESET_COMMAND_MARKER="# Simple Network Dashboard managed password reset command v1"
 CADDY_ROLLBACK_CADDYFILE=""
 CADDY_ROLLBACK_APP_CONFIG=""
 CADDY_ROLLBACK_HAD_APP_CONFIG=false
+DASHBOARD_WAS_ACTIVE=false
 
 usage() {
     echo "Usage: $0 [--port N] [--https-host HOST] [--https-port N]"
@@ -858,11 +862,12 @@ def repair_file(path):
         before = os.lstat(path)
     except FileNotFoundError:
         return
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise RuntimeError(f"unsafe runtime file: {path}")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             raise RuntimeError(f"unsafe runtime file: {path}")
         os.fchown(fd, uid, gid)
         os.fchmod(fd, 0o600)
@@ -871,7 +876,7 @@ def repair_file(path):
 
 for directory in (data_dir, log_dir):
     repair_directory(directory)
-for filename in ("devices.json", "known_hosts"):
+for filename in ("devices.json", "known_hosts", "auth.json"):
     repair_file(os.path.join(data_dir, filename))
 PY
 }
@@ -899,6 +904,11 @@ repair_runtime_storage() {
         fi
     done
 
+    if ! is_safe_runtime_file "$AUTH_FILE"; then
+        echo "Error: private runtime file $AUTH_FILE is unsafe. Refusing install."
+        return 1
+    fi
+
     mkdir -p "$DATA_DIR" "$LOG_DIR"
 
     if [ "$ACCOUNT_STATE" != "fresh" ]; then
@@ -914,8 +924,71 @@ repair_runtime_storage() {
 }
 
 copy_application_files() {
-    cp main.py metrics_poller.py ssh_manager.py requirements.txt uninstall.sh "$APP_DIR/"
+    cp main.py metrics_poller.py ssh_manager.py auth.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
     cp -R --no-preserve=ownership static/. "$APP_DIR/static/"
+}
+
+is_owned_reset_command() {
+    local metadata
+
+    [ -f "$RESET_COMMAND" ] && [ ! -L "$RESET_COMMAND" ] || return 1
+    metadata=$(stat -c '%u:%g:%a' "$RESET_COMMAND") || return 1
+    [ "$metadata" = "0:0:755" ] || return 1
+    [ "$(sed -n '2p' "$RESET_COMMAND")" = "$RESET_COMMAND_MARKER" ]
+}
+
+is_verified_deployed_reset_command() {
+    is_owned_reset_command \
+        && [ -f "$APP_DIR/snd-reset-password" ] \
+        && [ ! -L "$APP_DIR/snd-reset-password" ] \
+        && cmp -s -- "$RESET_COMMAND" "$APP_DIR/snd-reset-password"
+}
+
+verify_reset_command_destination() {
+    if { [ -e "$RESET_COMMAND" ] || [ -L "$RESET_COMMAND" ]; } \
+        && ! is_verified_deployed_reset_command; then
+        echo "Error: existing $RESET_COMMAND is not the dashboard-owned root command."
+        echo "Refusing to replace it without a matching deployed dashboard wrapper."
+        return 1
+    fi
+}
+
+install_reset_command() {
+    if { [ -e "$RESET_COMMAND" ] || [ -L "$RESET_COMMAND" ]; } \
+        && ! is_owned_reset_command; then
+        return 1
+    fi
+    install -o root -g root -m 0755 "$APP_DIR/snd-reset-password" "$RESET_COMMAND"
+}
+
+restore_previously_active_service() {
+    if [ "$DASHBOARD_WAS_ACTIVE" != true ]; then
+        return 0
+    fi
+    echo "Authentication setup failed after stopping the active dashboard service. Attempting restoration."
+    if systemctl start "$SERVICE_NAME" \
+        && systemctl is-active --quiet "$SERVICE_NAME"; then
+        echo "Dashboard service restoration succeeded."
+    else
+        echo "Error: dashboard service restoration failed. Run: sudo systemctl status $SERVICE_NAME"
+    fi
+}
+
+initialize_authentication() {
+    if [ -e "$AUTH_FILE" ]; then
+        if ! "$APP_DIR/venv/bin/python" "$APP_DIR/auth.py" validate --auth-file "$AUTH_FILE"; then
+            echo "Error: existing authentication state is malformed or unsafe. It was not changed."
+            echo "Inspect $AUTH_FILE and restore a valid state before re-running the installer."
+            return 1
+        fi
+        echo "Existing dashboard password state was preserved."
+        return 0
+    fi
+
+    if ! "$APP_DIR/venv/bin/python" "$APP_DIR/auth.py" initialize --auth-file "$AUTH_FILE"; then
+        echo "Error: dashboard password initialization did not complete. See the error above before continuing."
+        return 1
+    fi
 }
 
 main() {
@@ -934,6 +1007,9 @@ fi
 # Argument parsing
 # ---------------------------------------------------------------------------
 if ! parse_install_arguments "$@"; then
+    exit 1
+fi
+if ! verify_reset_command_destination; then
     exit 1
 fi
 
@@ -992,6 +1068,7 @@ chmod 2775 "$APP_DIR" "$APP_DIR/static"
 
 # Stop service if already running (handles re-runs for updates)
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    DASHBOARD_WAS_ACTIVE=true
     systemctl stop "$SERVICE_NAME"
 fi
 
@@ -1006,6 +1083,16 @@ if [ ! -d "$APP_DIR/venv" ]; then
     sudo -u snd python3 -m venv "$APP_DIR/venv"
 fi
 sudo -u snd "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet
+
+if ! initialize_authentication; then
+    restore_previously_active_service
+    exit 1
+fi
+if ! install_reset_command; then
+    echo "Error: dashboard password-reset command installation failed."
+    restore_previously_active_service
+    exit 1
+fi
 
 # Create systemd service file
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
