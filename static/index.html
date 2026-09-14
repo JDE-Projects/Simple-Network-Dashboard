@@ -485,6 +485,7 @@
     </div>
     <div class="head-right">
       <button class="btn ghost tiny" id="verBtn"><span id="verText">Status</span><span class="ws-dot err" id="wsChip"></span></button>
+      <button class="btn ghost tiny" id="signOutBtn" type="button">Sign out</button>
       <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
           <circle cx="12" cy="12" r="4"/>
@@ -862,6 +863,16 @@ const GET    = path       => api('GET',    path);
 const POST   = (path, b)  => api('POST',   path, b);
 const PUT    = (path, b)  => api('PUT',    path, b);
 const DELETE = path       => api('DELETE', path);
+
+$('signOutBtn').addEventListener('click', async () => {
+  try {
+    const response = await fetch('/api/auth/logout', {method: 'POST'});
+    if (!response.ok) throw new Error('Sign-out could not be completed.');
+    location.assign('/login');
+  } catch (error) {
+    showErrorBanner('Sign-out failed. Your dashboard session is still active; please try again.');
+  }
+});
 
 // SSH endpoints include the browser id header
 function sshPost(path, body) {

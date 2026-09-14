@@ -25,6 +25,7 @@ CADDY_DATA_HOME="${CADDY_HOME}/.local/share"
 CADDY_ROOT_CERT="${CADDY_DATA_HOME}/caddy/pki/authorities/local/root.crt"
 DASHBOARD_ROOT_CERT="${DATA_DIR}/caddy-root-ca.crt"
 AUTH_FILE="${DATA_DIR}/auth.json"
+SESSIONS_FILE="${DATA_DIR}/sessions.json"
 RESET_COMMAND="/usr/local/sbin/snd-reset-password"
 RESET_COMMAND_MARKER="# Simple Network Dashboard managed password reset command v1"
 CADDY_ROLLBACK_CADDYFILE=""
@@ -469,7 +470,9 @@ ${CADDY_APP_MARKER}
 ${HTTPS_HOST}:${HTTPS_PORT} {
     bind ${HTTPS_BIND}
     tls internal
-    reverse_proxy 127.0.0.1:${PORT}
+    reverse_proxy 127.0.0.1:${PORT} {
+        header_up X-Forwarded-For {remote_host}
+    }
 }
 EOF
     then
@@ -876,7 +879,7 @@ def repair_file(path):
 
 for directory in (data_dir, log_dir):
     repair_directory(directory)
-for filename in ("devices.json", "known_hosts", "auth.json"):
+for filename in ("devices.json", "known_hosts", "auth.json", "sessions.json"):
     repair_file(os.path.join(data_dir, filename))
 PY
 }
@@ -908,6 +911,10 @@ repair_runtime_storage() {
         echo "Error: private runtime file $AUTH_FILE is unsafe. Refusing install."
         return 1
     fi
+    if ! is_safe_runtime_file "$SESSIONS_FILE"; then
+        echo "Error: private runtime file $SESSIONS_FILE is unsafe. Refusing install."
+        return 1
+    fi
 
     mkdir -p "$DATA_DIR" "$LOG_DIR"
 
@@ -924,7 +931,7 @@ repair_runtime_storage() {
 }
 
 copy_application_files() {
-    cp main.py metrics_poller.py ssh_manager.py auth.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
+    cp main.py metrics_poller.py ssh_manager.py auth.py session_manager.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
     cp -R --no-preserve=ownership static/. "$APP_DIR/static/"
 }
 

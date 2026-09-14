@@ -15,7 +15,7 @@ import unicodedata
 from pathlib import Path
 
 from argon2 import PasswordHasher, Type, extract_parameters
-from argon2.exceptions import HashingError, InvalidHashError
+from argon2.exceptions import HashingError, InvalidHashError, VerifyMismatchError
 
 
 AUTH_STATE_VERSION = 1
@@ -66,6 +66,17 @@ def normalize_password(password: str) -> str:
             f"Password must be {MIN_PASSWORD_LENGTH} through {MAX_PASSWORD_LENGTH} characters."
         )
     return normalized
+
+
+def verify_password(state: dict[str, object], password: str) -> bool:
+    """Verify a supplied password against validated private authentication state."""
+    validated = validate_auth_state(state)
+    try:
+        return PASSWORD_HASHER.verify(
+            str(validated["password_hash"]), normalize_password(password)
+        )
+    except (PasswordPolicyError, VerifyMismatchError, InvalidHashError):
+        return False
 
 
 def prompt_for_password() -> str:
