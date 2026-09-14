@@ -50,11 +50,16 @@ html.light .icon-moon { display:block; }
 <script>
 const root = document.documentElement;
 document.getElementById('theme').addEventListener('click', () => { const light = root.classList.toggle('light'); try { localStorage.setItem('snd-theme', light ? 'light' : 'dark'); } catch(e) {} });
+function csrfToken() {
+  const prefix = '__Host-snd-csrf=';
+  const cookie = document.cookie.split('; ').find(value => value.startsWith(prefix));
+  return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : '';
+}
 document.getElementById('loginForm').addEventListener('submit', async event => {
   event.preventDefault(); const button = document.getElementById('submit'); const error = document.getElementById('error');
   button.disabled = true; error.textContent = '';
   try {
-    const response = await fetch('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:document.getElementById('password').value, remembered:document.getElementById('remembered').checked})});
+    const response = await fetch('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrfToken()}, body:JSON.stringify({password:document.getElementById('password').value, remembered:document.getElementById('remembered').checked})});
     const data = await response.json();
     if (response.ok && data.ok) { location.assign('/'); return; }
     error.textContent = data.retry_after ? `${data.error} Try again in ${data.retry_after} seconds.` : (data.error || data.detail || 'Sign-in could not be completed.');

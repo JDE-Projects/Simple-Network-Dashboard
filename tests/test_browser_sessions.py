@@ -20,6 +20,13 @@ import main
 from session_manager import LoginThrottle, REMEMBERED_SECONDS, SESSION_ONLY_SECONDS, SessionStorageError, SessionStore
 
 
+def _csrf_headers(client: TestClient) -> dict[str, str]:
+    client.get("/login")
+    token = client.cookies.get(main.CSRF_COOKIE_NAME)
+    assert token
+    return {"X-CSRF-Token": token}
+
+
 def test_session_storage_never_persists_the_plaintext_token(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions.json", clock=lambda: 1_000)
     token, expiry = store.create("generation", remembered=False)
@@ -129,9 +136,9 @@ def test_login_cookies_session_status_and_browser_id_non_authority(tmp_path: Pat
     monkeypatch.setattr(main, "_login_throttle", LoginThrottle())
     client = TestClient(main.app, base_url="https://testserver")
 
-    rejected = client.post("/api/auth/login", json={"password": "wrong password", "remembered": False})
+    rejected = client.post("/api/auth/login", json={"password": "wrong password", "remembered": False}, headers=_csrf_headers(client))
     assert rejected.status_code == 401
-    response = client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False})
+    response = client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client))
     assert response.status_code == 200
     cookie = response.headers["set-cookie"]
     assert "__Host-snd-session=" in cookie
@@ -139,7 +146,7 @@ def test_login_cookies_session_status_and_browser_id_non_authority(tmp_path: Pat
     assert "Path=/" in cookie and "Domain=" not in cookie and "Max-Age" not in cookie
     assert client.get("/api/auth/session").json() == {"authenticated": True}
 
-    remembered = client.post("/api/auth/login", json={"password": "a" * 15, "remembered": True})
+    remembered = client.post("/api/auth/login", json={"password": "a" * 15, "remembered": True}, headers=_csrf_headers(client))
     assert f"Max-Age={REMEMBERED_SECONDS}" in remembered.headers["set-cookie"]
     client.cookies.clear()
     assert client.get("/api/auth/session", headers={"X-Browser-Id": "attacker"}).json() == {"authenticated": False}
@@ -152,9 +159,9 @@ def test_logout_revokes_server_session_and_preserves_cookie_on_storage_failure(t
     monkeypatch.setattr(main, "AUTH_FILE", str(auth_file))
     monkeypatch.setattr(main, "_session_store", store)
     client = TestClient(main.app, base_url="https://testserver")
-    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}).status_code == 200
+    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
     token = client.cookies.get(main.SESSION_COOKIE_NAME)
-    logged_out = client.post("/api/auth/logout")
+    logged_out = client.post("/api/auth/logout", headers=_csrf_headers(client))
     assert logged_out.status_code == 200
     assert "Max-Age=0" in logged_out.headers["set-cookie"]
     assert not store.validate(token, auth.load_auth_state(auth_file)["session_generation"])
@@ -162,7 +169,7 @@ def test_logout_revokes_server_session_and_preserves_cookie_on_storage_failure(t
     token, _ = store.create(auth.load_auth_state(auth_file)["session_generation"], remembered=False)
     client.cookies.set(main.SESSION_COOKIE_NAME, token)
     monkeypatch.setattr(store, "revoke", lambda _token: (_ for _ in ()).throw(OSError("unavailable")))
-    failed = client.post("/api/auth/logout")
+    failed = client.post("/api/auth/logout", headers=_csrf_headers(client))
     assert failed.status_code == 503
     assert "set-cookie" not in failed.headers
     assert client.cookies.get(main.SESSION_COOKIE_NAME) == token
@@ -176,13 +183,13 @@ def test_login_failures_are_throttled_without_permanent_lockout(tmp_path: Path, 
     monkeypatch.setattr(main, "AUTH_FILE", str(auth_file))
     monkeypatch.setattr(main, "_session_store", SessionStore(tmp_path / "sessions.json"))
     monkeypatch.setattr(main, "_login_throttle", LoginThrottle(clock=lambda: now[0]))
-    client = TestClient(main.app)
+    client = TestClient(main.app, base_url="https://testserver")
     for _ in range(5):
-        response = client.post("/api/auth/login", json={"password": "wrong password", "remembered": False})
+        response = client.post("/api/auth/login", json={"password": "wrong password", "remembered": False}, headers=_csrf_headers(client))
     assert response.status_code == 401 and response.json()["retry_after"] == 5
-    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}).status_code == 429
+    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 429
     now[0] += 15 * 60
-    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}).status_code == 200
+    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
 
 
 def test_argon2_verification_failure_returns_sanitized_unavailable_response(
@@ -200,7 +207,7 @@ def test_argon2_verification_failure_returns_sanitized_unavailable_response(
     client = TestClient(main.app, base_url="https://testserver")
 
     response = client.post(
-        "/api/auth/login", json={"password": "a" * 15, "remembered": False}
+        "/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)
     )
 
     assert response.status_code == 503
