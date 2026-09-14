@@ -88,6 +88,7 @@ CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
 CADDY_BINARY=caddy
 HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
 HTTPS_PORT=8443
 PORT=3007
 printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
@@ -104,6 +105,7 @@ rm -rf "$tmp"
     assert ':80 { respond "shared" }' in result.stdout
     assert "import " in result.stdout
     assert "dashboard.lan:8443" in result.stdout
+    assert "bind 10.0.0.4" in result.stdout
     assert "reverse_proxy 127.0.0.1:3007" in result.stdout
     assert result.stdout.index("validated") < result.stdout.index("reloaded")
 
@@ -130,7 +132,51 @@ configure_ufw_https
     assert result.returncode == 0, result.stderr
     assert "ufw --force delete 2" in result.stdout
     assert "ufw allow 8443/tcp comment Simple Network Dashboard HTTPS" in result.stdout
+    assert result.stdout.index("ufw allow") < result.stdout.index("ufw --force delete")
     assert "3007/tcp" not in result.stdout
+
+
+def test_ufw_replacement_deletes_only_stale_rules_after_allow_renumbers_them() -> None:
+    result = _run_install(
+        r'''
+HTTPS_PORT=8443
+rule_state=before
+deleted=""
+ufw() {
+    if [ "$1" = status ] && [ "${2:-}" = numbered ]; then
+        if [ "$rule_state" = before ]; then
+            printf '[ 4] 443/tcp ALLOW IN Anywhere (v6) # Simple Network Dashboard HTTPS\n'
+            printf '[ 3] 443/tcp ALLOW IN Anywhere # Simple Network Dashboard HTTPS\n'
+            printf '[ 2] 22/tcp ALLOW IN Anywhere\n'
+        else
+            printf '[ 6] 8443/tcp ALLOW IN Anywhere (v6) # Simple Network Dashboard HTTPS\n'
+            printf '[ 5] 8443/tcp ALLOW IN Anywhere # Simple Network Dashboard HTTPS\n'
+            printf '[ 4] 443/tcp ALLOW IN Anywhere (v6) # Simple Network Dashboard HTTPS\n'
+            printf '[ 3] 443/tcp ALLOW IN Anywhere # Simple Network Dashboard HTTPS\n'
+            printf '[ 2] 22/tcp ALLOW IN Anywhere\n'
+        fi
+    elif [ "$1" = status ]; then
+        printf 'Status: active\n'
+    elif [ "$1" = allow ]; then
+        rule_state=after
+        printf 'allowed %s\n' "$*"
+    elif [ "$1" = --force ] && [ "$2" = delete ]; then
+        case "$3" in
+            4|3) deleted="${deleted}${3} " ;;
+            *) echo "unexpected-delete-$3"; return 1 ;;
+        esac
+    fi
+}
+configure_ufw_https
+printf 'deleted=%s\n' "$deleted"
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "allowed allow 8443/tcp comment Simple Network Dashboard HTTPS" in result.stdout
+    assert result.stdout.index("allowed allow") < result.stdout.index("deleted=4 3")
+    assert "deleted=4 3" in result.stdout
+    assert "unexpected-delete" not in result.stdout
 
 
 def test_ufw_inactive_is_not_changed() -> None:
@@ -346,6 +392,7 @@ CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
 CADDY_BINARY=caddy
 HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
 HTTPS_PORT=443
 PORT=3000
 printf ':80 {{ respond "shared" }}\n' > "$CADDY_CONFIG_PATH"
@@ -379,6 +426,7 @@ CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
 CADDY_BINARY=caddy
 HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
 HTTPS_PORT=443
 PORT=3000
 printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
@@ -412,6 +460,7 @@ CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
 CADDY_BINARY=caddy
 HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
 HTTPS_PORT=443
 PORT=3000
 printf ':80 {{ respond "shared" }}\n' > "$CADDY_CONFIG_PATH"
@@ -444,6 +493,7 @@ CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
 CADDY_BINARY=caddy
 HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
 HTTPS_PORT=443
 PORT=3000
 printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
