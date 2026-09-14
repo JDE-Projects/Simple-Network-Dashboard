@@ -5,6 +5,8 @@ APP_DIR="/opt/simple-network-dashboard"
 DATA_DIR="/var/lib/simple-network-dashboard"
 LOG_DIR="/var/log/simple-network-dashboard"
 SERVICE_NAME="simple-network-dashboard"
+RESET_COMMAND="/usr/local/sbin/snd-reset-password"
+RESET_COMMAND_MARKER="# Simple Network Dashboard managed password reset command v1"
 INSTALL_STATE="/etc/simple-network-dashboard/install-state"
 CADDY_APP_CONFIG="/etc/caddy/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
@@ -312,6 +314,28 @@ require_root() {
     fi
 }
 
+is_owned_reset_command() {
+    local metadata
+
+    [ -f "$RESET_COMMAND" ] && [ ! -L "$RESET_COMMAND" ] || return 1
+    [ -f "$APP_DIR/snd-reset-password" ] && [ ! -L "$APP_DIR/snd-reset-password" ] || return 1
+    metadata=$(stat -c '%u:%g:%a' "$RESET_COMMAND") || return 1
+    [ "$metadata" = "0:0:755" ] || return 1
+    [ "$(sed -n '2p' "$RESET_COMMAND")" = "$RESET_COMMAND_MARKER" ] \
+        && cmp -s -- "$RESET_COMMAND" "$APP_DIR/snd-reset-password"
+}
+
+remove_owned_reset_command() {
+    if [ ! -e "$RESET_COMMAND" ] && [ ! -L "$RESET_COMMAND" ]; then
+        return 0
+    fi
+    if ! is_owned_reset_command; then
+        echo "Retaining $RESET_COMMAND because it is not the verified dashboard-owned reset command."
+        return 0
+    fi
+    rm -- "$RESET_COMMAND"
+}
+
 main() {
 if ! require_root; then
     return 1
@@ -442,6 +466,11 @@ fi
 systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
 
 # Remove app directory
+if ! remove_owned_reset_command; then
+    echo "Error: could not remove the verified dashboard password-reset command. Application files were not removed."
+    exit 1
+fi
+
 if [ -d "$APP_DIR" ]; then
     rm -rf "$APP_DIR"
 fi
