@@ -20,15 +20,19 @@ import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from ipaddress import ip_address
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from argon2.exceptions import Argon2Error
+from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
+from auth import load_auth_state, verify_password
+from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageError, SessionStore
 
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
@@ -40,6 +44,9 @@ DATA_DIR = "/var/lib/simple-network-dashboard"
 LOG_DIR = "/var/log/simple-network-dashboard"
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 DASHBOARD_ROOT_CERT = os.path.join(DATA_DIR, "caddy-root-ca.crt")
+AUTH_FILE = os.path.join(DATA_DIR, "auth.json")
+SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
+SESSION_COOKIE_NAME = "__Host-snd-session"
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +130,9 @@ _recovery_retry_lock = asyncio.Lock()
 
 # Pending SSH-release tasks per owner, scheduled when their last socket drops
 _pending_releases: dict[str, asyncio.Task] = {}
+_session_store = SessionStore(SESSIONS_FILE)
+_login_throttle = LoginThrottle()
+_login_lock = asyncio.Lock()
 
 
 def _cancel_pending_release(owner: str):
@@ -446,6 +456,112 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 @app.get("/")
 async def root():
     return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
+
+
+@app.get("/login")
+async def login_page():
+    return FileResponse(os.path.join(BASE_DIR, "static", "login.html"))
+
+
+def _effective_client_address(request: Request) -> str:
+    """Use Caddy's client address only for loopback backend requests."""
+    peer = request.client.host if request.client else ""
+    try:
+        loopback_peer = ip_address(peer).is_loopback
+    except ValueError:
+        loopback_peer = False
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if loopback_peer and forwarded:
+        candidate = forwarded.split(",", 1)[0].strip()
+        try:
+            return str(ip_address(candidate))
+        except ValueError:
+            pass
+    return peer or "unknown"
+
+
+def _set_session_cookie(response: Response, token: str, remembered: bool) -> None:
+    options: dict[str, object] = {
+        "key": SESSION_COOKIE_NAME,
+        "value": token,
+        "path": "/",
+        "secure": True,
+        "httponly": True,
+        "samesite": "strict",
+    }
+    if remembered:
+        options["max_age"] = REMEMBERED_SECONDS
+    response.set_cookie(**options)
+
+
+def _expire_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="strict"
+    )
+
+
+async def _current_session_is_valid(request: Request) -> bool:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    try:
+        state = await asyncio.to_thread(load_auth_state, AUTH_FILE)
+        return await asyncio.to_thread(_session_store.validate, token, state["session_generation"])
+    except (OSError, ValueError, SessionStorageError):
+        return False
+
+
+class LoginIn(BaseModel):
+    password: str
+    remembered: bool = False
+
+
+@app.post("/api/auth/login")
+async def login(credentials: LoginIn, request: Request):
+    address = _effective_client_address(request)
+    async with _login_lock:
+        retry_after = _login_throttle.retry_after(address)
+        if retry_after:
+            return JSONResponse(
+                {"ok": False, "error": "Too many failed attempts. Try again later.", "retry_after": retry_after},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+        try:
+            state = await asyncio.to_thread(load_auth_state, AUTH_FILE)
+            password_valid = await asyncio.to_thread(verify_password, state, credentials.password)
+        except (OSError, ValueError, SessionStorageError, Argon2Error):
+            raise HTTPException(status_code=503, detail="Dashboard authentication is unavailable.") from None
+        if not password_valid:
+            retry_after = _login_throttle.failure(address)
+            return JSONResponse(
+                {"ok": False, "error": "Password was not accepted.", "retry_after": retry_after},
+                status_code=401,
+            )
+        try:
+            token, _expiry = await asyncio.to_thread(
+                _session_store.create, state["session_generation"], credentials.remembered
+            )
+        except (OSError, ValueError, SessionStorageError):
+            raise HTTPException(status_code=503, detail="Dashboard authentication is unavailable.") from None
+        _login_throttle.success(address)
+        response = JSONResponse({"ok": True, "remembered": credentials.remembered})
+        _set_session_cookie(response, token, credentials.remembered)
+        return response
+
+
+@app.get("/api/auth/session")
+async def session_status(request: Request):
+    return {"authenticated": await _current_session_is_valid(request)}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    try:
+        await asyncio.to_thread(_session_store.revoke, request.cookies.get(SESSION_COOKIE_NAME))
+    except (OSError, ValueError, SessionStorageError):
+        raise HTTPException(status_code=503, detail="Dashboard sign-out is unavailable. Please try again.") from None
+    response = JSONResponse({"ok": True})
+    _expire_session_cookie(response)
+    return response
 
 
 @app.get("/certificate-setup")
