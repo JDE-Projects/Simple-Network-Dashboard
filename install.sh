@@ -13,6 +13,7 @@ PORT_MAX=3010
 FORCED_PORT=""
 HTTPS_PORT=443
 HTTPS_HOST=""
+HTTPS_BIND=""
 HTTPS_HOST_WAS_SET=false
 CADDY_APP_CONFIG="/etc/caddy/simple-network-dashboard.caddy"
 CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
@@ -78,12 +79,27 @@ detect_lan_ipv4() {
     return 1
 }
 
+is_local_lan_ipv4() {
+    local address="$1"
+    local candidate
+
+    while IFS= read -r candidate; do
+        if [ "$candidate" = "$address" ] && is_lan_ipv4 "$candidate"; then
+            return 0
+        fi
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+    return 1
+}
+
 is_valid_https_host() {
     local host="$1"
     local label
     local -a labels
 
-    is_valid_ipv4 "$host" && return 0
+    if is_valid_ipv4 "$host"; then
+        is_lan_ipv4 "$host"
+        return
+    fi
     [[ "$host" =~ ^[0-9]+(\.[0-9]+){3}$ ]] && return 1
     [ "${#host}" -le 253 ] || return 1
     [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
@@ -99,6 +115,7 @@ parse_install_arguments() {
     FORCED_PORT=""
     HTTPS_PORT=443
     HTTPS_HOST=""
+    HTTPS_BIND=""
     HTTPS_HOST_WAS_SET=false
 
     while [ $# -gt 0 ]; do
@@ -135,16 +152,25 @@ parse_install_arguments() {
         echo "Error: --https-port must be a numeric port between 1 and 65535, got '$HTTPS_PORT'."
         return 1
     fi
+    if ! HTTPS_BIND=$(detect_lan_ipv4); then
+        echo "Error: could not detect a private local IPv4 address for the HTTPS listener."
+        return 1
+    fi
     if [ "$HTTPS_HOST_WAS_SET" = false ]; then
-        if ! HTTPS_HOST=$(detect_lan_ipv4); then
-            echo "Error: could not detect a non-loopback LAN IPv4 address. Re-run with --https-host HOST."
-            return 1
-        fi
+        HTTPS_HOST="$HTTPS_BIND"
     fi
     if ! is_valid_https_host "$HTTPS_HOST"; then
-        echo "Error: --https-host must be a valid IPv4 address or DNS hostname, got '$HTTPS_HOST'."
+        echo "Error: --https-host must be a valid IPv4 address or DNS hostname; IPv4 addresses must be private and locally assigned, got '$HTTPS_HOST'."
         usage
         return 1
+    fi
+    if is_valid_ipv4 "$HTTPS_HOST"; then
+        if ! is_local_lan_ipv4 "$HTTPS_HOST"; then
+            echo "Error: --https-host must be a valid IPv4 address or DNS hostname; IPv4 addresses must be private and locally assigned, got '$HTTPS_HOST'."
+            usage
+            return 1
+        fi
+        HTTPS_BIND="$HTTPS_HOST"
     fi
 }
 
@@ -437,6 +463,7 @@ write_caddy_proxy_config() {
     if ! cat > "$staged_app_config" <<EOF
 ${CADDY_APP_MARKER}
 ${HTTPS_HOST}:${HTTPS_PORT} {
+    bind ${HTTPS_BIND}
     tls internal
     reverse_proxy 127.0.0.1:${PORT}
 }
@@ -508,8 +535,22 @@ remove_dashboard_ufw_rules() {
     delete_dashboard_ufw_rule_numbers "$rule_numbers"
 }
 
+stale_dashboard_ufw_rule_numbers() {
+    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" -v port="$HTTPS_PORT" '
+        $0 ~ ("# " comment "[[:space:]]*$") {
+            line=$0
+            sub(/^[[:space:]]*\[/, "", line)
+            number=line
+            sub(/\].*/, "", number)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", number)
+            sub(/^[^]]*\][[:space:]]*/, "", line)
+            if (line !~ ("^" port "/")) print number
+        }
+    ' | sort -rn
+}
+
 configure_ufw_https() {
-    local status old_rule_numbers
+    local status stale_rule_numbers
     if ! command -v ufw &>/dev/null; then
         return 0
     fi
@@ -517,12 +558,12 @@ configure_ufw_https() {
     if ! grep -q '^Status: active' <<< "$status"; then
         return 0
     fi
-    old_rule_numbers=$(dashboard_ufw_rule_numbers) || return 1
     if ! ufw allow "${HTTPS_PORT}/tcp" comment "$UFW_COMMENT"; then
         echo "Error: could not add the dashboard HTTPS firewall rule; existing dashboard rules were preserved."
         return 1
     fi
-    if ! delete_dashboard_ufw_rule_numbers "$old_rule_numbers"; then
+    stale_rule_numbers=$(stale_dashboard_ufw_rule_numbers) || return 1
+    if ! delete_dashboard_ufw_rule_numbers "$stale_rule_numbers"; then
         echo "Error: could not remove existing dashboard HTTPS firewall rules."
         return 1
     fi

@@ -22,7 +22,7 @@ def client() -> TestClient:
 def test_certificate_setup_route_serves_the_standalone_page(client: TestClient) -> None:
     response = client.get("/certificate-setup")
     assert response.status_code == 200
-    assert response.text == PAGE.read_text(encoding="utf-8")
+    assert response.content == PAGE.read_bytes()
 
 
 def test_root_certificate_download_has_safe_attachment_headers(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

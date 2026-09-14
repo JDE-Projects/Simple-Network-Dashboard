@@ -62,12 +62,12 @@ def test_defaults_choose_first_lan_address_and_https_port() -> None:
         """
 MOCK_LAN_IPS='127.0.0.1 172.20.1.9 10.0.0.4'
 parse_install_arguments
-printf 'host=%s port=%s backend=%s\\n' "$HTTPS_HOST" "$HTTPS_PORT" "${FORCED_PORT:-default}"
+printf 'host=%s bind=%s port=%s backend=%s\\n' "$HTTPS_HOST" "$HTTPS_BIND" "$HTTPS_PORT" "${FORCED_PORT:-default}"
 """
     )
 
     assert result.returncode == 0, result.stderr
-    assert "host=172.20.1.9 port=443 backend=default" in result.stdout
+    assert "host=172.20.1.9 bind=172.20.1.9 port=443 backend=default" in result.stdout
 
 
 def test_defaults_choose_a_10_address_when_it_is_first_lan_address() -> None:
@@ -75,24 +75,48 @@ def test_defaults_choose_a_10_address_when_it_is_first_lan_address() -> None:
         """
 MOCK_LAN_IPS='127.0.0.1 10.0.0.4 192.168.1.8'
 parse_install_arguments
-printf 'host=%s\\n' "$HTTPS_HOST"
+printf 'host=%s bind=%s\\n' "$HTTPS_HOST" "$HTTPS_BIND"
 """
     )
 
     assert result.returncode == 0, result.stderr
-    assert "host=10.0.0.4" in result.stdout
+    assert "host=10.0.0.4 bind=10.0.0.4" in result.stdout
 
 
 def test_space_and_equals_flags_are_parsed() -> None:
     result = _run_installer(
         """
 parse_install_arguments --port 3007 --https-host=dashboard.lan --https-port 8449
-printf 'host=%s port=%s backend=%s\\n' "$HTTPS_HOST" "$HTTPS_PORT" "$FORCED_PORT"
+printf 'host=%s bind=%s port=%s backend=%s\\n' "$HTTPS_HOST" "$HTTPS_BIND" "$HTTPS_PORT" "$FORCED_PORT"
 """
     )
 
     assert result.returncode == 0, result.stderr
-    assert "host=dashboard.lan port=8449 backend=3007" in result.stdout
+    assert "host=dashboard.lan bind=10.0.0.4 port=8449 backend=3007" in result.stdout
+
+
+def test_explicit_second_local_private_ip_becomes_the_https_host_and_bind_address() -> None:
+    result = _run_installer(
+        """
+MOCK_LAN_IPS='10.0.0.4 192.168.1.8'
+parse_install_arguments --https-host=192.168.1.8
+printf 'host=%s bind=%s\\n' "$HTTPS_HOST" "$HTTPS_BIND"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "host=192.168.1.8 bind=192.168.1.8" in result.stdout
+
+
+def test_private_but_nonlocal_https_host_is_rejected() -> None:
+    result = _run_installer(
+        """
+if parse_install_arguments --https-host=192.168.1.8; then exit 10; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "IPv4 addresses must be private and locally assigned" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -106,6 +130,11 @@ printf 'host=%s port=%s backend=%s\\n' "$HTTPS_HOST" "$HTTPS_PORT" "$FORCED_PORT
         ("--https-host=-bad.lan", "valid IPv4 address or DNS hostname"),
         ("--https-host=999.1.1.1", "valid IPv4 address or DNS hostname"),
         ("--https-host=256.255.255.255", "valid IPv4 address or DNS hostname"),
+        ("--https-host=0.0.0.0", "valid IPv4 address or DNS hostname"),
+        ("--https-host=127.0.0.1", "valid IPv4 address or DNS hostname"),
+        ("--https-host=8.8.8.8", "valid IPv4 address or DNS hostname"),
+        ("--https-host=224.0.0.1", "valid IPv4 address or DNS hostname"),
+        ("--https-host=255.255.255.255", "valid IPv4 address or DNS hostname"),
     ],
 )
 def test_invalid_https_arguments_are_rejected(arguments: str, expected: str) -> None:
@@ -119,16 +148,16 @@ if parse_install_arguments {arguments}; then exit 10; fi
     assert expected in result.stdout
 
 
-def test_ipv4_boundary_value_is_accepted_as_an_explicit_https_host() -> None:
+def test_https_host_requires_a_private_local_listener_address() -> None:
     result = _run_installer(
         """
-parse_install_arguments --https-host=255.255.255.255
-printf 'host=%s\\n' "$HTTPS_HOST"
+MOCK_LAN_IPS='127.0.0.1 8.8.8.8'
+if parse_install_arguments --https-host=dashboard.lan; then exit 10; fi
 """
     )
 
     assert result.returncode == 0, result.stderr
-    assert "host=255.255.255.255" in result.stdout
+    assert "could not detect a private local IPv4 address" in result.stdout
 
 
 def test_fresh_state_with_free_port_is_accepted() -> None:
@@ -194,9 +223,9 @@ if preflight_https; then exit 10; fi
 def test_missing_ss_is_rejected() -> None:
     result = _run_installer(
         """
+parse_install_arguments --https-host 10.0.0.4
 unset -f ss
 PATH=/not-a-real-command-directory
-parse_install_arguments --https-host 10.0.0.4
 if preflight_https; then exit 10; fi
 """
     )
