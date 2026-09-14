@@ -8,8 +8,10 @@ and pushes real-time metrics + SSH events over a WebSocket.
 import asyncio
 import copy
 import errno
+import hmac
 import json
 import os
+import secrets
 import socket
 import ssl
 import stat
@@ -47,6 +49,28 @@ DASHBOARD_ROOT_CERT = os.path.join(DATA_DIR, "caddy-root-ca.crt")
 AUTH_FILE = os.path.join(DATA_DIR, "auth.json")
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 SESSION_COOKIE_NAME = "__Host-snd-session"
+CSRF_COOKIE_NAME = "__Host-snd-csrf"
+CSRF_HEADER_NAME = "x-csrf-token"
+_PUBLIC_PATHS = {
+    "/login",
+    "/api/auth/login",
+    "/api/auth/session",
+    "/certificate-setup",
+    "/certificate-setup/caddy-root-ca.crt",
+}
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'{wss_source}; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +477,111 @@ app = FastAPI(title=APP_NAME, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 
+def _is_public_path(path: str) -> bool:
+    return path in _PUBLIC_PATHS or path.startswith("/static/")
+
+
+def _set_csrf_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        CSRF_COOKIE_NAME,
+        token,
+        path="/",
+        secure=True,
+        httponly=False,
+        samesite="strict",
+    )
+
+
+def _expire_csrf_cookie(response: Response) -> None:
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=True, httponly=False, samesite="strict")
+
+
+def _csrf_is_valid(request: Request) -> bool:
+    cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+    header_token = request.headers.get(CSRF_HEADER_NAME)
+    return bool(cookie_token and header_token and hmac.compare_digest(cookie_token, header_token))
+
+
+def _same_host_wss_source(request: Request) -> str:
+    """Build a CSP source for the browser's exact HTTPS host and port."""
+    hostname = request.url.hostname
+    if not hostname:
+        return ""
+    try:
+        address = ip_address(hostname)
+        source_host = f"[{address}]" if address.version == 6 else str(address)
+    except ValueError:
+        try:
+            hostname.encode("ascii")
+        except UnicodeEncodeError:
+            return ""
+        labels = hostname.rstrip(".").split(".")
+        if (
+            len(hostname) > 253
+            or any(not label or len(label) > 63 for label in labels)
+            or any(label[0] == "-" or label[-1] == "-" for label in labels)
+            or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-." for character in hostname)
+        ):
+            return ""
+        source_host = hostname.rstrip(".")
+    try:
+        port = request.url.port
+    except ValueError:
+        return ""
+    return f" wss://{source_host}{f':{port}' if port is not None else ''}"
+
+
+def _add_security_headers(response: Response, request: Request) -> Response:
+    path = request.url.path
+    response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=(), payment=(), usb=()"
+    response.headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY.format(
+        wss_source=_same_host_wss_source(request)
+    )
+    if not path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(Exception)
+async def internal_server_error(request: Request, _error: Exception):
+    """Keep unexpected HTTP failures private and apply browser protections."""
+    response = JSONResponse({"detail": "Internal server error."}, status_code=500)
+    return _add_security_headers(response, request)
+
+
+@app.middleware("http")
+async def protect_http_requests(request: Request, call_next):
+    """Enforce browser-session and double-submit CSRF rules for HTTP only."""
+    path = request.url.path
+    is_public = _is_public_path(path)
+
+    if path == "/api/auth/login":
+        if request.method in _UNSAFE_METHODS and not _csrf_is_valid(request):
+            return _add_security_headers(JSONResponse({"detail": "CSRF validation failed."}, status_code=403), request)
+    elif not is_public:
+        if not await _current_session_is_valid(request):
+            if path.startswith("/api/"):
+                return _add_security_headers(JSONResponse({"detail": "Authentication required."}, status_code=401), request)
+            response = Response(status_code=307, headers={"Location": "/login"})
+            return _add_security_headers(response, request)
+        if request.method in _UNSAFE_METHODS and not _csrf_is_valid(request):
+            return _add_security_headers(JSONResponse({"detail": "CSRF validation failed."}, status_code=403), request)
+
+    response = await call_next(request)
+    needs_csrf_cookie = (
+        request.method == "GET"
+        and not request.cookies.get(CSRF_COOKIE_NAME)
+        and (path == "/login" or not is_public)
+    )
+    if needs_csrf_cookie:
+        _set_csrf_cookie(response, secrets.token_urlsafe(32))
+    return _add_security_headers(response, request)
+
+
 @app.get("/")
 async def root():
     return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
@@ -545,6 +674,7 @@ async def login(credentials: LoginIn, request: Request):
         _login_throttle.success(address)
         response = JSONResponse({"ok": True, "remembered": credentials.remembered})
         _set_session_cookie(response, token, credentials.remembered)
+        _set_csrf_cookie(response, secrets.token_urlsafe(32))
         return response
 
 
@@ -561,6 +691,7 @@ async def logout(request: Request):
         raise HTTPException(status_code=503, detail="Dashboard sign-out is unavailable. Please try again.") from None
     response = JSONResponse({"ok": True})
     _expire_session_cookie(response)
+    _expire_csrf_cookie(response)
     return response
 
 
