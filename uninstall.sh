@@ -220,6 +220,13 @@ remove_install_state() {
     if [ -f "$INSTALL_STATE" ] || [ -L "$INSTALL_STATE" ]; then
         rm -f "$INSTALL_STATE"
     fi
+    # Remove the dashboard-owned state directory once its record is gone, but
+    # only when it is empty so unexpected contents are left for inspection.
+    local state_dir
+    state_dir=$(dirname "$INSTALL_STATE")
+    if [ -d "$state_dir" ]; then
+        rmdir "$state_dir" 2>/dev/null || true
+    fi
 }
 
 remove_snd_identities_if_verified() {
@@ -388,7 +395,11 @@ fi
 if [ "$HAS_CONFIG" = true ]; then
     DO_BACKUP="y"
     if [ "$AUTO_YES" = false ]; then
-        read -r -p "Back up devices.json and known_hosts before removing? [Y/n] " DO_BACKUP
+        # A closed or non-interactive input stream defaults to backing up,
+        # the safe choice, instead of letting set -e abort on the read.
+        if ! read -r -p "Back up devices.json and known_hosts before removing? [Y/n] " DO_BACKUP; then
+            DO_BACKUP="y"
+        fi
         DO_BACKUP="${DO_BACKUP:-y}"
     fi
 
@@ -420,7 +431,13 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "$AUTO_YES" = false ]; then
-    read -r -p "Remove Simple Network Dashboard now? [y/N] " CONFIRM
+    # A closed or non-interactive input stream must fail loudly here rather
+    # than let set -e abort silently before this confirmation is answered.
+    if ! read -r -p "Remove Simple Network Dashboard now? [y/N] " CONFIRM; then
+        echo "No confirmation received on a non-interactive input stream. Nothing was removed."
+        echo "For an unattended removal, re-run with: sudo bash uninstall.sh --yes"
+        exit 1
+    fi
     CONFIRM="${CONFIRM:-n}"
     if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
         echo "Aborted. Nothing was removed."
