@@ -1,3 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 *.sh text eol=lf
+# Extension-less shell command executed directly by its shebang; must stay LF
+snd-reset-password text eol=lf
