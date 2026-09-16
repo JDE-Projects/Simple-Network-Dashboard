@@ -1,4 +1,4 @@
-"""Task 4 Phase 4 WebSocket authentication and origin contracts."""
+"""WebSocket authentication and origin contracts."""
 
 from __future__ import annotations
 

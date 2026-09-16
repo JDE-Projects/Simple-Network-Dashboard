@@ -1,4 +1,4 @@
-"""Task 5 Phase 1 device API command-field semantics.
+"""Device API command-field semantics.
 
 POST /api/devices must tell apart three distinct meanings of the
 ``commands`` field: omitted (preserve on update, empty on create),
@@ -11,7 +11,6 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 import auth

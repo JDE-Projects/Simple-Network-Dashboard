@@ -1,4 +1,4 @@
-"""Task 4 Phase 3 HTTP authentication, CSRF, and browser-header contracts."""
+"""HTTP authentication, CSRF, and browser-header contracts."""
 
 from __future__ import annotations
 
