@@ -52,9 +52,11 @@ point the dashboard at the new address; the local certificate is preserved,
 so there is nothing to reinstall in your browser.
 
 If the HTTPS port you chose is already used by something other than this
-dashboard's own Caddy setup, the installer stops without changing anything and
-suggests a free port to re-run with; it does not pick one for you
-automatically.
+dashboard's own Caddy setup, the installer automatically picks a free port
+instead, without stopping or asking. It also checks whether port 80 is already
+in use. Caddy normally wants port 80 for redirecting plain HTTP requests to
+HTTPS, so when something else already holds that port, the installer
+configures Caddy to leave port 80 alone rather than letting the install fail.
 
 Optional installer arguments:
 

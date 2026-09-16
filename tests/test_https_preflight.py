@@ -290,6 +290,242 @@ if preflight_https; then exit 10; fi
     assert expected in result.stdout
 
 
+def test_free_ports_leave_redirects_enabled() -> None:
+    result = _run_installer(
+        """
+parse_install_arguments --https-host 10.0.0.4
+preflight_https
+printf 'port=%s disable=%s\\n' "$HTTPS_PORT" "$HTTPS_DISABLE_REDIRECTS"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "port=443 disable=false" in result.stdout
+
+
+def test_both_ports_occupied_falls_back_and_disables_redirects() -> None:
+    result = _run_installer(
+        """
+MOCK_SS='LISTEN 0 128 *:443 *:* users:(("nginx",pid=9,fd=4))'
+MOCK_SS="$MOCK_SS"$'\\n''LISTEN 0 128 *:80 *:* users:(("nginx",pid=9,fd=4))'
+parse_install_arguments --https-host 10.0.0.4
+preflight_https
+printf 'port=%s disable=%s\\n' "$HTTPS_PORT" "$HTTPS_DISABLE_REDIRECTS"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "port=8443 disable=true" in result.stdout
+
+
+def test_https_port_free_but_port_80_occupied_disables_redirects() -> None:
+    result = _run_installer(
+        """
+MOCK_SS='LISTEN 0 128 *:80 *:* users:(("nginx",pid=9,fd=4))'
+parse_install_arguments --https-host 10.0.0.4
+preflight_https
+printf 'port=%s disable=%s\\n' "$HTTPS_PORT" "$HTTPS_DISABLE_REDIRECTS"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "port=443 disable=true" in result.stdout
+
+
+def test_port_80_held_only_by_our_own_caddy_leaves_redirects_enabled() -> None:
+    result = _run_installer(
+        """
+caddy() { :; }
+MOCK_LOAD_STATE=loaded
+MOCK_EXEC_START='/usr/bin/caddy run --config /etc/caddy/Caddyfile'
+MOCK_SS='LISTEN 0 128 *:80 *:* users:(("caddy",pid=42,fd=7))'
+parse_install_arguments --https-host 10.0.0.4
+preflight_https
+printf 'disable=%s\\n' "$HTTPS_DISABLE_REDIRECTS"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "disable=false" in result.stdout
+
+
+def test_caddy_global_block_state_detects_none_foreign_ours() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+printf 'example.com {\\n    reverse_proxy 127.0.0.1:3000\\n}\\n' > "$tmpdir/none.Caddyfile"
+printf '{\\n    admin off\\n}\\n\\nexample.com {\\n}\\n' > "$tmpdir/foreign.Caddyfile"
+printf '%s\\n{\\n\\tauto_https disable_redirects\\n}\\n\\nexample.com {\\n}\\n' "$CADDY_GLOBAL_MARKER" > "$tmpdir/ours.Caddyfile"
+printf '# a comment\\n\\n# another comment\\nexample.com {\\n}\\n' > "$tmpdir/prefixed.Caddyfile"
+
+printf 'none=%s foreign=%s ours=%s prefixed=%s\\n' \\
+    "$(caddy_global_block_state "$tmpdir/none.Caddyfile")" \\
+    "$(caddy_global_block_state "$tmpdir/foreign.Caddyfile")" \\
+    "$(caddy_global_block_state "$tmpdir/ours.Caddyfile")" \\
+    "$(caddy_global_block_state "$tmpdir/prefixed.Caddyfile")"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "none=none foreign=foreign ours=ours prefixed=none" in result.stdout
+
+
+def test_reconcile_disable_true_prepends_owned_block_to_a_bare_file() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+printf 'example.com {\\n    reverse_proxy 127.0.0.1:3000\\n}\\n' > "$tmpdir/Caddyfile"
+
+HTTPS_DISABLE_REDIRECTS=true
+reconcile_caddy_global_block "$tmpdir/Caddyfile"
+printf 'rc=%s\\n' "$?"
+cat "$tmpdir/Caddyfile"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rc=0" in result.stdout
+    assert "# Simple Network Dashboard managed global options v1" in result.stdout
+    assert "auto_https disable_redirects" in result.stdout
+    assert "example.com {" in result.stdout
+    assert "reverse_proxy 127.0.0.1:3000" in result.stdout
+
+
+def test_reconcile_disable_true_refuses_a_foreign_block_and_leaves_it_unchanged() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+printf '{\\n    admin off\\n}\\n\\nexample.com {\\n}\\n' > "$tmpdir/Caddyfile"
+before=$(cat "$tmpdir/Caddyfile")
+
+HTTPS_DISABLE_REDIRECTS=true
+if reconcile_caddy_global_block "$tmpdir/Caddyfile"; then exit 10; fi
+
+after=$(cat "$tmpdir/Caddyfile")
+if [ "$before" = "$after" ]; then
+    echo "unchanged"
+else
+    echo "changed"
+fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+    assert "its own global options block" in combined
+    assert "auto_https disable_redirects" in combined
+    assert "unchanged" in result.stdout
+
+
+@pytest.mark.parametrize("directive", ["auto_https disable_redirects", "auto_https off"])
+def test_reconcile_disable_true_accepts_a_foreign_block_that_already_disables_redirects(
+    directive: str,
+) -> None:
+    result = _run_installer(
+        f"""
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+printf '{{\\n    {directive}\\n}}\\n\\nexample.com {{\\n}}\\n' > "$tmpdir/Caddyfile"
+before=$(cat "$tmpdir/Caddyfile")
+
+HTTPS_DISABLE_REDIRECTS=true
+reconcile_caddy_global_block "$tmpdir/Caddyfile"
+
+after=$(cat "$tmpdir/Caddyfile")
+if [ "$before" = "$after" ]; then
+    echo "unchanged"
+else
+    echo "changed"
+fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "unchanged" in result.stdout
+
+
+def test_reconcile_disable_true_leaves_an_already_owned_block_unchanged() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+printf '%s\\n{\\n\\tauto_https disable_redirects\\n}\\n\\nexample.com {\\n}\\n' "$CADDY_GLOBAL_MARKER" > "$tmpdir/Caddyfile"
+before=$(cat "$tmpdir/Caddyfile")
+
+HTTPS_DISABLE_REDIRECTS=true
+reconcile_caddy_global_block "$tmpdir/Caddyfile"
+
+after=$(cat "$tmpdir/Caddyfile")
+if [ "$before" = "$after" ]; then
+    echo "unchanged"
+else
+    echo "changed"
+fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "unchanged" in result.stdout
+
+
+def test_reconcile_disable_false_round_trips_an_owned_block_back_to_the_original() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+printf 'example.com {\\n    reverse_proxy 127.0.0.1:3000\\n}\\n' > "$tmpdir/Caddyfile"
+original=$(cat "$tmpdir/Caddyfile")
+
+HTTPS_DISABLE_REDIRECTS=true
+reconcile_caddy_global_block "$tmpdir/Caddyfile"
+HTTPS_DISABLE_REDIRECTS=false
+reconcile_caddy_global_block "$tmpdir/Caddyfile"
+
+final=$(cat "$tmpdir/Caddyfile")
+if [ "$original" = "$final" ]; then
+    echo "roundtrip-ok"
+else
+    echo "roundtrip-fail"
+fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "roundtrip-ok" in result.stdout
+
+
+def test_reconcile_disable_false_leaves_foreign_and_none_files_untouched() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+printf '{\\n    admin off\\n}\\n\\nexample.com {\\n}\\n' > "$tmpdir/foreign.Caddyfile"
+printf 'example.com {\\n}\\n' > "$tmpdir/none.Caddyfile"
+foreign_before=$(cat "$tmpdir/foreign.Caddyfile")
+none_before=$(cat "$tmpdir/none.Caddyfile")
+
+HTTPS_DISABLE_REDIRECTS=false
+reconcile_caddy_global_block "$tmpdir/foreign.Caddyfile"
+reconcile_caddy_global_block "$tmpdir/none.Caddyfile"
+
+foreign_after=$(cat "$tmpdir/foreign.Caddyfile")
+none_after=$(cat "$tmpdir/none.Caddyfile")
+if [ "$foreign_before" = "$foreign_after" ] && [ "$none_before" = "$none_after" ]; then
+    echo "unchanged"
+else
+    echo "changed"
+fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "unchanged" in result.stdout
+
+
 def test_https_preflight_precedes_the_first_mutating_install_step() -> None:
     installer = (ROOT / "install.sh").read_text(encoding="utf-8")
 
