@@ -270,6 +270,18 @@ https_port_available() {
     return 1
 }
 
+reload_or_start_caddy() {
+    # Reload a running Caddy so existing sites keep serving without a drop.
+    # Start it when it is not running, which is the case on a fresh install
+    # where Caddy failed to bind its default port 80 because another service
+    # already held it. A bare reload cannot bring a stopped Caddy up.
+    if systemctl is-active --quiet caddy; then
+        systemctl reload caddy
+    else
+        systemctl start caddy
+    fi
+}
+
 select_https_port() {
     local candidate recorded
 
@@ -337,7 +349,7 @@ preflight_https() {
 }
 
 install_caddy_if_fresh() {
-    local caddy_key caddy_list
+    local caddy_key caddy_list base_caddyfile
 
     if [ "$CADDY_STATE" != "fresh" ]; then
         return 0
@@ -363,6 +375,24 @@ install_caddy_if_fresh() {
 
     if ! inspect_caddy_state || [ "$CADDY_STATE" != "compatible" ]; then
         echo "Error: installed Caddy is not a compatible Caddyfile-managed systemd service."
+        return 1
+    fi
+
+    # The apt package ships a stock Caddyfile with a default welcome site bound
+    # to port 80. Left in place, that site competes for port 80 on every fresh
+    # install, so replace it with a minimal, site-free base before anything is
+    # layered on top of it.
+    base_caddyfile=$(mktemp "$(dirname "$CADDY_CONFIG_PATH")/.simple-network-dashboard-Caddyfile-base.XXXXXX") || {
+        echo "Error: could not stage a replacement Caddyfile."
+        return 1
+    }
+    trap 'rm -f -- "$caddy_key" "$caddy_list" "$base_caddyfile"' RETURN
+    if ! printf '# Simple Network Dashboard managed base Caddyfile\n' > "$base_caddyfile"; then
+        echo "Error: could not write the replacement Caddyfile."
+        return 1
+    fi
+    if ! install -m 0644 -- "$base_caddyfile" "$CADDY_CONFIG_PATH"; then
+        echo "Error: could not publish the replacement Caddyfile."
         return 1
     fi
 }
@@ -567,7 +597,7 @@ rollback_caddy_proxy_config() {
             rollback_failed=true
         }
     fi
-    systemctl reload caddy || {
+    reload_or_start_caddy || {
         echo "Error: rollback reload of Caddy failed."
         rollback_failed=true
     }
@@ -661,7 +691,7 @@ EOF
         fi
         return 1
     fi
-    if ! systemctl reload caddy; then
+    if ! reload_or_start_caddy; then
         echo "Error: Caddy reload failed; restoring the previous dashboard proxy configuration."
         install -m 0644 -- "$backup_caddyfile" "$CADDY_CONFIG_PATH" || echo "Error: previous Caddyfile could not be restored."
         if [ "$had_app_config" = true ]; then
@@ -669,7 +699,18 @@ EOF
         else
             rm -f -- "$CADDY_APP_CONFIG" || echo "Error: partial dashboard proxy config could not be removed."
         fi
-        systemctl reload caddy || echo "Error: rollback reload of Caddy also failed."
+        reload_or_start_caddy || echo "Error: rollback reload of Caddy also failed."
+        return 1
+    fi
+    if ! systemctl is-active --quiet caddy; then
+        echo "Error: Caddy did not come up after configuration; restoring the previous dashboard proxy configuration."
+        install -m 0644 -- "$backup_caddyfile" "$CADDY_CONFIG_PATH" || echo "Error: previous Caddyfile could not be restored."
+        if [ "$had_app_config" = true ]; then
+            install -m 0644 -- "$backup_app_config" "$CADDY_APP_CONFIG" || echo "Error: previous dashboard proxy config could not be restored."
+        else
+            rm -f -- "$CADDY_APP_CONFIG" || echo "Error: partial dashboard proxy config could not be removed."
+        fi
+        reload_or_start_caddy || echo "Error: rollback reload of Caddy also failed."
         return 1
     fi
     CADDY_ROLLBACK_CADDYFILE="$backup_caddyfile"
