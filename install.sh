@@ -25,6 +25,8 @@ CADDY_IMPORT_LINE="import ${CADDY_APP_CONFIG}"
 UFW_COMMENT="Simple Network Dashboard HTTPS"
 CADDY_APP_MARKER="# Simple Network Dashboard managed proxy v1"
 CADDY_IMPORT_COMMENT="# Simple Network Dashboard managed Caddy import"
+CADDY_GLOBAL_MARKER="# Simple Network Dashboard managed global options v1"
+HTTPS_DISABLE_REDIRECTS=false
 CADDY_HOME="/var/lib/caddy"
 CADDY_DATA_HOME="${CADDY_HOME}/.local/share"
 CADDY_ROOT_CERT="${CADDY_DATA_HOME}/caddy/pki/authorities/local/root.crt"
@@ -310,6 +312,15 @@ preflight_https() {
     if ! select_https_port; then
         return 1
     fi
+
+    # Caddy's automatic HTTPS binds port 80 for HTTP-to-HTTPS redirects. If
+    # port 80 is held by anything other than our own Caddy, disable those
+    # redirects so an occupied port 80 does not break the install.
+    if https_port_available 80; then
+        HTTPS_DISABLE_REDIRECTS=false
+    else
+        HTTPS_DISABLE_REDIRECTS=true
+    fi
 }
 
 install_caddy_if_fresh() {
@@ -387,6 +398,126 @@ count_caddy_imports() {
         { previous=$0 }
         END { printf "%d %d\n", total + 0, managed + 0 }
     ' "$1"
+}
+
+caddy_global_block_state() {
+    local file="$1" line trimmed last_comment=""
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        trimmed=$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        [ -z "$trimmed" ] && continue
+        if [[ "$trimmed" == \#* ]]; then
+            last_comment="$trimmed"
+            continue
+        fi
+        if [ "$trimmed" = "{" ]; then
+            if [ "$last_comment" = "$CADDY_GLOBAL_MARKER" ]; then
+                printf 'ours\n'
+            else
+                printf 'foreign\n'
+            fi
+            return 0
+        fi
+        printf 'none\n'
+        return 0
+    done < "$file"
+    printf 'none\n'
+}
+
+# Succeed when the Caddyfile's first global options block already turns Caddy's
+# automatic HTTP-to-HTTPS redirects off, so nothing needs adding to it.
+caddy_global_block_disables_redirects() {
+    local file="$1"
+
+    awk '
+        { line=$0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", line) }
+        !started {
+            if (line == "" || line ~ /^#/) next
+            if (line == "{") { started=1; depth=1; next }
+            exit 1
+        }
+        {
+            depth += gsub(/{/, "{", line)
+            depth -= gsub(/}/, "}", line)
+            if (line ~ /^auto_https[[:space:]]+disable_redirects([[:space:]]|$)/) found=1
+            if (line ~ /^auto_https[[:space:]]+off([[:space:]]|$)/) found=1
+            if (depth <= 0) exit (found ? 0 : 1)
+        }
+        END { exit (found ? 0 : 1) }
+    ' "$file"
+}
+
+reconcile_caddy_global_block() {
+    local file="$1" state dir tmp
+
+    state=$(caddy_global_block_state "$file")
+    dir=$(dirname "$file")
+
+    if [ "$HTTPS_DISABLE_REDIRECTS" = true ]; then
+        case "$state" in
+            foreign)
+                if ! caddy_global_block_disables_redirects "$file"; then
+                    echo "Error: port 80 is in use, so Caddy's HTTP-to-HTTPS redirect must be turned off, but this Caddyfile already has its own global options block. Add the line 'auto_https disable_redirects' inside that block and re-run the installer." >&2
+                    return 1
+                fi
+                ;;
+            none)
+                tmp=$(mktemp "$dir/.simple-network-dashboard-global.XXXXXX") || return 1
+                if ! { printf '%s\n{\n    auto_https disable_redirects\n}\n\n' "$CADDY_GLOBAL_MARKER"; cat -- "$file"; } > "$tmp"; then
+                    rm -f -- "$tmp"
+                    return 1
+                fi
+                if ! cat -- "$tmp" > "$file"; then
+                    rm -f -- "$tmp"
+                    return 1
+                fi
+                rm -f -- "$tmp"
+                ;;
+            ours)
+                :
+                ;;
+        esac
+    else
+        case "$state" in
+            ours)
+                tmp=$(mktemp "$dir/.simple-network-dashboard-global.XXXXXX") || return 1
+                if ! awk -v marker="$CADDY_GLOBAL_MARKER" '
+                    {
+                        if (!started && $0 == marker) {
+                            started = 1
+                            removing = 1
+                            next
+                        }
+                        if (removing) {
+                            line = $0
+                            gsub(/^[ \t]+|[ \t]+$/, "", line)
+                            if (line == "}") {
+                                removing = 0
+                                skip_blank = 1
+                            }
+                            next
+                        }
+                        if (skip_blank) {
+                            skip_blank = 0
+                            if ($0 == "") next
+                        }
+                        print
+                    }
+                ' "$file" > "$tmp"; then
+                    rm -f -- "$tmp"
+                    return 1
+                fi
+                if ! cat -- "$tmp" > "$file"; then
+                    rm -f -- "$tmp"
+                    return 1
+                fi
+                rm -f -- "$tmp"
+                ;;
+            none|foreign)
+                :
+                ;;
+        esac
+    fi
 }
 
 discard_caddy_proxy_rollback() {
@@ -474,6 +605,9 @@ write_caddy_proxy_config() {
     fi
     if [ "$import_count" -eq 0 ]; then
         printf '\n%s\n%s\n' "$CADDY_IMPORT_COMMENT" "$CADDY_IMPORT_LINE" >> "$staged_caddyfile" || return 1
+    fi
+    if ! reconcile_caddy_global_block "$staged_caddyfile"; then
+        return 1
     fi
     if ! cat > "$staged_app_config" <<EOF
 ${CADDY_APP_MARKER}
