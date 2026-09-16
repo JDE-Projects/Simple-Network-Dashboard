@@ -526,6 +526,49 @@ fi
     assert "unchanged" in result.stdout
 
 
+def test_update_keeps_the_previously_recorded_https_port_over_the_default() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+CADDY_APP_CONFIG="$tmpdir/simple-network-dashboard.caddy"
+printf '%s\\n%s\\n' "$CADDY_APP_MARKER" 'dashboard.lan:8443 {' > "$CADDY_APP_CONFIG"
+printf '    reverse_proxy 127.0.0.1:3007 {\\n}\\n' >> "$CADDY_APP_CONFIG"
+
+CADDY_STATE=compatible
+SS_LISTENERS='LISTEN 0 128 *:443 *:* users:(("caddy",pid=42,fd=7))'
+SS_LISTENERS="$SS_LISTENERS"$'\\n''LISTEN 0 128 *:8443 *:* users:(("caddy",pid=42,fd=7))'
+HTTPS_PORT_WAS_SET=false
+select_https_port
+printf 'rc=%s port=%s\\n' "$?" "$HTTPS_PORT"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rc=0 port=8443" in result.stdout
+
+
+def test_update_falls_back_to_the_default_when_the_recorded_port_is_no_longer_free() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+CADDY_APP_CONFIG="$tmpdir/simple-network-dashboard.caddy"
+printf '%s\\n%s\\n' "$CADDY_APP_MARKER" 'dashboard.lan:8443 {' > "$CADDY_APP_CONFIG"
+printf '    reverse_proxy 127.0.0.1:3007 {\\n}\\n' >> "$CADDY_APP_CONFIG"
+
+CADDY_STATE=compatible
+SS_LISTENERS='LISTEN 0 128 *:8443 *:* users:(("nginx",pid=9,fd=4))'
+HTTPS_PORT_WAS_SET=false
+select_https_port
+printf 'rc=%s port=%s\\n' "$?" "$HTTPS_PORT"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rc=0 port=443" in result.stdout
+
+
 def test_https_preflight_precedes_the_first_mutating_install_step() -> None:
     installer = (ROOT / "install.sh").read_text(encoding="utf-8")
 

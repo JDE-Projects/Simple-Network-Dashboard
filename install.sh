@@ -271,12 +271,25 @@ https_port_available() {
 }
 
 select_https_port() {
-    local candidate
+    local candidate recorded
 
     # An explicit --https-port is honored as chosen, matching --port for the
     # backend: the administrator's selection is used without a free-port search.
     if [ "$HTTPS_PORT_WAS_SET" = true ]; then
         return 0
+    fi
+
+    # Updates keep the previously chosen HTTPS port, matching select_backend_port's
+    # readback of the backend port from the deployed unit file. The prior port is
+    # read from the deployed app config's site-opener line and reused only if it
+    # is still available, so a dashboard that moved to a fallback port stays there
+    # instead of reverting to 443 whenever 443 later frees up.
+    if [ -f "$CADDY_APP_CONFIG" ] && [ ! -L "$CADDY_APP_CONFIG" ]; then
+        recorded=$(grep -oE '^[A-Za-z0-9._-]+:[0-9]+ \{$' "$CADDY_APP_CONFIG" | head -n1 | sed -E 's/.*:([0-9]+) \{$/\1/')
+        if [ -n "$recorded" ] && is_valid_port "$recorded" && https_port_available "$recorded"; then
+            HTTPS_PORT="$recorded"
+            return 0
+        fi
     fi
 
     if https_port_available "$HTTPS_PORT_DEFAULT"; then
