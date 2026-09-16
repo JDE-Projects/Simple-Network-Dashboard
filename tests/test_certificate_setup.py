@@ -57,7 +57,7 @@ def test_certificate_setup_page_is_local_themed_and_accessible() -> None:
     assert "document.documentElement.classList.add('light')" in page
     assert "a:focus-visible,button:focus-visible" in page
     assert "@media (max-width:560px)" in page
-    assert 'aria-label="Switch to light theme"' in page
+    assert 'aria-label="Toggle theme"' in page
     assert 'alt="Simple Network Dashboard"' in page
     assert 'href="/certificate-setup/caddy-root-ca.crt"' in page
     assert 'download="caddy-root-ca.crt"' not in page
