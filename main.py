@@ -416,7 +416,6 @@ def _norm(d: dict) -> dict:
             "command": cmd,
             "sudo":    bool(c.get("sudo", False)),
             "confirm": (c.get("confirm") or "").strip(),
-            "pinned":  bool(c.get("pinned", False)),
         })
     d["commands"]     = clean
     d["metrics_port"] = int(d.get("metrics_port") or 9100)

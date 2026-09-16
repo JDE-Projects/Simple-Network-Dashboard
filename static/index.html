@@ -237,9 +237,6 @@
   /* SSH-connected actions */
   .ssh-actions { display: none; margin-top: 11px; flex-direction: column; gap: 9px; }
   .card.ssh-on .ssh-actions { display: flex; }
-  .pins { display: flex; flex-wrap: wrap; gap: 6px; }
-  .pin-btn { font-size: 12px; padding: 6px 10px; }
-  .pins-empty { font-size: 11px; color: var(--text-faint); }
   .cmd-row { display: flex; gap: 7px; align-items: stretch; }
   .cmd-row input[type=text] { flex: 1; background: var(--bg); border: 1px solid var(--border-2); border-radius: var(--radius-sm); color: var(--text); padding: 8px 11px; font-family: 'JetBrains Mono', monospace; font-size: 12px; min-width: 0; }
   .cmd-row input[type=text]:focus { outline: none; border-color: var(--accent); }
@@ -346,13 +343,8 @@
   .lib-empty { color: var(--text-faint); font-size: 13px; text-align: center; margin-top: 30px; }
 
   .cmd-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
-  .cmd-card.pinned { border-color: var(--accent-2); }
   .cc-top  { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
   .cc-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cc-pin  { background: none; border: none; cursor: pointer; color: var(--text-faint); padding: 2px; display: grid; place-items: center; }
-  .cc-pin svg { width: 14px; height: 14px; }
-  .cc-pin:disabled { opacity: 0.32; cursor: not-allowed; }
-  .cc-pin.on { color: var(--accent); }
   .cc-cmd  { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cc-foot { display: flex; align-items: center; gap: 5px; }
   .cc-badge { font-size: 9px; letter-spacing: 0.4px; text-transform: uppercase; font-weight: 600; padding: 2px 6px; border-radius: 20px; }
@@ -606,7 +598,6 @@
     <div class="field"><label>Command</label><textarea id="cCmd" placeholder="e.g. apt update && apt upgrade -y"></textarea></div>
     <div class="field"><label>Confirm prompt (optional)</label><input type="text" id="cConfirm" placeholder="Ask before running, e.g. Reboot now?" /></div>
     <label class="checkrow"><input type="checkbox" id="cSudo" /> Run with sudo</label>
-    <label class="checkrow"><input type="checkbox" id="cPinned" /> Pin as quick button</label>
     <div class="modal-err" id="cmdErr"></div>
     <div class="modal-actions">
       <button class="btn ghost" id="cmdCancel">Cancel</button>
@@ -1304,7 +1295,6 @@ const SVG = {
   key:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.85 12.15 19 4"/><path d="m18 5 2 2m-5 0 2 2"/></svg>`,
   edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4v16h16v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>`,
   del:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>`,
-  pin:  `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2l8 8-3.5 1.2-3 3L14 22l-2.2-2.2-4.4 4.4-1.4-1.4 4.4-4.4L8 16l3-3 1.2-3.5z"/></svg>`,
 };
 
 function buildCard(d) {
@@ -1335,7 +1325,6 @@ function buildCard(d) {
     <div class="cerr" data-cerr></div>
     <div class="in-use-msg" data-inuse>In use by another session.</div>
     <div class="ssh-actions">
-      <div class="pins" data-pins></div>
       <div class="cmd-row">
         <input type="text" data-custom placeholder="Custom command…" />
         <label class="sudo-tog"><input type="checkbox" data-sudo />sudo</label>
@@ -1347,27 +1336,8 @@ function buildCard(d) {
       </div>
     </div>`;
 
-  buildPins(card, d);
   wireCard(card, d);
   return card;
-}
-
-function buildPins(card, d) {
-  const wrap   = card.querySelector('[data-pins]');
-  const pinned = (d.commands || []).filter(c => c.pinned);
-  wrap.innerHTML = '';
-  if (!pinned.length) {
-    wrap.innerHTML = '<span class="pins-empty">No pinned commands.</span>';
-    return;
-  }
-  pinned.forEach(c => {
-    const idx = d.commands.indexOf(c);
-    const b = document.createElement('button');
-    b.className = 'btn tiny pin-btn';
-    b.textContent = c.name;
-    b.onclick = e => { e.stopPropagation(); runLibCmd(d.id, idx); };
-    wrap.appendChild(b);
-  });
 }
 
 function wireCard(card, d) {
@@ -1522,11 +1492,10 @@ function renderLibrary() {
   grid.className = 'cmd-grid';
   cmds.forEach((c, i) => {
     const card = document.createElement('div');
-    card.className = 'cmd-card' + (c.pinned ? ' pinned' : '');
+    card.className = 'cmd-card';
     card.innerHTML = `
       <div class="cc-top">
         <span class="cc-name">${esc(c.name)}</span>
-        <button class="cc-pin ${c.pinned?'on':''}" title="${c.pinned?'Unpin':'Pin'}" ${CONFIG_READ_ONLY?'disabled':''}>${SVG.pin}</button>
       </div>
       <div class="cc-cmd" title="${esc(c.command)}">${esc(c.command)}</div>
       <div class="cc-foot">
@@ -1547,7 +1516,6 @@ function renderLibrary() {
           </button>
         </div>
       </div>`;
-    card.querySelector('.cc-pin').onclick  = ()  => togglePin(d.id, i);
     card.querySelector('.edit').onclick    = ()  => openCmdEditor(d.id, i);
     card.querySelector('.copy').onclick    = ()  => openCopyPicker(d.id, i);
     card.querySelector('.del').onclick     = ()  => {
@@ -1588,16 +1556,6 @@ async function persistCommands(d) {
   renderLibrary();
 }
 
-function pinnedCount(d) { return (d.commands || []).filter(c => c.pinned).length; }
-
-function togglePin(deviceId, index) {
-  const d = dev(deviceId); if (!d) return;
-  const c = d.commands[index];
-  if (!c.pinned && pinnedCount(d) >= 10) { addLine(deviceId, 'Maximum 10 pinned commands.', 'warn'); ensureTab(deviceId); return; }
-  c.pinned = !c.pinned;
-  persistCommands(d);
-}
-
 function deleteCmd(deviceId, index) {
   const d = dev(deviceId); if (!d) return;
   d.commands.splice(index, 1);
@@ -1616,7 +1574,6 @@ function openCmdEditor(deviceId, index) {
   $('cCmd').value     = c ? c.command    : '';
   $('cConfirm').value = c ? (c.confirm||'') : '';
   $('cSudo').checked  = c ? !!c.sudo     : false;
-  $('cPinned').checked= c ? !!c.pinned   : false;
   $('cmdErr').textContent = '';
   $('cmdModal').classList.add('show');
   setTimeout(() => $('cName').focus(), 40);
@@ -1627,10 +1584,7 @@ $('cmdSave').onclick   = () => {
   const command = $('cCmd').value.trim();
   if (!name || !command) { $('cmdErr').textContent = 'Name and command are required.'; return; }
   const d = dev(cmdCtx.deviceId); if (!d) return;
-  const pinned   = $('cPinned').checked;
-  const wasPinned = cmdCtx.index !== null ? !!d.commands[cmdCtx.index].pinned : false;
-  if (pinned && !wasPinned && pinnedCount(d) >= 10) { $('cmdErr').textContent = 'Maximum 10 pinned commands.'; return; }
-  const obj = {name, command, sudo: $('cSudo').checked, confirm: $('cConfirm').value.trim(), pinned};
+  const obj = {name, command, sudo: $('cSudo').checked, confirm: $('cConfirm').value.trim()};
   if (!d.commands) d.commands = [];
   if (cmdCtx.index !== null) d.commands[cmdCtx.index] = obj;
   else d.commands.push(obj);
@@ -1665,7 +1619,7 @@ $('saveDo').onclick   = () => {
   const d    = dev(saveCtx.deviceId);
   if (d) {
     if (!d.commands) d.commands = [];
-    d.commands.push({name, command: saveCtx.command, sudo: !!saveCtx.sudo, confirm: '', pinned: false});
+    d.commands.push({name, command: saveCtx.command, sudo: !!saveCtx.sudo, confirm: ''});
     persistCommands(d);
   }
   closeSave();
@@ -1767,7 +1721,7 @@ async function copyTo(targetId) {
     showInfo('Already exists', `"${cmd.name}" is already in ${target.name}'s command library.`);
     return;
   }
-  const copy = {name: cmd.name, command: cmd.command, sudo: !!cmd.sudo, confirm: cmd.confirm||'', pinned: false};
+  const copy = {name: cmd.name, command: cmd.command, sudo: !!cmd.sudo, confirm: cmd.confirm||''};
   target.commands = (target.commands||[]).concat([copy]);
   closeCopy();
   await persistCommands(target);

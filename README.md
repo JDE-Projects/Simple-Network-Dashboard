@@ -13,7 +13,7 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
 ## Highlights
 - Live device stats for CPU, RAM, disk, temperature, and network activity
 - SSH management per device: run saved commands or one-off custom commands with live console output
-- Per-device command library with pinned quick-buttons, optional sudo, and optional confirm prompts
+- Per-device command library with optional sudo and optional confirm prompts
 - SSH passwords are never saved: held in server memory only while connected, wiped immediately on disconnect
 - Local HTTPS out of the box: Caddy terminates the connection and proxies to the dashboard
 - A single dashboard password protects access, with sign-in, sign-out, and an optional "remember this browser" option
@@ -119,9 +119,8 @@ The dashboard's bottom bar also has a **Check for updates** button that tells yo
 2. Click **Add Device** and enter the display name, IP address, SSH username, and Node Exporter port (default 9100).
 3. Stats appear automatically: CPU, RAM, disk, temperature, and network rates.
 4. To manage a device via SSH, enter the password for that device and click **Connect**.
-5. Use the **Command Library** to save, pin, and reuse commands per device.
-6. Pinned commands appear as quick-run buttons directly on the device card.
-7. Use **Sign out** to end your session on that browser immediately.
+5. Use the **Command Library** to save and reuse commands per device.
+6. Use **Sign out** to end your session on that browser immediately.
 
 ## Uninstall
 
