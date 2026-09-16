@@ -93,7 +93,10 @@ HTTPS_PORT=8443
 PORT=3007
 printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
 caddy() { echo validated; }
-systemctl() { [ "$1" = reload ] && echo reloaded; }
+systemctl() {
+    [ "$1" = is-active ] && return 0
+    [ "$1" = reload ] && echo reloaded
+}
 write_caddy_proxy_config
 cat "$CADDY_CONFIG_PATH"
 cat "$CADDY_APP_CONFIG"
@@ -108,6 +111,75 @@ rm -rf "$tmp"
     assert "bind " not in result.stdout
     assert "reverse_proxy 127.0.0.1:3007" in result.stdout
     assert result.stdout.index("validated") < result.stdout.index("reloaded")
+
+
+def test_reload_or_start_caddy_reloads_a_running_caddy() -> None:
+    result = _run_install(
+        r'''
+systemctl() {
+    if [ "$1" = is-active ]; then return 0; fi
+    printf 'systemctl %s\n' "$*"
+}
+reload_or_start_caddy
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "systemctl reload caddy" in result.stdout
+    assert "systemctl start caddy" not in result.stdout
+
+
+def test_reload_or_start_caddy_starts_a_stopped_caddy() -> None:
+    result = _run_install(
+        r'''
+systemctl() {
+    if [ "$1" = is-active ]; then return 1; fi
+    printf 'systemctl %s\n' "$*"
+}
+reload_or_start_caddy
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "systemctl start caddy" in result.stdout
+    assert "systemctl reload caddy" not in result.stdout
+
+
+def test_proxy_publication_starts_caddy_instead_of_reloading_when_not_active() -> None:
+    result = _run_install(
+        r'''
+tmp=$(mktemp -d)
+CADDY_CONFIG_PATH="$tmp/Caddyfile"
+CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
+CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
+CADDY_BINARY=caddy
+HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
+HTTPS_PORT=8443
+PORT=3007
+printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
+caddy() { echo validated; }
+started=false
+systemctl() {
+    if [ "$1" = is-active ]; then
+        [ "$started" = true ] && return 0
+        return 1
+    fi
+    if [ "$1" = start ]; then started=true; fi
+    printf 'systemctl %s\n' "$*"
+}
+write_caddy_proxy_config
+cat "$CADDY_CONFIG_PATH"
+cat "$CADDY_APP_CONFIG"
+rm -rf "$tmp"
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "dashboard.lan:8443" in result.stdout
+    assert "reverse_proxy 127.0.0.1:3007" in result.stdout
+    assert "systemctl start caddy" in result.stdout
+    assert "systemctl reload caddy" not in result.stdout
 
 
 def test_ufw_active_replaces_only_labelled_rules_with_https_rule() -> None:
@@ -306,6 +378,31 @@ if install_caddy_if_fresh; then exit 10; fi
     assert "apt install -y caddy" not in result.stdout
 
 
+def test_fresh_caddy_install_replaces_stock_welcome_site() -> None:
+    result = _run_install(
+        r'''
+tmp=$(mktemp -d)
+CADDY_STATE=fresh
+apt-get() { :; }
+curl() { : > "${@: -1}"; }
+gpg() { :; }
+chmod() { :; }
+printf ':80 {\n\troot * /usr/share/caddy\n\tfile_server\n}\n' > "$tmp/Caddyfile"
+install() {
+    if [ "$5" = "$tmp/Caddyfile" ]; then cp -- "$4" "$5"; fi
+}
+inspect_caddy_state() { CADDY_STATE=compatible; CADDY_BINARY=caddy; CADDY_CONFIG_PATH="$tmp/Caddyfile"; }
+install_caddy_if_fresh
+cat "$tmp/Caddyfile"
+rm -rf "$tmp"
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "file_server" not in result.stdout
+    assert ":80" not in result.stdout
+
+
 @pytest.mark.parametrize("kind", ["unowned", "symlink"])
 def test_existing_unowned_or_symlink_proxy_config_is_refused(kind: str) -> None:
     setup = (
@@ -357,7 +454,7 @@ def test_validation_happens_before_caddy_configuration_publication() -> None:
 
     validation = installer.index('validate --config "$validation_caddyfile" --adapter caddyfile')
     publication = installer.index('install -m 0644 -- "$staged_app_config" "$CADDY_APP_CONFIG"')
-    reload = installer.index("systemctl reload caddy", publication)
+    reload = installer.index("reload_or_start_caddy", publication)
     assert validation < publication < reload
 
 
@@ -436,7 +533,11 @@ cp "$CADDY_APP_CONFIG" "$tmp/original-app"
 stat() { printf '0:0:644\n'; }
 caddy() { :; }
 reload_count=0
-systemctl() { reload_count=$((reload_count + 1)); [ "$reload_count" -gt 1 ]; }
+systemctl() {
+    [ "$1" = is-active ] && return 0
+    reload_count=$((reload_count + 1))
+    [ "$reload_count" -gt 1 ]
+}
 if write_caddy_proxy_config; then exit 10; fi
 cmp "$CADDY_CONFIG_PATH" "$tmp/original-caddy"
 cmp "$CADDY_APP_CONFIG" "$tmp/original-app"
@@ -446,6 +547,41 @@ rm -rf "$tmp"
 
     assert result.returncode == 0, result.stderr
     assert "reload failed" in result.stdout
+
+
+def test_proxy_publication_restores_state_when_caddy_does_not_become_active() -> None:
+    result = _run_install(
+        r'''
+tmp=$(mktemp -d)
+CADDY_CONFIG_PATH="$tmp/Caddyfile"
+CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
+CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
+CADDY_BINARY=caddy
+HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
+HTTPS_PORT=443
+PORT=3000
+printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
+cp "$CADDY_CONFIG_PATH" "$tmp/original-caddy"
+caddy() { :; }
+is_active_count=0
+systemctl() {
+    if [ "$1" = is-active ]; then
+        is_active_count=$((is_active_count + 1))
+        [ "$is_active_count" -eq 1 ]
+        return
+    fi
+    return 0
+}
+if write_caddy_proxy_config; then exit 10; fi
+cmp "$CADDY_CONFIG_PATH" "$tmp/original-caddy"
+[ ! -e "$CADDY_APP_CONFIG" ]
+rm -rf "$tmp"
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "did not come up" in result.stdout
 
 
 @pytest.mark.parametrize("failed_copy", [1, 2])
