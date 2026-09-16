@@ -67,7 +67,7 @@ def _device(command_names: list[str]) -> dict:
         "username":     "pi",
         "metrics_port": 9100,
         "commands": [
-            {"name": name, "command": f"echo {name}", "sudo": False, "confirm": "", "pinned": False}
+            {"name": name, "command": f"echo {name}", "sudo": False, "confirm": ""}
             for name in command_names
         ],
     }
@@ -119,7 +119,7 @@ def test_update_with_new_commands_replaces_the_library(tmp_path: Path, monkeypat
         json={
             "id": "dev_existing", "name": "Existing Device",
             "host": "10.0.0.5", "username": "pi", "metrics_port": 9100,
-            "commands": [{"name": "reboot", "command": "sudo reboot", "sudo": True, "confirm": "", "pinned": False}],
+            "commands": [{"name": "reboot", "command": "sudo reboot", "sudo": True, "confirm": ""}],
         },
         headers=_csrf_headers(client),
     )
