@@ -31,6 +31,8 @@
       <li>Only after the checksums match, import the certificate into your current Windows account's trusted root store.<code>Import-Certificate -FilePath "$env:USERPROFILE\Downloads\caddy-root-ca.crt" -CertStoreLocation Cert:\CurrentUser\Root</code></li>
       <li>Close and reopen the browser, then return to the dashboard.</li>
     </ol>
+    <h2>How you'll know it worked</h2>
+    <p>Nothing on this page or in the dashboard can confirm the import for you, and your browser will not announce that the certificate is "trusted." The real signal is the browser's own address bar: when you return to the dashboard, a padlock shows and the security warning is gone. If the warning is still there, the import did not take. Recheck the steps above.</p>
     <div class="actions"><a class="btn btn-primary" href="/certificate-setup/caddy-root-ca.crt">Download public root certificate</a></div>
     <a class="footer-link" href="/">Return to dashboard</a>
   </main>
