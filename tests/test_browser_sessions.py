@@ -1,4 +1,4 @@
-"""Task 4 Phase 2 browser-session and login contracts."""
+"""Browser-session and login contracts."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Executable contracts for the Phase 2 Caddy proxy and firewall integration."""
+"""Executable contracts for the Caddy proxy and firewall integration."""
 
 from __future__ import annotations
 

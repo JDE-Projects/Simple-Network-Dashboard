@@ -1,4 +1,4 @@
-"""Password-management contracts for Task 4 Phase 1."""
+"""Password-management contracts."""
 
 from __future__ import annotations
 
