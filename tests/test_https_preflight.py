@@ -62,6 +62,7 @@ def test_defaults_choose_first_lan_address_and_https_port() -> None:
         """
 MOCK_LAN_IPS='127.0.0.1 172.20.1.9 10.0.0.4'
 parse_install_arguments
+preflight_https
 printf 'host=%s bind=%s port=%s backend=%s\\n' "$HTTPS_HOST" "$HTTPS_BIND" "$HTTPS_PORT" "${FORCED_PORT:-default}"
 """
     )
@@ -187,21 +188,18 @@ preflight_https
     assert result.returncode == 0, result.stderr
 
 
-def test_non_caddy_conflict_prints_verified_alternative_command() -> None:
+def test_non_caddy_conflict_falls_back_to_next_free_https_port() -> None:
     result = _run_installer(
         """
 MOCK_SS='LISTEN 0 128 *:443 *:* users:(("nginx",pid=9,fd=4))'
 parse_install_arguments --https-host dashboard.lan --port 3007
-if preflight_https; then exit 10; fi
+preflight_https
+printf 'rc=%s port=%s\\n' "$?" "$HTTPS_PORT"
 """
     )
 
     assert result.returncode == 0, result.stderr
-    assert "*:443" in result.stdout
-    assert (
-        "sudo bash install.sh --https-host dashboard.lan --https-port 8443 --port 3007"
-        in result.stdout
-    )
+    assert "rc=0 port=8443" in result.stdout
 
 
 def test_conflict_reports_when_no_alternative_port_is_free() -> None:
@@ -217,7 +215,36 @@ if preflight_https; then exit 10; fi
     )
 
     assert result.returncode == 0, result.stderr
-    assert "No free alternative HTTPS port was found in range 8443-8453." in result.stdout
+    assert "no free HTTPS port found" in result.stdout
+
+
+def test_explicit_https_port_is_honored_even_when_occupied() -> None:
+    result = _run_installer(
+        """
+MOCK_SS='LISTEN 0 128 *:443 *:* users:(("nginx",pid=9,fd=4))'
+parse_install_arguments --https-host 10.0.0.4 --https-port 443
+preflight_https
+printf 'rc=%s port=%s\\n' "$?" "$HTTPS_PORT"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rc=0 port=443" in result.stdout
+
+
+def test_fallback_walks_the_range_past_an_occupied_candidate() -> None:
+    result = _run_installer(
+        """
+MOCK_SS='LISTEN 0 128 *:443 *:* users:(("nginx",pid=9,fd=4))'
+MOCK_SS="$MOCK_SS"$'\\n''LISTEN 0 128 *:8443 *:* users:(("nginx",pid=9,fd=4))'
+parse_install_arguments --https-host 10.0.0.4
+preflight_https
+printf 'rc=%s port=%s\\n' "$?" "$HTTPS_PORT"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "rc=0 port=8444" in result.stdout
 
 
 def test_missing_ss_is_rejected() -> None:
