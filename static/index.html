@@ -1571,9 +1571,9 @@ function runLibCmd(deviceId, index) {
   else go();
 }
 
-async function persistDevice(d) {
+async function persistCommands(d) {
   try {
-    const r = await POST('/api/devices', d);
+    const r = await PUT(`/api/devices/${d.id}/commands`, {commands: d.commands});
     if (r.ok) {
       DEVICES = r.devices;
     } else {
@@ -1595,13 +1595,13 @@ function togglePin(deviceId, index) {
   const c = d.commands[index];
   if (!c.pinned && pinnedCount(d) >= 10) { addLine(deviceId, 'Maximum 10 pinned commands.', 'warn'); ensureTab(deviceId); return; }
   c.pinned = !c.pinned;
-  persistDevice(d);
+  persistCommands(d);
 }
 
 function deleteCmd(deviceId, index) {
   const d = dev(deviceId); if (!d) return;
   d.commands.splice(index, 1);
-  persistDevice(d);
+  persistCommands(d);
 }
 
 /* ============================================================
@@ -1635,7 +1635,7 @@ $('cmdSave').onclick   = () => {
   if (cmdCtx.index !== null) d.commands[cmdCtx.index] = obj;
   else d.commands.push(obj);
   $('cmdModal').classList.remove('show');
-  persistDevice(d);
+  persistCommands(d);
 };
 $('addCmdBtn').onclick = () => { if (currentDeviceId) openCmdEditor(currentDeviceId, null); };
 
@@ -1666,7 +1666,7 @@ $('saveDo').onclick   = () => {
   if (d) {
     if (!d.commands) d.commands = [];
     d.commands.push({name, command: saveCtx.command, sudo: !!saveCtx.sudo, confirm: '', pinned: false});
-    persistDevice(d);
+    persistCommands(d);
   }
   closeSave();
 };
@@ -1694,8 +1694,7 @@ $('devSave').onclick   = async () => {
   const user = $('fUser').value.trim();
   const port = parseInt($('fPort').value) || 9100;
   if (!name || !host || !user) { $('devErr').textContent = 'Name, host and username are required.'; return; }
-  const existing = $('fId').value ? dev($('fId').value) : null;
-  const body = {id: $('fId').value || null, name, host, username: user, metrics_port: port, commands: existing ? (existing.commands||[]) : []};
+  const body = {id: $('fId').value || null, name, host, username: user, metrics_port: port};
   const r = await POST('/api/devices', body);
   if (!r.ok) { $('devErr').textContent = r.error || 'Save failed.'; return; }
   DEVICES = r.devices;
@@ -1771,7 +1770,7 @@ async function copyTo(targetId) {
   const copy = {name: cmd.name, command: cmd.command, sudo: !!cmd.sudo, confirm: cmd.confirm||'', pinned: false};
   target.commands = (target.commands||[]).concat([copy]);
   closeCopy();
-  await persistDevice(target);
+  await persistCommands(target);
 }
 function closeCopy() { $('copyModal').classList.remove('show'); copyState = null; }
 $('copyClose').onclick = closeCopy;
