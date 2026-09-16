@@ -469,7 +469,6 @@ write_caddy_proxy_config() {
     if ! cat > "$staged_app_config" <<EOF
 ${CADDY_APP_MARKER}
 ${HTTPS_HOST}:${HTTPS_PORT} {
-    bind ${HTTPS_BIND}
     tls internal
     reverse_proxy 127.0.0.1:${PORT} {
         header_up X-Forwarded-For {remote_host}

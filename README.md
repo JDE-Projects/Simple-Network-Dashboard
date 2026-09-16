@@ -45,6 +45,12 @@ Open the HTTPS address printed by the installer and sign in with that
 password. The installer configures Caddy and, when UFW is active, its HTTPS
 rule automatically. Do not open the internal backend port manually.
 
+The dashboard is reached at the server's own network address, so give the
+server a stable address: set a DHCP reservation for it in your router, or
+assign it a static IP. If the address does change, re-run the installer to
+point the dashboard at the new address; the local certificate is preserved,
+so there is nothing to reinstall in your browser.
+
 If the HTTPS port you chose is already used by something other than this
 dashboard's own Caddy setup, the installer stops without changing anything and
 suggests a free port to re-run with; it does not pick one for you

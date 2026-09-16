@@ -105,7 +105,7 @@ rm -rf "$tmp"
     assert ':80 { respond "shared" }' in result.stdout
     assert "import " in result.stdout
     assert "dashboard.lan:8443" in result.stdout
-    assert "bind 10.0.0.4" in result.stdout
+    assert "bind " not in result.stdout
     assert "reverse_proxy 127.0.0.1:3007" in result.stdout
     assert result.stdout.index("validated") < result.stdout.index("reloaded")
 
