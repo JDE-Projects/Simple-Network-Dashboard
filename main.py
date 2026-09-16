@@ -805,7 +805,7 @@ class DeviceIn(BaseModel):
     host:         str
     username:     str
     metrics_port: int  = 9100
-    commands:     list = []
+    commands:     Optional[list] = None
 
 
 @app.get("/api/devices")
@@ -840,6 +840,19 @@ async def retry_recovery():
         return {"ok": True, "recovered": True}
 
 
+def _resolve_saved_commands(incoming: Optional[list], existing: Optional[dict]) -> list:
+    """Decide the command list to store for a saved device.
+
+    - incoming is None (field omitted): preserve the existing device's
+      commands on an update, or start empty for a brand-new device.
+    - incoming is [] : the caller explicitly cleared the library.
+    - incoming has items: the caller replaced the library with those items.
+    """
+    if incoming is None:
+        return existing.get("commands", []) if existing else []
+    return incoming
+
+
 @app.post("/api/devices")
 async def upsert_device(body: DeviceIn):
     if _recovery_mode:
@@ -849,15 +862,15 @@ async def upsert_device(body: DeviceIn):
     if d.get("id"):
         for i, existing in enumerate(devices):
             if existing["id"] == d["id"]:
-                # Preserve the existing command list unless the caller sent one
-                if not d["commands"]:
-                    d["commands"] = existing.get("commands", [])
+                d["commands"] = _resolve_saved_commands(d["commands"], existing)
                 devices[i] = _norm(d)
                 break
         else:
+            d["commands"] = _resolve_saved_commands(d["commands"], None)
             devices.append(_norm(d))
     else:
-        d["id"] = "dev_" + uuid.uuid4().hex[:12]
+        d["id"]       = "dev_" + uuid.uuid4().hex[:12]
+        d["commands"] = _resolve_saved_commands(d["commands"], None)
         devices.append(_norm(d))
     if not _save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
