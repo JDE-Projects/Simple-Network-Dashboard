@@ -11,7 +11,11 @@ INSTALL_STATE="${INSTALL_STATE_DIR}/install-state"
 PORT_MIN=3000
 PORT_MAX=3010
 FORCED_PORT=""
-HTTPS_PORT=443
+HTTPS_PORT=""
+HTTPS_PORT_WAS_SET=false
+HTTPS_PORT_DEFAULT=443
+HTTPS_PORT_MIN=8443
+HTTPS_PORT_MAX=8453
 HTTPS_HOST=""
 HTTPS_BIND=""
 HTTPS_HOST_WAS_SET=false
@@ -119,7 +123,8 @@ is_valid_https_host() {
 
 parse_install_arguments() {
     FORCED_PORT=""
-    HTTPS_PORT=443
+    HTTPS_PORT=""
+    HTTPS_PORT_WAS_SET=false
     HTTPS_HOST=""
     HTTPS_BIND=""
     HTTPS_HOST_WAS_SET=false
@@ -134,13 +139,13 @@ parse_install_arguments() {
                 fi
                 case "$1" in
                     --port) FORCED_PORT="$2" ;;
-                    --https-port) HTTPS_PORT="$2" ;;
+                    --https-port) HTTPS_PORT="$2"; HTTPS_PORT_WAS_SET=true ;;
                     --https-host) HTTPS_HOST="$2"; HTTPS_HOST_WAS_SET=true ;;
                 esac
                 shift 2
                 ;;
             --port=*) FORCED_PORT="${1#--port=}"; shift ;;
-            --https-port=*) HTTPS_PORT="${1#--https-port=}"; shift ;;
+            --https-port=*) HTTPS_PORT="${1#--https-port=}"; HTTPS_PORT_WAS_SET=true; shift ;;
             --https-host=*) HTTPS_HOST="${1#--https-host=}"; HTTPS_HOST_WAS_SET=true; shift ;;
             *)
                 echo "Error: unknown argument '$1'."
@@ -154,7 +159,7 @@ parse_install_arguments() {
         echo "Error: --port must be a numeric port between 1 and 65535, got '$FORCED_PORT'."
         return 1
     fi
-    if ! is_valid_port "$HTTPS_PORT"; then
+    if [ "$HTTPS_PORT_WAS_SET" = true ] && ! is_valid_port "$HTTPS_PORT"; then
         echo "Error: --https-port must be a numeric port between 1 and 65535, got '$HTTPS_PORT'."
         return 1
     fi
@@ -191,10 +196,6 @@ listeners_for_port() {
             if (endpoint == port) print
         }
     ' <<< "$SS_LISTENERS"
-}
-
-port_is_listening() {
-    [ -n "$(listeners_for_port "$1")" ]
 }
 
 inspect_caddy_state() {
@@ -252,26 +253,51 @@ inspect_caddy_state() {
     CADDY_STATE="compatible"
 }
 
-suggest_free_https_port() {
-    local candidate=8443
+https_port_available() {
+    local port="$1"
+    local listeners
 
-    while [ "$candidate" -le 8453 ]; do
-        if ! port_is_listening "$candidate"; then
-            printf '%s\n' "$candidate"
+    listeners=$(listeners_for_port "$port")
+    if [ -z "$listeners" ]; then
+        return 0
+    fi
+    # A compatible Caddy already bound to the port is our own listener.
+    if [ "$CADDY_STATE" = "compatible" ] && ! grep -qv 'users:(("caddy",' <<< "$listeners"; then
+        return 0
+    fi
+    return 1
+}
+
+select_https_port() {
+    local candidate
+
+    # An explicit --https-port is honored as chosen, matching --port for the
+    # backend: the administrator's selection is used without a free-port search.
+    if [ "$HTTPS_PORT_WAS_SET" = true ]; then
+        return 0
+    fi
+
+    if https_port_available "$HTTPS_PORT_DEFAULT"; then
+        HTTPS_PORT="$HTTPS_PORT_DEFAULT"
+        return 0
+    fi
+
+    candidate=$HTTPS_PORT_MIN
+    while [ "$candidate" -le "$HTTPS_PORT_MAX" ]; do
+        if https_port_available "$candidate"; then
+            HTTPS_PORT="$candidate"
             return 0
         fi
         candidate=$((candidate + 1))
     done
+
+    echo "Error: no free HTTPS port found (tried ${HTTPS_PORT_DEFAULT} and ${HTTPS_PORT_MIN}-${HTTPS_PORT_MAX})."
     return 1
 }
 
 preflight_https() {
-    local listeners
-    local alternative_port
-    local backend_argument=""
-
     if ! command -v ss &>/dev/null; then
-        echo "Error: ss is required to inspect HTTPS port ${HTTPS_PORT}. Install iproute2 and re-run."
+        echo "Error: ss is required to inspect HTTPS listeners. Install iproute2 and re-run."
         return 1
     fi
     if ! SS_LISTENERS=$(ss -H -ltnp 2>/dev/null); then
@@ -281,26 +307,9 @@ preflight_https() {
     if ! inspect_caddy_state; then
         return 1
     fi
-
-    listeners=$(listeners_for_port "$HTTPS_PORT")
-    if [ -z "$listeners" ]; then
-        return 0
+    if ! select_https_port; then
+        return 1
     fi
-    if [ "$CADDY_STATE" = "compatible" ] && ! grep -qv 'users:(("caddy",' <<< "$listeners"; then
-        return 0
-    fi
-
-    echo "Error: HTTPS port ${HTTPS_PORT} is already in use:"
-    printf '%s\n' "$listeners"
-    if alternative_port=$(suggest_free_https_port); then
-        if [ -n "$FORCED_PORT" ]; then
-            backend_argument=" --port ${FORCED_PORT}"
-        fi
-        echo "Re-run with: sudo bash install.sh --https-host ${HTTPS_HOST} --https-port ${alternative_port}${backend_argument}"
-    else
-        echo "No free alternative HTTPS port was found in range 8443-8453."
-    fi
-    return 1
 }
 
 install_caddy_if_fresh() {
@@ -1016,10 +1025,6 @@ fi
 if ! parse_install_arguments "$@"; then
     exit 1
 fi
-PUBLIC_ORIGIN="https://${HTTPS_HOST,,}"
-if [ "$HTTPS_PORT" -ne 443 ]; then
-    PUBLIC_ORIGIN="${PUBLIC_ORIGIN}:${HTTPS_PORT}"
-fi
 if ! verify_reset_command_destination; then
     exit 1
 fi
@@ -1028,6 +1033,10 @@ fi
 # installation mutation so a port or Caddy conflict is safe to resolve.
 if ! preflight_https; then
     exit 1
+fi
+PUBLIC_ORIGIN="https://${HTTPS_HOST,,}"
+if [ "$HTTPS_PORT" -ne 443 ]; then
+    PUBLIC_ORIGIN="${PUBLIC_ORIGIN}:${HTTPS_PORT}"
 fi
 if ! install_caddy_if_fresh; then
     exit 1
