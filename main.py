@@ -42,6 +42,13 @@ WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SS
 MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MB cap on incoming HTTP request bodies
 MAX_DEVICES = 250  # cap on total saved devices
 MAX_COMMANDS_PER_DEVICE = 250  # cap on saved commands per device, per request
+MAX_NAME_LEN = 80  # device name / saved command name character cap
+MAX_HOST_LEN = 253  # hostname character cap (RFC 1035 full name length)
+MAX_USERNAME_LEN = 64  # SSH username character cap
+MAX_COMMAND_LEN = 4096  # saved command text / run command character cap
+MAX_CONFIRM_LEN = 500  # saved command confirmation prompt character cap
+MIN_METRICS_PORT = 1
+MAX_METRICS_PORT = 65535
 
 APP_NAME    = "Simple Network Dashboard"
 APP_VERSION = "1.5.1"
@@ -851,15 +858,24 @@ async def ws_endpoint(ws: WebSocket):
 # Device CRUD
 # ---------------------------------------------------------------------------
 
+class CommandItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name:    Annotated[str, Field(max_length=MAX_NAME_LEN)] = ""
+    command: Annotated[str, Field(max_length=MAX_COMMAND_LEN)]
+    sudo:    bool = False
+    confirm: Annotated[str, Field(max_length=MAX_CONFIRM_LEN)] = ""
+
+
 class DeviceIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id:           Optional[str] = None
-    name:         str
-    host:         str
-    username:     str
-    metrics_port: int  = 9100
-    commands:     Optional[Annotated[list, Field(max_length=MAX_COMMANDS_PER_DEVICE)]] = None
+    name:         Annotated[str, Field(max_length=MAX_NAME_LEN)]
+    host:         Annotated[str, Field(max_length=MAX_HOST_LEN)]
+    username:     Annotated[str, Field(max_length=MAX_USERNAME_LEN)]
+    metrics_port: Annotated[int, Field(ge=MIN_METRICS_PORT, le=MAX_METRICS_PORT)] = 9100
+    commands:     Optional[Annotated[list[CommandItem], Field(max_length=MAX_COMMANDS_PER_DEVICE)]] = None
 
 
 @app.get("/api/devices")
@@ -954,7 +970,7 @@ async def delete_device(device_id: str):
 class CommandsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    commands: Annotated[list, Field(max_length=MAX_COMMANDS_PER_DEVICE)]
+    commands: Annotated[list[CommandItem], Field(max_length=MAX_COMMANDS_PER_DEVICE)]
 
 
 @app.put("/api/devices/{device_id}/commands")
@@ -964,7 +980,7 @@ async def update_commands(device_id: str, body: CommandsIn):
     devices = copy.deepcopy(_devices_cache)
     for i, d in enumerate(devices):
         if d["id"] == device_id:
-            d["commands"] = body.commands
+            d["commands"] = body.model_dump()["commands"]
             devices[i] = _norm(d)
             break
     if not _save(devices):
@@ -1022,9 +1038,9 @@ class RunIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     device_id: str
-    command:   str
+    command:   Annotated[str, Field(max_length=MAX_COMMAND_LEN)]
     use_sudo:  bool = False
-    label:     Optional[str] = None
+    label:     Optional[Annotated[str, Field(max_length=MAX_NAME_LEN)]] = None
     cmd_id:    Optional[str] = None
 
 
