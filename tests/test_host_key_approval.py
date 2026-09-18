@@ -204,3 +204,48 @@ def test_release_owner_clears_a_pending_host_key_prompt():
 
     assert "d1" not in mgr._pending
     assert "d1" not in mgr.sessions
+
+
+def test_accept_aimed_at_a_superseded_generation_is_rejected_and_leaves_the_newer_session_untouched():
+    """A correct owner and correct code, but for a prompt whose session was
+    already replaced by a newer connect (a fresh host-key prompt on the same
+    device), must not be accepted: _valid_host_key_pending's generation check
+    is what stops it, since owner and code alone are not enough."""
+    mgr = _mgr()
+    _pending_session(mgr, owner="owner-1", code="the-code", generation=1)
+
+    newer = ssh_manager._Session(_device(), "pw2", "owner-1", "d1")
+    newer.state      = "host_key_pending"
+    newer.generation = 2
+    mgr.sessions["d1"] = newer
+
+    result = mgr.trust_host_key("d1", "the-code", "owner-1")
+
+    assert result == {"ok": False, "expired": True, "error": ssh_manager._EXPIRED_ERROR}
+    # The newer session in the slot is untouched.
+    assert mgr.sessions["d1"] is newer
+    assert newer.state == "host_key_pending"
+    assert newer.generation == 2
+    # The stale gen=1 pending record was not consumed by the mismatched accept.
+    assert "d1" in mgr._pending
+    assert mgr._pending["d1"].generation == 1
+
+
+def test_reject_aimed_at_a_superseded_generation_is_refused_and_leaves_the_newer_session_untouched():
+    """Same generation-binding path as above, exercised through reject_host_key."""
+    mgr = _mgr()
+    _pending_session(mgr, owner="owner-1", code="the-code", generation=1)
+
+    newer = ssh_manager._Session(_device(), "pw2", "owner-1", "d1")
+    newer.state      = "connecting"
+    newer.generation = 2
+    mgr.sessions["d1"] = newer
+
+    result = mgr.reject_host_key("d1", "the-code", "owner-1")
+
+    assert result == {"ok": False, "expired": True, "error": ssh_manager._EXPIRED_ERROR}
+    assert mgr.sessions["d1"] is newer
+    assert newer.state == "connecting"
+    assert newer.generation == 2
+    assert "d1" in mgr._pending
+    assert mgr._pending["d1"].generation == 1

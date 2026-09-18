@@ -172,3 +172,39 @@ def test_cancellation_mid_stream_stops_output_and_filters_password_lines():
     assert not any(t.startswith("[sudo] password for") for t in texts)
     assert "never gets here" not in texts
     assert emitted[-1] == ("warn", "■ Custom command cancelled.")
+
+
+def test_high_volume_interleaved_output_is_emitted_with_no_loss_or_reordering():
+    """There is no bounded-queue or flow-control mechanism in this code, so
+    this only verifies that a large flood of interleaved stdout/stderr lines
+    is emitted with no loss and no reordering within each stream, the
+    current-session gate still holds, and the poll loop terminates. It is not
+    a test of true flow control (there is none to test)."""
+    mgr = _mgr()
+    device = _device()
+    sess = _connected_session(mgr, device)
+
+    n_lines = 1000
+    events = []
+    for i in range(n_lines):
+        events.append(("out", f"out {i}\n".encode()))
+        events.append(("err", f"err {i}\n".encode()))
+
+    channel = _FakeChannel(events, exit_code=0)
+
+    emitted = _run(mgr, sess, channel)
+
+    out_lines = [t for lvl, t in emitted if lvl == "out"]
+    err_lines = [t for lvl, t in emitted if lvl == "err"]
+
+    assert len(out_lines) == n_lines
+    assert len(err_lines) == n_lines
+
+    out_ns = [int(t.split()[1]) for t in out_lines]
+    err_ns = [int(t.split()[1]) for t in err_lines]
+    assert out_ns == sorted(out_ns)
+    assert err_ns == sorted(err_ns)
+    assert out_ns == list(range(n_lines))
+    assert err_ns == list(range(n_lines))
+
+    assert emitted[-1] == ("ok", "✓ Custom command finished.")
