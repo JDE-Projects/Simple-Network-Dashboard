@@ -3,8 +3,10 @@ Fetches and parses Node Exporter metrics from a device.
 No SSH required — polls http://host:port/metrics directly.
 """
 
+import asyncio
 import ipaddress
 import re
+import socket
 import time
 import httpx
 from typing import Optional
@@ -259,12 +261,54 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
 # Public entry point called by the background polling loop in main.py
 # ---------------------------------------------------------------------------
 
+async def _resolve_metrics_hostname(host: str, port: int) -> Optional[str]:
+    """Resolve a hostname (not an IP literal) via the event loop's async
+    resolver and return the first candidate address that passes
+    is_allowed_metrics_target, or None if none do.
+
+    Raises socket.gaierror if resolution fails or returns no results, so the
+    caller can distinguish a DNS failure from a resolved-but-blocked target.
+    """
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    if not infos:
+        raise socket.gaierror("no addresses returned")
+
+    for info in infos:
+        candidate = info[4][0]
+        if is_allowed_metrics_target(candidate):
+            return candidate
+    return None
+
+
 async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None) -> dict:
     """Fetch Node Exporter metrics for one device. Returns an extracted dict.
     On any failure returns {'error': '<reason>'}."""
-    url = f"http://{host}:{port}/metrics"
+    if not is_valid_host_string(host):
+        return {"error": "invalid host"}
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        ipaddress.ip_address(host)
+        is_literal = True
+    except ValueError:
+        is_literal = False
+
+    if is_literal:
+        ip = host if is_allowed_metrics_target(host) else None
+        if ip is None:
+            return {"error": "blocked"}
+    else:
+        try:
+            ip = await _resolve_metrics_hostname(host, port)
+        except socket.gaierror:
+            return {"error": "dns"}
+        if ip is None:
+            return {"error": "blocked"}
+
+    host_part = f"[{ip}]" if ipaddress.ip_address(ip).version == 6 else ip
+    url = f"http://{host_part}:{port}/metrics"
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             return extract_metrics(_parse(resp.text), prev)
