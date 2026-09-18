@@ -150,7 +150,7 @@ def test_connect_failure_releases_slot_but_unknown_host_key_keeps_it(monkeypatch
     assert result2["host_key_unknown"] is True
     assert "d1" in mgr.sessions
     assert mgr.sessions["d1"].state == "host_key_pending"
-    assert mgr._pending["d1"][0] == device["host"]
+    assert mgr._pending["d1"].host == device["host"]
 
 
 def test_run_command_rejects_a_second_call_while_the_first_is_busy(monkeypatch):

@@ -738,6 +738,7 @@ let activeTabId     = null;
 const openTabs = {};
 let askSaveCustom = true;
 let confirmCb = null;
+let confirmCancelCb = null;
 let cmdCtx    = null;   // {deviceId, index|null}
 const customCmdById = new Map();   // tag -> the real typed command, awaiting its echoed console line (client-side only, never sent to server, never persisted)
 let _cmdSeq = 0;
@@ -1386,20 +1387,34 @@ function wireCard(card, d) {
       askConfirm('Unknown host key',
         `First connection to ${r.host}.\n\nType: ${r.key_type}\nFingerprint: ${r.fingerprint}\n\nAccept and remember this host?`,
         async () => {
-          const t = await POST('/api/ssh/trust_key', {device_id: id});
-          if (!t.ok) { err.textContent = t.error; err.classList.add('show'); return; }
+          const t = await sshPost('/api/ssh/trust_key', {device_id: id, code: r.code});
+          if (!t.ok) {
+            err.textContent = t.expired
+              ? 'This host-key prompt expired or was already used. Reconnect to try again.'
+              : t.error;
+            err.classList.add('show');
+            return;
+          }
           tryConnect();
-        }, 'Accept & connect', 'Cancel');
+        }, 'Accept & connect', 'Cancel',
+        () => { sshPost('/api/ssh/reject_key', {device_id: id, code: r.code}); });
       return;
     }
     if (r.host_key_changed) {
       askConfirm('⚠ Host key changed',
         `The key for ${r.host} has CHANGED.\n\nOld: ${r.old_fingerprint}\nNew (${r.key_type}): ${r.new_fingerprint}\n\nOnly replace if you expected this (e.g. OS reinstall).`,
         async () => {
-          const t = await POST('/api/ssh/trust_key', {device_id: id});
-          if (!t.ok) { err.textContent = t.error; err.classList.add('show'); return; }
+          const t = await sshPost('/api/ssh/trust_key', {device_id: id, code: r.code});
+          if (!t.ok) {
+            err.textContent = t.expired
+              ? 'This host-key prompt expired or was already used. Reconnect to try again.'
+              : t.error;
+            err.classList.add('show');
+            return;
+          }
           tryConnect();
-        }, 'Replace key', 'Cancel');
+        }, 'Replace key', 'Cancel',
+        () => { sshPost('/api/ssh/reject_key', {device_id: id, code: r.code}); });
       return;
     }
     err.textContent = r.error; err.classList.add('show');
@@ -1664,13 +1679,14 @@ $('devSave').onclick   = async () => {
 /* ============================================================
    Confirm / info modal
    ============================================================ */
-function askConfirm(title, msg, cb, yesLabel, noLabel) {
+function askConfirm(title, msg, cb, yesLabel, noLabel, cancelCb) {
   $('confirmTitle').textContent  = title;
   $('confirmMsg').textContent    = msg;
   $('confirmYes').textContent    = yesLabel || 'Confirm';
   $('confirmNo').textContent     = noLabel  || 'Cancel';
   $('confirmNo').style.display   = '';
   confirmCb = cb;
+  confirmCancelCb = cancelCb || null;
   $('confirm').classList.add('show');
 }
 function showInfo(title, msg) {
@@ -1679,10 +1695,21 @@ function showInfo(title, msg) {
   $('confirmYes').textContent    = 'OK';
   $('confirmNo').style.display   = 'none';
   confirmCb = null;
+  confirmCancelCb = null;
   $('confirm').classList.add('show');
 }
-$('confirmNo').onclick  = () => { $('confirm').classList.remove('show'); confirmCb = null; };
-$('confirmYes').onclick = () => { $('confirm').classList.remove('show'); const cb = confirmCb; confirmCb = null; if (cb) cb(); };
+$('confirmNo').onclick  = () => {
+  $('confirm').classList.remove('show');
+  confirmCb = null;
+  const cancelCb = confirmCancelCb; confirmCancelCb = null;
+  if (cancelCb) cancelCb();
+};
+$('confirmYes').onclick = () => {
+  $('confirm').classList.remove('show');
+  confirmCancelCb = null;
+  const cb = confirmCb; confirmCb = null;
+  if (cb) cb();
+};
 
 /* ============================================================
    Copy-to-device picker
