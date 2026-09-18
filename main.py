@@ -23,14 +23,14 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from ipaddress import ip_address
-from typing import Optional
+from typing import Annotated, Optional
 
 from argon2.exceptions import Argon2Error
 from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
@@ -40,6 +40,8 @@ from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageErr
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
 MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MB cap on incoming HTTP request bodies
+MAX_DEVICES = 250  # cap on total saved devices
+MAX_COMMANDS_PER_DEVICE = 250  # cap on saved commands per device, per request
 
 APP_NAME    = "Simple Network Dashboard"
 APP_VERSION = "1.5.1"
@@ -286,6 +288,7 @@ _SAVE_ERROR = "Server could not write devices.json (check file ownership/permiss
 _RECOVERY_READ_ONLY_ERROR = (
     "Configuration changes are unavailable while the dashboard is in recovery mode."
 )
+_DEVICE_LIMIT_ERROR = "The device limit of 250 has been reached."
 
 
 def _open_private_file(path: str, *, buffering: int = -1):
@@ -856,7 +859,7 @@ class DeviceIn(BaseModel):
     host:         str
     username:     str
     metrics_port: int  = 9100
-    commands:     Optional[list] = None
+    commands:     Optional[Annotated[list, Field(max_length=MAX_COMMANDS_PER_DEVICE)]] = None
 
 
 @app.get("/api/devices")
@@ -917,9 +920,13 @@ async def upsert_device(body: DeviceIn):
                 devices[i] = _norm(d)
                 break
         else:
+            if len(devices) >= MAX_DEVICES:
+                return {"ok": False, "error": _DEVICE_LIMIT_ERROR}
             d["commands"] = _resolve_saved_commands(d["commands"], None)
             devices.append(_norm(d))
     else:
+        if len(devices) >= MAX_DEVICES:
+            return {"ok": False, "error": _DEVICE_LIMIT_ERROR}
         d["id"]       = "dev_" + uuid.uuid4().hex[:12]
         d["commands"] = _resolve_saved_commands(d["commands"], None)
         devices.append(_norm(d))
@@ -947,7 +954,7 @@ async def delete_device(device_id: str):
 class CommandsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    commands: list
+    commands: Annotated[list, Field(max_length=MAX_COMMANDS_PER_DEVICE)]
 
 
 @app.put("/api/devices/{device_id}/commands")
