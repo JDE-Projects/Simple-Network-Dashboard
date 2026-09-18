@@ -798,6 +798,10 @@ function connectWS() {
         if (msg.storage_warning && !msg.recovery_mode) {
           showErrorBanner('Server cannot write devices.json: device and command changes will NOT survive a restart. Fix file permissions on the server.');
         }
+        if (msg.debug_failed) {
+          $('debugChk').checked = false;
+          showErrorBanner('Debug logging stopped because the log file could not be written. Check the server log directory.');
+        }
         // Restore SSH state from server (e.g. after page refresh)
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
         // Track which devices are locked (in use by any browser)
@@ -838,6 +842,10 @@ function connectWS() {
         break;
       case 'recovery_restored':
         handleRecoveryRestored();
+        break;
+      case 'debug_failed':
+        $('debugChk').checked = false;
+        showErrorBanner('Debug logging stopped because the log file could not be written. Check the server log directory.');
         break;
     }
   };
