@@ -761,6 +761,9 @@ function connectWS() {
 
   ws.onopen = () => {
     $('wsChip').className = 'ws-dot ok';
+    // Selection lives per connection on the server, so a reconnected socket
+    // starts with none: resend this tab's choice to resume its polling.
+    if (currentDeviceId) ws.send(JSON.stringify({type: 'select_device', id: currentDeviceId}));
   };
 
   ws.onclose = () => {
