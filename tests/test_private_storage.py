@@ -833,17 +833,15 @@ def test_recovery_ui_shows_only_simple_warning_and_restored_notice() -> None:
     assert "Copy recovery command" not in ui
 
 
-def test_debug_log_is_created_in_private_log_directory(monkeypatch) -> None:
-    calls = []
-    monkeypatch.setattr(main.os, "open", lambda *args: calls.append(args) or 9)
-    monkeypatch.setattr(main.os, "fchmod", lambda *args: calls.append(args))
-    monkeypatch.setattr(main.os, "fdopen", lambda *_args, **_kwargs: _TextFile())
-    monkeypatch.setattr(main, "_debug_file", None)
+def test_debug_log_is_created_in_private_log_directory(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "_debug_handler", None)
 
     response = asyncio.run(main.toggle_debug(main.DebugIn(enabled=True)))
-    assert response["path"].startswith(main.LOG_DIR)
-    assert calls[0][2] == 0o600
-    assert calls[1] == (9, 0o600)
+    assert response["path"].startswith(str(tmp_path))
+    assert os.path.exists(response["path"])
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(response["path"]).st_mode) == 0o600
 
     asyncio.run(main.toggle_debug(main.DebugIn(enabled=False)))
 
