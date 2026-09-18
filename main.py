@@ -297,6 +297,7 @@ _RECOVERY_READ_ONLY_ERROR = (
 )
 _DEVICE_LIMIT_ERROR = "The device limit of 250 has been reached."
 _UNKNOWN_DEVICE_ERROR = "That device does not exist."
+_REQUEST_BODY_TOO_LARGE_ERROR = "Request body is too large."
 
 
 def _open_private_file(path: str, *, buffering: int = -1):
@@ -625,7 +626,7 @@ async def limit_request_body_size(request: Request, call_next):
             declared_length = None
         if declared_length is not None and declared_length > MAX_REQUEST_BODY_BYTES:
             return _add_security_headers(
-                JSONResponse({"ok": False, "error": "Request body is too large."}, status_code=413),
+                JSONResponse({"ok": False, "error": _REQUEST_BODY_TOO_LARGE_ERROR}, status_code=413),
                 request,
             )
 
@@ -634,7 +635,7 @@ async def limit_request_body_size(request: Request, call_next):
         body.extend(chunk)
         if len(body) > MAX_REQUEST_BODY_BYTES:
             return _add_security_headers(
-                JSONResponse({"ok": False, "error": "Request body is too large."}, status_code=413),
+                JSONResponse({"ok": False, "error": _REQUEST_BODY_TOO_LARGE_ERROR}, status_code=413),
                 request,
             )
 
