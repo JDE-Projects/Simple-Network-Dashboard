@@ -695,7 +695,6 @@ def test_recovery_mode_uses_cached_devices_and_rejects_all_configuration_mutatio
     monkeypatch.setattr(main, "_save", lambda _devices: pytest.fail("attempted save in recovery mode"))
     monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda _device_id: pytest.fail("disconnected during rejected mutation"))
     monkeypatch.setattr(main.ws_mgr, "broadcast", lambda _message: pytest.fail("broadcast rejected mutation"))
-    monkeypatch.setattr(main, "_selected_device_id", "saved")
 
     assert asyncio.run(main.get_devices()) == cached
     add_result = asyncio.run(main.upsert_device(main.DeviceIn(name="New", host="new", username="user")))
@@ -705,7 +704,6 @@ def test_recovery_mode_uses_cached_devices_and_rejects_all_configuration_mutatio
     assert add_result == {"ok": False, "error": main._RECOVERY_READ_ONLY_ERROR}
     assert delete_result == {"ok": False, "error": main._RECOVERY_READ_ONLY_ERROR}
     assert command_result == {"ok": False, "error": main._RECOVERY_READ_ONLY_ERROR}
-    assert main._selected_device_id == "saved"
 
 
 def test_retry_recovery_restores_retained_validated_payload_and_broadcasts(monkeypatch) -> None:

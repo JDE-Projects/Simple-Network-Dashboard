@@ -94,6 +94,7 @@ class _WSManager:
     def __init__(self):
         self._connections: list[WebSocket] = []
         self._owners: dict[WebSocket, str] = {}  # ws -> owner (browser id)
+        self._selections: dict[WebSocket, str] = {}  # ws -> selected device id
 
     async def connect(self, ws: WebSocket, owner_id: str = None):
         await ws.accept()
@@ -104,6 +105,26 @@ class _WSManager:
     def drop(self, ws: WebSocket):
         self._connections = [c for c in self._connections if c is not ws]
         self._owners.pop(ws, None)
+        self._selections.pop(ws, None)
+
+    def set_selected_device(self, ws: WebSocket, device_id: Optional[str]):
+        """Record (or clear) the device this socket has selected. An empty
+        or missing id removes the socket's entry rather than storing None."""
+        if device_id:
+            self._selections[ws] = device_id
+        else:
+            self._selections.pop(ws, None)
+
+    def selected_device_ids(self) -> set[str]:
+        """The union of device ids currently selected by any connected socket."""
+        return set(self._selections.values())
+
+    def unselect_device_everywhere(self, device_id: str):
+        """Remove a device id from every socket's selection, e.g. after it
+        has been deleted."""
+        for ws, did in list(self._selections.items()):
+            if did == device_id:
+                self._selections.pop(ws, None)
 
     def owner_of(self, ws: WebSocket) -> str:
         return self._owners.get(ws)
@@ -144,9 +165,6 @@ ws_mgr = _WSManager()
 
 # Latest metrics per device (includes _raw fields for delta calculation)
 _metrics_cache: dict[str, dict] = {}
-
-# Device ID currently selected in the browser (None = no device selected / no clients)
-_selected_device_id: Optional[str] = None
 
 # In-memory device list — seeded from disk at startup, kept in sync by _save()
 _devices_cache: list = []
@@ -442,14 +460,28 @@ def _norm(d: dict) -> dict:
 
 async def _metrics_loop():
     while True:
-        if ws_mgr._connections and _selected_device_id:
-            device = next((d for d in _devices_cache if d.get("id") == _selected_device_id), None)
-            if device:
+        selected_ids = ws_mgr.selected_device_ids() if ws_mgr._connections else set()
+        if selected_ids:
+            devices = [
+                d for d in _devices_cache if d.get("id") in selected_ids
+            ]
+            fetches = [
+                fetch_metrics(
+                    d.get("host"),
+                    d.get("metrics_port", 9100),
+                    _metrics_cache.get(d.get("id")),
+                )
+                for d in devices
+            ]
+            results = await asyncio.gather(*fetches, return_exceptions=True)
+            for device, result in zip(devices, results):
                 did  = device.get("id")
                 host = device.get("host")
                 port = device.get("metrics_port", 9100)
-                prev    = _metrics_cache.get(did)
-                metrics = await fetch_metrics(host, port, prev)
+                if isinstance(result, Exception):
+                    metrics = {"error": str(result)}
+                else:
+                    metrics = result
                 _metrics_cache[did] = metrics
                 if metrics.get("error"):
                     _debug_write(f"METRICS [{did}] {host}:{port} → {metrics['error']}")
@@ -841,8 +873,7 @@ async def ws_endpoint(ws: WebSocket):
             except ValueError:
                 continue
             if msg.get("type") == "select_device":
-                global _selected_device_id
-                _selected_device_id = msg.get("id")
+                ws_mgr.set_selected_device(ws, msg.get("id"))
             elif msg.get("type") == "stay_connected":
                 ssh_mgr.stay_connected(owner)
     except WebSocketDisconnect:
@@ -953,14 +984,12 @@ async def upsert_device(body: DeviceIn):
 
 @app.delete("/api/devices/{device_id}")
 async def delete_device(device_id: str):
-    global _selected_device_id
     if _recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
-    if _selected_device_id == device_id:
-        _selected_device_id = None
     devices = [d for d in _devices_cache if d["id"] != device_id]
     if not _save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
+    ws_mgr.unselect_device_everywhere(device_id)
     ssh_mgr.disconnect(device_id)
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
