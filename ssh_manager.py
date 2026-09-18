@@ -191,6 +191,12 @@ class SSHManager:
             self._gen_counter += 1
             return self._gen_counter
 
+    def _is_current(self, device_id: str, sess: "_Session") -> bool:
+        """Cheap identity check for the fast path: is `sess` still the
+        session in the slot for this device? A plain dict read, never taken
+        under the device lock, so it never blocks on another thread."""
+        return self.sessions.get(device_id) is sess
+
     # ---- owner-activity helpers (single lock, every read-modify-write) ----
 
     def _owner_touch(self, owner: str) -> None:
@@ -212,9 +218,26 @@ class SSHManager:
 
     def _push(self, msg: dict):
         if self._loop and not self._loop.is_closed():
-            asyncio.run_coroutine_threadsafe(self._broadcast(msg), self._loop)
+            asyncio.run_coroutine_threadsafe(self._deliver(msg), self._loop)
 
-    def _log(self, device_id: str, text: str, level: str = "out", owner: str = None, cmd_id: str = None):
+    async def _deliver(self, msg: dict):
+        """Runs on the event loop thread. `_push` only schedules delivery, so
+        a worker-originated message can still be sitting in the loop's queue
+        after a disconnect/reconnect replaces its session. A message stamped
+        with the internal "_gen" key is dropped here, at delivery time, if
+        the device's current session generation no longer matches the one it
+        was stamped with. The internal key is always stripped before the
+        message reaches `_broadcast`; a message with no "_gen" key passes
+        through unchanged."""
+        gen = msg.pop("_gen", None)
+        if gen is not None:
+            current = self.sessions.get(msg.get("device_id"))
+            if current is None or current.generation != gen:
+                return
+        await self._broadcast(msg)
+
+    def _log(self, device_id: str, text: str, level: str = "out", owner: str = None,
+              cmd_id: str = None, gen: int = None):
         msg = {"type": "ssh_log", "device_id": device_id, "text": text, "level": level}
         if cmd_id is not None:
             msg["cmd_id"] = cmd_id
@@ -224,9 +247,11 @@ class SSHManager:
                 owner = sess.owner
         if owner:
             msg["_owner"] = owner
+        if gen is not None:
+            msg["_gen"] = gen
         self._push(msg)
 
-    def _status(self, device_id: str, state: str, owner: str = None):
+    def _status(self, device_id: str, state: str, owner: str = None, gen: int = None):
         msg = {"type": "ssh_status", "device_id": device_id, "state": state}
         if owner is None:
             sess = self.sessions.get(device_id)
@@ -234,6 +259,8 @@ class SSHManager:
                 owner = sess.owner
         if owner:
             msg["_owner"] = owner
+        if gen is not None:
+            msg["_gen"] = gen
         self._push(msg)
 
     def _lock(self, device_id: str, locked: bool):
@@ -479,23 +506,31 @@ class SSHManager:
 
     def _exec(self, sess: "_Session", cmd: str, label: str, feed_sudo: bool, cmd_id: str = None):
         device_id = sess.device_id
+        # Captured once: this worker may emit or change state only while it
+        # remains current. Every emit below is stamped with this generation
+        # too, so a message already queued for delivery is dropped if a
+        # disconnect/reconnect replaces the session before it is delivered.
+        gen = sess.generation
 
         if not sess.client:
-            self._log(device_id, "Not connected.", "err")
+            if self._is_current(device_id, sess):
+                self._log(device_id, "Not connected.", "err", gen=gen)
             self._finish_exec(sess)
             return
 
         needs_sudo = feed_sudo and "sudo" in cmd
         password   = sess.password if needs_sudo else None
 
-        self._status(device_id, "running")
-        self._log(device_id, f"$ {label}", "cmd", cmd_id=cmd_id)
+        if self._is_current(device_id, sess):
+            self._status(device_id, "running", gen=gen)
+            self._log(device_id, f"$ {label}", "cmd", cmd_id=cmd_id, gen=gen)
 
         if sess.cancel_requested:
             # A cancel arrived before the channel even existed; honor it
             # without ever starting the command.
             sess.cancelled = True
-            self._log(device_id, f"■ {label} cancelled.", "warn")
+            if self._is_current(device_id, sess):
+                self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
             self._finish_exec(sess)
             return
 
@@ -529,10 +564,17 @@ class SSHManager:
             for raw in iter(stdout.readline, ""):
                 if raw == "":
                     break
+                if not self._is_current(device_id, sess):
+                    # Superseded mid-command: stop emitting immediately, do
+                    # not read stderr or emit a summary.
+                    break
                 line = _clean(raw.rstrip("\n"))
                 if not line.strip() or not _safe(line):
                     continue
-                self._log(device_id, line, "out")
+                self._log(device_id, line, "out", gen=gen)
+
+            if not self._is_current(device_id, sess):
+                return
 
             err  = stderr.read().decode("utf-8", "replace").strip()
             code = stdout.channel.recv_exit_status()
@@ -540,20 +582,22 @@ class SSHManager:
             for ln in (err.splitlines() if err else []):
                 ln = _clean(ln)
                 if ln.strip() and _safe(ln):
-                    self._log(device_id, ln, "err")
+                    self._log(device_id, ln, "err", gen=gen)
 
             if sess.cancelled:
-                self._log(device_id, f"■ {label} cancelled.", "warn")
+                self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
             elif code == 0:
-                self._log(device_id, f"✓ {label} finished.", "ok")
+                self._log(device_id, f"✓ {label} finished.", "ok", gen=gen)
             else:
-                self._log(device_id, f"✗ {label} exited with code {code}.", "err")
+                self._log(device_id, f"✗ {label} exited with code {code}.", "err", gen=gen)
 
         except Exception as e:
-            if sess.cancelled:
-                self._log(device_id, f"■ {label} cancelled.", "warn")
+            if not self._is_current(device_id, sess):
+                pass
+            elif sess.cancelled:
+                self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
             else:
-                self._log(device_id, f"Error: {e}", "err")
+                self._log(device_id, f"Error: {e}", "err", gen=gen)
         finally:
             self._finish_exec(sess)
 
@@ -575,7 +619,11 @@ class SSHManager:
         if still_current:
             if owner:
                 self._owner_reset(owner)
-            self._status(device_id, "connected")
+            # Stamped with this session's generation: the identity check
+            # above only guards against a replace that already happened; a
+            # replace landing between here and delivery is caught at
+            # delivery time by the generation stamp.
+            self._status(device_id, "connected", gen=sess.generation)
 
     # ---- idle timeout --------------------------------------------------------
 
