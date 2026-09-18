@@ -125,6 +125,32 @@ def test_failure_notice_reaches_ws_init_payload_and_clears_on_reenable(tmp_path,
     assert main._debug_failed_notice is None
 
 
+def test_broadcast_still_delivers_when_the_debug_write_fails(tmp_path, monkeypatch) -> None:
+    """A dashboard action must survive a debug-log failure underneath it.
+
+    _broadcast writes SSH events to the debug log before delivering them to
+    tabs. If that write fails, logging is disabled but the broadcast must
+    still reach ws_mgr, not abort halfway.
+    """
+    _enable(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "_debug_loop", None)
+    monkeypatch.setattr(main._debug_handler.stream, "write", lambda *a, **k: (_ for _ in ()).throw(OSError("disk gone")))
+
+    delivered = []
+
+    async def _record(msg):
+        delivered.append(msg)
+
+    monkeypatch.setattr(main.ws_mgr, "broadcast", _record)
+
+    asyncio.run(main._broadcast({"type": "ssh_log", "device_id": "dev_a", "level": "out", "text": "hi"}))
+
+    # The write failed and disabled logging, but the SSH message still shipped.
+    assert main._debug_handler is None
+    assert main._debug_failed_notice
+    assert delivered == [{"type": "ssh_log", "device_id": "dev_a", "level": "out", "text": "hi"}]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file-mode bits are not meaningful on Windows")
 def test_rotation_chmod_failure_disables_logging(tmp_path, monkeypatch) -> None:
     _enable(tmp_path, monkeypatch, max_bytes=200, backup_count=3)
