@@ -17,9 +17,7 @@ import functools
 import socket
 
 import httpx
-import pytest
 
-import metrics_poller
 from metrics_poller import fetch_metrics
 
 

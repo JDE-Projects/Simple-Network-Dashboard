@@ -476,7 +476,7 @@ async def _poll_once():
             for d in devices
         ]
         results = await asyncio.gather(*fetches, return_exceptions=True)
-        for device, result in zip(devices, results):
+        for device, result in zip(devices, results, strict=True):
             did  = device.get("id")
             host = device.get("host")
             port = device.get("metrics_port", 9100)
