@@ -3,6 +3,7 @@ Fetches and parses Node Exporter metrics from a device.
 No SSH required — polls http://host:port/metrics directly.
 """
 
+import ipaddress
 import re
 import time
 import httpx
@@ -24,6 +25,50 @@ _EXCLUDE_IFACE = re.compile(
 # Block devices whose mounts are never real storage (squashfs images, DSM
 # service mounts under /tmp, snap loops)
 _EXCLUDE_DEVICE = re.compile(r"^/dev/loop\d+")
+
+
+# ---------------------------------------------------------------------------
+# Metrics target validation
+# ---------------------------------------------------------------------------
+
+_MAX_HOST_LENGTH = 253
+
+
+def is_valid_host_string(host: str) -> bool:
+    """Reject an obviously malformed metrics target host string.
+
+    Rejects empty or whitespace-only strings, strings containing whitespace
+    or ASCII control characters, and strings longer than 253 characters.
+    This is a sanity check, not full hostname DNS syntax validation.
+    """
+    if not host or not host.strip():
+        return False
+    if len(host) > _MAX_HOST_LENGTH:
+        return False
+    for ch in host:
+        if ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F:
+            return False
+    return True
+
+
+def is_allowed_metrics_target(address: str) -> bool:
+    """Return whether a parsed IP address is allowed as a metrics target.
+
+    Reject-list, allow-the-rest: rejects loopback, link-local, multicast,
+    unspecified, and reserved addresses (IPv4 and IPv6 alike). Everything
+    else is allowed, including private ranges, ordinary public/routable
+    addresses, IPv6, and carrier-grade NAT space (100.64.0.0/10).
+
+    Deliberately does not use ip.is_private or ip.is_global, since those
+    flags have reported CGNAT space inconsistently across Python versions.
+
+    Raises ValueError if `address` does not parse as an IP address. Caller
+    is responsible for hostname resolution, which is handled separately.
+    """
+    ip = ipaddress.ip_address(address)
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
