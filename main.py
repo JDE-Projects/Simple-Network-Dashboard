@@ -458,35 +458,42 @@ def _norm(d: dict) -> dict:
 # Metrics polling loop (background asyncio task)
 # ---------------------------------------------------------------------------
 
+async def _poll_once():
+    """Run one metrics polling cycle: fetch every currently-selected device
+    concurrently, cache and log each result, and broadcast it. Does not
+    sleep or loop — _metrics_loop below handles the timing."""
+    selected_ids = ws_mgr.selected_device_ids() if ws_mgr._connections else set()
+    if selected_ids:
+        devices = [
+            d for d in _devices_cache if d.get("id") in selected_ids
+        ]
+        fetches = [
+            fetch_metrics(
+                d.get("host"),
+                d.get("metrics_port", 9100),
+                _metrics_cache.get(d.get("id")),
+            )
+            for d in devices
+        ]
+        results = await asyncio.gather(*fetches, return_exceptions=True)
+        for device, result in zip(devices, results):
+            did  = device.get("id")
+            host = device.get("host")
+            port = device.get("metrics_port", 9100)
+            if isinstance(result, Exception):
+                metrics = {"error": str(result)}
+            else:
+                metrics = result
+            _metrics_cache[did] = metrics
+            if metrics.get("error"):
+                _debug_write(f"METRICS [{did}] {host}:{port} → {metrics['error']}")
+            public = {k: v for k, v in metrics.items() if not k.startswith("_")}
+            await ws_mgr.broadcast({"type": "metrics", "device_id": did, "data": public})
+
+
 async def _metrics_loop():
     while True:
-        selected_ids = ws_mgr.selected_device_ids() if ws_mgr._connections else set()
-        if selected_ids:
-            devices = [
-                d for d in _devices_cache if d.get("id") in selected_ids
-            ]
-            fetches = [
-                fetch_metrics(
-                    d.get("host"),
-                    d.get("metrics_port", 9100),
-                    _metrics_cache.get(d.get("id")),
-                )
-                for d in devices
-            ]
-            results = await asyncio.gather(*fetches, return_exceptions=True)
-            for device, result in zip(devices, results):
-                did  = device.get("id")
-                host = device.get("host")
-                port = device.get("metrics_port", 9100)
-                if isinstance(result, Exception):
-                    metrics = {"error": str(result)}
-                else:
-                    metrics = result
-                _metrics_cache[did] = metrics
-                if metrics.get("error"):
-                    _debug_write(f"METRICS [{did}] {host}:{port} → {metrics['error']}")
-                public = {k: v for k, v in metrics.items() if not k.startswith("_")}
-                await ws_mgr.broadcast({"type": "metrics", "device_id": did, "data": public})
+        await _poll_once()
         await asyncio.sleep(METRICS_INTERVAL)
 
 

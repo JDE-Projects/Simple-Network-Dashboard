@@ -132,6 +132,35 @@ def test_dns_resolution_failure_returns_dns_error_with_no_http(monkeypatch):
     assert calls == []
 
 
+def test_same_hostname_is_re_resolved_on_each_call(monkeypatch):
+    """Two successive fetch_metrics calls for the same hostname must each
+    perform a fresh DNS lookup, so a changed address is picked up rather
+    than reused from a prior call."""
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, text=NODE_EXPORTER_SAMPLE)
+
+    _install_mock_transport(monkeypatch, handler)
+
+    addresses = iter(["10.0.0.4", "10.0.0.5"])
+
+    async def fake_getaddrinfo(self, host, port, *args, **kwargs):
+        addr = next(addresses)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, port))]
+    monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", fake_getaddrinfo)
+
+    result_1 = asyncio.run(fetch_metrics("networkpi5"))
+    result_2 = asyncio.run(fetch_metrics("networkpi5"))
+
+    assert "error" not in result_1
+    assert "error" not in result_2
+    assert len(calls) == 2
+    assert calls[0].url.host == "10.0.0.4"
+    assert calls[1].url.host == "10.0.0.5"
+
+
 def test_redirect_is_not_followed(monkeypatch):
     calls = []
 
