@@ -5,6 +5,7 @@ Passwords are held in memory only; never written anywhere.
 
 import asyncio
 import base64
+import codecs
 import hashlib
 import hmac
 import os
@@ -285,9 +286,12 @@ class SSHManager:
             msg["_gen"] = gen
         self._push(msg)
 
-    def _lock(self, device_id: str, locked: bool):
+    def _lock(self, device_id: str, locked: bool, gen: int = None):
         """Broadcast lock signal to everyone (no _owner key)."""
-        self._push({"type": "ssh_lock", "device_id": device_id, "locked": locked})
+        msg = {"type": "ssh_lock", "device_id": device_id, "locked": locked}
+        if gen is not None:
+            msg["_gen"] = gen
+        self._push(msg)
 
     # ---- host-key helpers -------------------------------------------------
 
@@ -449,9 +453,10 @@ class SSHManager:
                     "error": "This device was reconnected from another tab."}
 
         self._owner_touch(owner)
-        self._log(device_id, f"Connected to {device['host']} as {device['username']}.", "ok", owner)
-        self._status(device_id, "connected", owner)
-        self._lock(device_id, True)
+        self._log(device_id, f"Connected to {device['host']} as {device['username']}.",
+                   "ok", owner, gen=sess.generation)
+        self._status(device_id, "connected", owner, gen=sess.generation)
+        self._lock(device_id, True, gen=sess.generation)
         return {"ok": True}
 
     def _close(self, device_id: str, sess: "_Session" = None):
@@ -604,11 +609,12 @@ class SSHManager:
 
         try:
             stdin, stdout, stderr = sess.client.exec_command(cmd, get_pty=needs_sudo)
-            sess.channel = stdout.channel
+            chan = stdout.channel
+            sess.channel = chan
             if sess.cancel_requested:
                 sess.cancelled = True
                 try:
-                    sess.channel.close()
+                    chan.close()
                 except Exception:
                     pass
 
@@ -629,28 +635,91 @@ class SSHManager:
                     return False
                 return True
 
-            for raw in iter(stdout.readline, ""):
-                if raw == "":
-                    break
+            # Read the raw channel ourselves, interleaving stdout and stderr
+            # as data arrives, instead of draining stdout to EOF before ever
+            # looking at stderr. A pty-backed sudo command merges stderr into
+            # the stdout stream, so recv_stderr_ready() simply stays false for
+            # those; a plain command keeps the two apart. select() cannot
+            # watch a paramiko channel on Windows, so this polls instead.
+            out_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            err_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            out_buf = ""
+            err_buf = ""
+
+            def _split_and_emit(buf: str, level: str) -> str:
+                """Emit every complete line in `buf`, returning the trailing
+                partial line (kept for the next chunk). Stops emitting, but
+                still returns the remainder, once this worker is no longer
+                current."""
+                if "\n" not in buf:
+                    return buf
+                *complete, remainder = buf.split("\n")
+                for raw_line in complete:
+                    if not self._is_current(device_id, sess):
+                        return remainder
+                    cleaned = _clean(raw_line)
+                    if cleaned.strip() and _safe(cleaned):
+                        self._log(device_id, cleaned, level, gen=gen)
+                return remainder
+
+            superseded = False
+            while True:
                 if not self._is_current(device_id, sess):
-                    # Superseded mid-command: stop emitting immediately, do
-                    # not read stderr or emit a summary.
+                    superseded = True
                     break
-                line = _clean(raw.rstrip("\n"))
-                if not line.strip() or not _safe(line):
-                    continue
-                self._log(device_id, line, "out", gen=gen)
+
+                got_data = False
+                if chan.recv_ready():
+                    raw = chan.recv(32768)
+                    if raw:
+                        got_data = True
+                        out_buf += out_decoder.decode(raw, False)
+                        out_buf = _split_and_emit(out_buf, "out")
+                if chan.recv_stderr_ready():
+                    raw = chan.recv_stderr(32768)
+                    if raw:
+                        got_data = True
+                        err_buf += err_decoder.decode(raw, False)
+                        err_buf = _split_and_emit(err_buf, "err")
+
+                if not got_data:
+                    if (chan.exit_status_ready()
+                            and not chan.recv_ready()
+                            and not chan.recv_stderr_ready()):
+                        break
+                    time.sleep(0.02)
+
+            if not superseded:
+                # Final non-blocking drain: bytes that arrived right at exit.
+                while chan.recv_ready():
+                    raw = chan.recv(32768)
+                    if not raw:
+                        break
+                    out_buf += out_decoder.decode(raw, False)
+                    out_buf = _split_and_emit(out_buf, "out")
+                while chan.recv_stderr_ready():
+                    raw = chan.recv_stderr(32768)
+                    if not raw:
+                        break
+                    err_buf += err_decoder.decode(raw, False)
+                    err_buf = _split_and_emit(err_buf, "err")
 
             if not self._is_current(device_id, sess):
                 return
 
-            err  = stderr.read().decode("utf-8", "replace").strip()
-            code = stdout.channel.recv_exit_status()
+            # Flush each decoder and emit any trailing line with no newline.
+            out_buf += out_decoder.decode(b"", True)
+            err_buf += err_decoder.decode(b"", True)
+            if out_buf:
+                cleaned = _clean(out_buf)
+                if cleaned.strip() and _safe(cleaned):
+                    self._log(device_id, cleaned, "out", gen=gen)
+            if err_buf:
+                cleaned = _clean(err_buf)
+                if cleaned.strip() and _safe(cleaned):
+                    self._log(device_id, cleaned, "err", gen=gen)
 
-            for ln in (err.splitlines() if err else []):
-                ln = _clean(ln)
-                if ln.strip() and _safe(ln):
-                    self._log(device_id, ln, "err", gen=gen)
+            code = chan.recv_exit_status()
 
             if sess.cancelled:
                 self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
