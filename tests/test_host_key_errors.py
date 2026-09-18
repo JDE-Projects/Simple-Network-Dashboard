@@ -19,9 +19,14 @@ def test_trust_host_key_hides_raw_error(monkeypatch):
 
     messages = []
     mgr = _mgr(messages.append)
-    mgr._pending["dev1"] = ("10.0.0.9", object())
+    sess = ssh_manager._Session({"host": "10.0.0.9", "username": "pi"}, "pw", "owner-1", "dev1")
+    sess.state      = "host_key_pending"
+    sess.generation = 1
+    mgr.sessions["dev1"] = sess
+    mgr._pending["dev1"] = ssh_manager._PendingHostKey(
+        "10.0.0.9", object(), "code123", "owner-1", 1)
 
-    result = mgr.trust_host_key("dev1")
+    result = mgr.trust_host_key("dev1", "code123", "owner-1")
 
     assert result == {"ok": False, "error": "Could not save the host key."}
     assert "detail" not in result
@@ -30,8 +35,8 @@ def test_trust_host_key_hides_raw_error(monkeypatch):
 
 
 def test_trust_host_key_missing_pending_is_plain():
-    result = _mgr().trust_host_key("nope")
-    assert result == {"ok": False, "error": "No host key is waiting to be trusted."}
+    result = _mgr().trust_host_key("nope", "any-code", "owner-1")
+    assert result == {"ok": False, "expired": True, "error": ssh_manager._EXPIRED_ERROR}
 
 
 def test_forget_host_key_hides_raw_error(monkeypatch):

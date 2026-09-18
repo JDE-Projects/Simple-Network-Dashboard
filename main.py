@@ -1097,11 +1097,21 @@ class TrustIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     device_id: str
+    code:      str
 
 
 @app.post("/api/ssh/trust_key")
-async def ssh_trust_key(body: TrustIn):
-    return ssh_mgr.trust_host_key(body.device_id)
+async def ssh_trust_key(body: TrustIn, x_browser_id: str = Header(None)):
+    if not x_browser_id:
+        return {"ok": False, "error": "Missing browser id."}
+    return ssh_mgr.trust_host_key(body.device_id, body.code, x_browser_id)
+
+
+@app.post("/api/ssh/reject_key")
+async def ssh_reject_key(body: TrustIn, x_browser_id: str = Header(None)):
+    if not x_browser_id:
+        return {"ok": False, "error": "Missing browser id."}
+    return ssh_mgr.reject_host_key(body.device_id, body.code, x_browser_id)
 
 
 @app.get("/api/ssh/host_key/{host}")

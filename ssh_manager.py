@@ -6,8 +6,10 @@ Passwords are held in memory only; never written anywhere.
 import asyncio
 import base64
 import hashlib
+import hmac
 import os
 import re
+import secrets
 import threading
 import time
 
@@ -15,6 +17,10 @@ import paramiko
 
 IDLE_WARN_SECONDS    = 270   # send warning after 4.5 minutes idle
 IDLE_TIMEOUT_SECONDS = 300   # disconnect after 5 minutes idle
+
+HOST_KEY_PENDING_SECONDS = 300   # a host-key prompt expires 5 minutes after it is raised
+
+_EXPIRED_ERROR = "This host-key prompt expired or was already used. Reconnect to try again."
 
 DATA_DIR         = "/var/lib/simple-network-dashboard"
 KNOWN_HOSTS_FILE = os.path.join(DATA_DIR, "known_hosts")
@@ -71,6 +77,22 @@ class _TofuPolicy(paramiko.MissingHostKeyPolicy):
     """Trust-on-first-use: surface the offered key instead of auto-accepting."""
     def missing_host_key(self, client, hostname, key):
         raise UnknownHostKey(hostname, key)
+
+
+class _PendingHostKey:
+    """One device's outstanding host-key prompt: the offered key, a one-time
+    code the browser that raised the prompt must echo back, the owner
+    (browser id) that raised it, and the reserved session's generation the
+    prompt is bound to, so a later connect/disconnect on the same device can
+    never be resolved by an accept/reject aimed at a stale prompt."""
+
+    def __init__(self, host, key, code: str, owner: str, generation: int):
+        self.host       = host
+        self.key        = key
+        self.code       = code
+        self.owner      = owner
+        self.generation = generation
+        self.created_at = time.monotonic()
 
 
 class _Session:
@@ -152,7 +174,7 @@ class SSHManager:
         self._debug_write = debug_write if debug_write is not None else (lambda _text: None)
         self._loop      = None          # set via set_loop() after uvicorn starts
         self.sessions: dict[str, _Session] = {}
-        self._pending: dict[str, tuple]    = {}  # device_id -> (host, key)
+        self._pending: dict[str, _PendingHostKey] = {}  # device_id -> pending prompt
         self._owner_activity: dict[str, dict] = {}  # owner -> {"last_active": float, "warned": bool}
 
         # Per-device locks, created on demand under a short guard lock. Every
@@ -276,12 +298,39 @@ class SSHManager:
         return {"known": True, "host": host,
                 "entries": [{"key_type": kt, "fingerprint": _fp(k)} for kt, k in sub.items()]}
 
-    def trust_host_key(self, device_id: str) -> dict:
+    def _clear_pending(self, device_id: str) -> None:
+        """Drop a device's outstanding host-key prompt, if any. Safe to call
+        from any teardown path; a no-op when nothing is pending."""
         with self._device_lock(device_id):
-            pending = self._pending.pop(device_id, None)
-        if not pending:
-            return {"ok": False, "error": "No host key is waiting to be trusted."}
-        host, key = pending
+            self._pending.pop(device_id, None)
+
+    def _valid_host_key_pending(self, device_id: str, code: str, owner: str):
+        """Must be called under the device's lock. Returns the pending
+        record only when it is still bound to the slot's current session,
+        was raised by this owner, the code matches (constant-time), and it
+        has not expired; otherwise returns None and leaves `_pending`
+        untouched."""
+        pending = self._pending.get(device_id)
+        if pending is None:
+            return None
+        sess = self.sessions.get(device_id)
+        if (sess is None
+                or sess.generation != pending.generation
+                or sess.state != "host_key_pending"
+                or pending.owner != owner
+                or not hmac.compare_digest(pending.code, code or "")
+                or (time.monotonic() - pending.created_at) > HOST_KEY_PENDING_SECONDS):
+            return None
+        return pending
+
+    def trust_host_key(self, device_id: str, code: str, owner: str) -> dict:
+        with self._device_lock(device_id):
+            pending = self._valid_host_key_pending(device_id, code, owner)
+            if pending is None:
+                return {"ok": False, "expired": True, "error": _EXPIRED_ERROR}
+            self._pending.pop(device_id, None)
+            host, key = pending.host, pending.key
+
         try:
             hk = _load_known_hosts()
             if hk.lookup(host):
@@ -292,6 +341,18 @@ class SSHManager:
         except Exception as e:
             self._debug_write(f"trust_host_key failed: {type(e).__name__}: {e}")
             return {"ok": False, "error": "Could not save the host key."}
+
+    def reject_host_key(self, device_id: str, code: str, owner: str) -> dict:
+        with self._device_lock(device_id):
+            pending = self._valid_host_key_pending(device_id, code, owner)
+            if pending is None:
+                return {"ok": False, "expired": True, "error": _EXPIRED_ERROR}
+            self._pending.pop(device_id, None)
+            bound_sess = self.sessions.get(device_id)
+
+        self._log(device_id, "Host key declined. Password cleared from memory.", "muted", pending.owner)
+        self._close(device_id, bound_sess)
+        return {"ok": True}
 
     def forget_host_key(self, host: str) -> dict:
         try:
@@ -336,25 +397,30 @@ class SSHManager:
         try:
             sess.connect()
         except UnknownHostKey as e:
+            code = secrets.token_urlsafe(24)
             with self._device_lock(device_id):
                 if self.sessions.get(device_id) is sess:
                     sess.state = "host_key_pending"
-                    self._pending[device_id] = (e.hostname, e.key)
+                    self._pending[device_id] = _PendingHostKey(
+                        e.hostname, e.key, code, owner, sess.generation)
             return {
                 "ok": False, "host_key_unknown": True,
                 "host": device["host"], "key_type": e.key.get_name(),
-                "fingerprint": _fp(e.key),
+                "fingerprint": _fp(e.key), "code": code,
             }
         except paramiko.BadHostKeyException as e:
+            code = secrets.token_urlsafe(24)
             with self._device_lock(device_id):
                 if self.sessions.get(device_id) is sess:
                     sess.state = "host_key_pending"
-                    self._pending[device_id] = (device["host"], e.key)
+                    self._pending[device_id] = _PendingHostKey(
+                        device["host"], e.key, code, owner, sess.generation)
             return {
                 "ok": False, "host_key_changed": True,
                 "host": device["host"], "key_type": e.key.get_name(),
                 "new_fingerprint": _fp(e.key),
                 "old_fingerprint": _fp(e.expected_key),
+                "code": code,
             }
         except paramiko.AuthenticationException:
             with self._device_lock(device_id):
@@ -408,6 +474,7 @@ class SSHManager:
         # holds the slot) must not broadcast idle or unlock, or it would wipe
         # the live replacement's lock and status in every browser.
         if popped is not None:
+            self._clear_pending(device_id)
             owner = popped.owner
             popped.close()
             self._log(device_id, "Disconnected. Password cleared from memory.", "muted", owner)
@@ -431,6 +498,7 @@ class SSHManager:
 
         broadcast_owner = owner if owner is not None else (popped.owner if popped else None)
         if popped is not None:
+            self._clear_pending(device_id)
             popped.close()
             self._log(device_id, "Disconnected. Password cleared from memory.", "muted", popped.owner)
         self._status(device_id, "idle", broadcast_owner)
@@ -627,9 +695,32 @@ class SSHManager:
 
     # ---- idle timeout --------------------------------------------------------
 
+    def _sweep_expired_host_key_prompts(self, now: float) -> None:
+        """Drop any host-key prompt older than HOST_KEY_PENDING_SECONDS, and
+        release the reservation it was holding open."""
+        for device_id in list(self._pending):
+            with self._device_lock(device_id):
+                pending = self._pending.get(device_id)
+                if pending is None or (now - pending.created_at) < HOST_KEY_PENDING_SECONDS:
+                    continue
+                self._pending.pop(device_id, None)
+                sess = self.sessions.get(device_id)
+                expired_sess = sess if (
+                    sess is not None
+                    and sess.generation == pending.generation
+                    and sess.state == "host_key_pending"
+                ) else None
+                pop_owner = pending.owner
+
+            if expired_sess is not None:
+                self._log(device_id, "Host-key prompt expired. Password cleared from memory.",
+                           "warn", pop_owner)
+                self._close(device_id, expired_sess)
+
     def tick_idle(self):
         """Called from the asyncio idle loop every 2 s.  Warns and disconnects idle owners."""
         now = time.monotonic()
+        self._sweep_expired_host_key_prompts(now)
         with self._owner_activity_lock:
             owners = list(self._owner_activity)
 
