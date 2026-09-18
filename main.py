@@ -18,6 +18,7 @@ import ssl
 import stat
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -168,6 +169,13 @@ ws_mgr = _WSManager()
 # Latest metrics per device (includes _raw fields for delta calculation)
 _metrics_cache: dict[str, dict] = {}
 
+# Per-device metrics error tracking, keyed by device id, used to collapse a
+# persistently-failing device down to one summary line every five minutes
+# instead of one identical line per ~2-second poll. Each entry holds the
+# current error string, the number of failed polls seen in the current
+# window, and the monotonic time that window started.
+_metrics_error_state: dict[str, dict] = {}
+
 # In-memory device list — seeded from disk at startup, kept in sync by _save()
 _devices_cache: list = []
 
@@ -209,6 +217,10 @@ async def _release_after_grace(owner: str):
 # capped at this size (roughly 20 MB retained in total at the defaults).
 _DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
 _DEBUG_LOG_BACKUP_COUNT = 3
+
+# How long a persistently-failing device's identical error is suppressed
+# before one summary line is logged for that window.
+_METRICS_ERROR_SUMMARY_SECONDS = 5 * 60
 
 
 def _debug_log_opener(path: str, _flags: int) -> int:
@@ -498,11 +510,58 @@ def _norm(d: dict) -> dict:
 # Metrics polling loop (background asyncio task)
 # ---------------------------------------------------------------------------
 
+def _log_metrics_result(did: str, host: str, port: int, metrics: dict):
+    """Log a metrics error/recovery line for one device, collapsing a
+    persistently-failing device down to one summary line per five-minute
+    window instead of one identical line per poll."""
+    error = metrics.get("error")
+    state = _metrics_error_state.get(did)
+
+    if not error:
+        if state is not None:
+            _debug_write(
+                f"METRICS [{did}] {host}:{port} → recovered after "
+                f"{state['total_count']} failed polls"
+            )
+            del _metrics_error_state[did]
+        return
+
+    now = time.monotonic()
+    if state is None or state["error"] != error:
+        _metrics_error_state[did] = {
+            "error": error,
+            "window_count": 1,
+            "total_count": 1,
+            "window_start": now,
+        }
+        _debug_write(f"METRICS [{did}] {host}:{port} → {error}")
+        return
+
+    state["window_count"] += 1
+    state["total_count"] += 1
+    if now - state["window_start"] >= _METRICS_ERROR_SUMMARY_SECONDS:
+        _debug_write(
+            f"METRICS [{did}] {host}:{port} → still failing: {error} "
+            f"(repeated {state['window_count']} times in the last 5 minutes)"
+        )
+        state["window_count"] = 0
+        state["window_start"] = now
+
+
 async def _poll_once():
     """Run one metrics polling cycle: fetch every currently-selected device
     concurrently, cache and log each result, and broadcast it. Does not
     sleep or loop — _metrics_loop below handles the timing."""
     selected_ids = ws_mgr.selected_device_ids() if ws_mgr._connections else set()
+
+    # A device that is no longer being polled (deselected or disconnected)
+    # drops its error tracking, so a later failure logs fresh as a first
+    # error instead of a stale summary. This also covers device deletion,
+    # which unselects the device everywhere before its next poll cycle.
+    for did in list(_metrics_error_state):
+        if did not in selected_ids:
+            del _metrics_error_state[did]
+
     if selected_ids:
         devices = [
             d for d in _devices_cache if d.get("id") in selected_ids
@@ -525,8 +584,7 @@ async def _poll_once():
             else:
                 metrics = result
             _metrics_cache[did] = metrics
-            if metrics.get("error"):
-                _debug_write(f"METRICS [{did}] {host}:{port} → {metrics['error']}")
+            _log_metrics_result(did, host, port, metrics)
             public = {k: v for k, v in metrics.items() if not k.startswith("_")}
             await ws_mgr.broadcast({"type": "metrics", "device_id": did, "data": public})
 
