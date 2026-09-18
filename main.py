@@ -858,7 +858,7 @@ async def ws_endpoint(ws: WebSocket):
     try:
         # Push current state so a fresh page load (or reconnect) is in sync
         # ssh_connected = devices this owner currently owns
-        own_connected = [did for did, s in ssh_mgr.sessions.items() if s.owner == owner]
+        own_connected = ssh_mgr.owner_connected_ids(owner)
         await ws.send_text(json.dumps({
             "type": "init", "devices": _devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
