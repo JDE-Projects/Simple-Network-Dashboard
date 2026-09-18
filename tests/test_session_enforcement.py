@@ -271,3 +271,30 @@ def test_unstamped_message_always_passes_through_delivery():
     asyncio.run(mgr._deliver(plain_msg))
 
     assert broadcast_calls == [{"type": "ssh_lock", "device_id": "d1", "locked": False}]
+
+
+def test_connect_success_lock_stamped_with_a_stale_generation_is_dropped():
+    """Concern 2: connect()'s success-tail lock/status/log emits are now
+    stamped with the session's generation, so a stale one is dropped at
+    delivery just like a worker's stale emit would be."""
+    mgr = _mgr()
+    device = _device()
+
+    current = ssh_manager._Session(device, "pw", "owner-1", "d1")
+    current.state = "connected"
+    current.generation = 2
+    mgr.sessions["d1"] = current
+
+    broadcast_calls = []
+
+    async def fake_broadcast(msg):
+        broadcast_calls.append(msg)
+
+    mgr._broadcast = fake_broadcast
+
+    # A lock message stamped with an older generation than the one now in
+    # the slot (as connect() would emit if superseded before delivery).
+    stale_lock = {"type": "ssh_lock", "device_id": "d1", "locked": True, "_gen": 1}
+    asyncio.run(mgr._deliver(stale_lock))
+
+    assert broadcast_calls == []

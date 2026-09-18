@@ -286,9 +286,12 @@ class SSHManager:
             msg["_gen"] = gen
         self._push(msg)
 
-    def _lock(self, device_id: str, locked: bool):
+    def _lock(self, device_id: str, locked: bool, gen: int = None):
         """Broadcast lock signal to everyone (no _owner key)."""
-        self._push({"type": "ssh_lock", "device_id": device_id, "locked": locked})
+        msg = {"type": "ssh_lock", "device_id": device_id, "locked": locked}
+        if gen is not None:
+            msg["_gen"] = gen
+        self._push(msg)
 
     # ---- host-key helpers -------------------------------------------------
 
@@ -450,9 +453,10 @@ class SSHManager:
                     "error": "This device was reconnected from another tab."}
 
         self._owner_touch(owner)
-        self._log(device_id, f"Connected to {device['host']} as {device['username']}.", "ok", owner)
-        self._status(device_id, "connected", owner)
-        self._lock(device_id, True)
+        self._log(device_id, f"Connected to {device['host']} as {device['username']}.",
+                   "ok", owner, gen=sess.generation)
+        self._status(device_id, "connected", owner, gen=sess.generation)
+        self._lock(device_id, True, gen=sess.generation)
         return {"ok": True}
 
     def _close(self, device_id: str, sess: "_Session" = None):
