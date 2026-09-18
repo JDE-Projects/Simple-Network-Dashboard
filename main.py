@@ -27,9 +27,10 @@ from typing import Optional
 
 from argon2.exceptions import Argon2Error
 from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
@@ -38,6 +39,7 @@ from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageErr
 
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
+MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MB cap on incoming HTTP request bodies
 
 APP_NAME    = "Simple Network Dashboard"
 APP_VERSION = "1.5.1"
@@ -554,6 +556,13 @@ async def internal_server_error(request: Request, _error: Exception):
     return _add_security_headers(response, request)
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(request: Request, _error: RequestValidationError):
+    """Reshape FastAPI's default validation-error body into the app's own shape."""
+    response = JSONResponse({"ok": False, "error": "The request was not valid."}, status_code=422)
+    return _add_security_headers(response, request)
+
+
 @app.middleware("http")
 async def protect_http_requests(request: Request, call_next):
     """Enforce browser-session and double-submit CSRF rules for HTTP only."""
@@ -581,6 +590,45 @@ async def protect_http_requests(request: Request, call_next):
     if needs_csrf_cookie:
         _set_csrf_cookie(response, secrets.token_urlsafe(32))
     return _add_security_headers(response, request)
+
+
+@app.middleware("http")
+async def limit_request_body_size(request: Request, call_next):
+    """Reject oversized request bodies before they reach any handler.
+
+    Checks the declared Content-Length header first as a fast rejection, then
+    checks the bytes actually read while draining the body, so a missing or
+    lying Content-Length header cannot slip an oversized body through.
+
+    Downstream handlers read the body via ``request.body()``/``request.json()``,
+    which Starlette serves from ``request._body`` once populated. Filling that
+    cache here (instead of handing call_next a fresh Request) lets us abort as
+    soon as the running total crosses the limit, rather than buffering an
+    unbounded body first.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > MAX_REQUEST_BODY_BYTES:
+            return _add_security_headers(
+                JSONResponse({"ok": False, "error": "Request body is too large."}, status_code=413),
+                request,
+            )
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_REQUEST_BODY_BYTES:
+            return _add_security_headers(
+                JSONResponse({"ok": False, "error": "Request body is too large."}, status_code=413),
+                request,
+            )
+
+    request._body = bytes(body)  # noqa: SLF001 - populates Starlette's own body cache
+    return await call_next(request)
 
 
 @app.get("/")
@@ -658,6 +706,8 @@ async def _websocket_request_is_valid(ws: WebSocket) -> bool:
 
 
 class LoginIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     password: str
     remembered: bool = False
 
@@ -799,6 +849,8 @@ async def ws_endpoint(ws: WebSocket):
 # ---------------------------------------------------------------------------
 
 class DeviceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id:           Optional[str] = None
     name:         str
     host:         str
@@ -893,6 +945,8 @@ async def delete_device(device_id: str):
 
 
 class CommandsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     commands: list
 
 
@@ -917,6 +971,8 @@ async def update_commands(device_id: str, body: CommandsIn):
 # ---------------------------------------------------------------------------
 
 class ConnectIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     device_id: str
     password:  str
 
@@ -938,6 +994,8 @@ async def ssh_connect(body: ConnectIn, x_browser_id: str = Header(None)):
 
 
 class DeviceIdIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     device_id: str
 
 
@@ -954,6 +1012,8 @@ async def ssh_disconnect_all():
 
 
 class RunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     device_id: str
     command:   str
     use_sudo:  bool = False
@@ -976,6 +1036,8 @@ async def ssh_cancel(body: DeviceIdIn, x_browser_id: str = Header(None)):
 
 
 class TrustIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     device_id: str
 
 
@@ -999,6 +1061,8 @@ async def ssh_forget_key(host: str):
 # ---------------------------------------------------------------------------
 
 class DebugIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool
 
 
