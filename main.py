@@ -296,6 +296,7 @@ _RECOVERY_READ_ONLY_ERROR = (
     "Configuration changes are unavailable while the dashboard is in recovery mode."
 )
 _DEVICE_LIMIT_ERROR = "The device limit of 250 has been reached."
+_UNKNOWN_DEVICE_ERROR = "That device does not exist."
 
 
 def _open_private_file(path: str, *, buffering: int = -1):
@@ -936,10 +937,7 @@ async def upsert_device(body: DeviceIn):
                 devices[i] = _norm(d)
                 break
         else:
-            if len(devices) >= MAX_DEVICES:
-                return {"ok": False, "error": _DEVICE_LIMIT_ERROR}
-            d["commands"] = _resolve_saved_commands(d["commands"], None)
-            devices.append(_norm(d))
+            return {"ok": False, "error": _UNKNOWN_DEVICE_ERROR}
     else:
         if len(devices) >= MAX_DEVICES:
             return {"ok": False, "error": _DEVICE_LIMIT_ERROR}
