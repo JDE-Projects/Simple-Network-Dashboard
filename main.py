@@ -10,6 +10,7 @@ import copy
 import errno
 import hmac
 import json
+import logging
 import os
 import secrets
 import socket
@@ -23,6 +24,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from ipaddress import ip_address
+from logging.handlers import RotatingFileHandler
 from typing import Annotated, Optional
 
 from argon2.exceptions import Argon2Error
@@ -203,21 +205,59 @@ async def _release_after_grace(owner: str):
     if ws_mgr.owner_count(owner) == 0:
         ssh_mgr.release_owner(owner)
 
-# Debug log file handle — None when disabled
-_debug_file = None
+# Debug log rotation: one active file plus this many rotated copies, each
+# capped at this size (roughly 20 MB retained in total at the defaults).
+_DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
+_DEBUG_LOG_BACKUP_COUNT = 3
+
+
+def _debug_log_opener(path: str, _flags: int) -> int:
+    """Force-create every debug log file (active or freshly rotated) as a
+    private mode-0600 file, regardless of the flags logging would otherwise
+    use."""
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+
+class _PrivateRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that guarantees mode 0600 on the active file and
+    on every rotated copy. Renames preserve permissions on their own, but we
+    re-apply 0600 explicitly after each rollover so that guarantee can't be
+    silently lost by a future change."""
+
+    def _open(self):
+        return open(self.baseFilename, self.mode, encoding=self.encoding, opener=_debug_log_opener)
+
+    def doRollover(self):
+        super().doRollover()
+        for i in range(1, self.backupCount + 1):
+            rotated = f"{self.baseFilename}.{i}"
+            if os.path.exists(rotated):
+                os.chmod(rotated, 0o600)
+        if os.path.exists(self.baseFilename):
+            os.chmod(self.baseFilename, 0o600)
+
+
+# Debug log handler — None when disabled
+_debug_handler: Optional[RotatingFileHandler] = None
+_debug_logger = logging.getLogger("simple_network_dashboard.debug")
+_debug_logger.setLevel(logging.DEBUG)
+_debug_logger.propagate = False
+
+
+def _debug_enabled() -> bool:
+    return _debug_handler is not None
 
 
 def _debug_write(text: str):
-    if _debug_file is not None:
-        stamp = datetime.now().strftime("%H:%M:%S")
-        _debug_file.write(f"[{stamp}] {text}\n")
+    if _debug_handler is not None:
+        _debug_logger.debug(text)
 
 
 async def _broadcast(msg: dict):
     """Broadcast wrapper that also writes SSH events to the debug log.
     If msg contains a private '_owner' key, route to that owner only;
     otherwise broadcast to everyone.  The key is popped before sending."""
-    if _debug_file is not None:
+    if _debug_enabled():
         t   = msg.get("type", "")
         did = msg.get("device_id", "")
         if t == "ssh_log":
@@ -522,9 +562,10 @@ async def lifespan(app: FastAPI):
     metrics_task.cancel()
     idle_task.cancel()
     ssh_mgr.disconnect_all()
-    if _debug_file is not None:
+    if _debug_handler is not None:
         _debug_write("=== Debug log closed (server shutdown) ===")
-        _debug_file.close()
+        _debug_logger.removeHandler(_debug_handler)
+        _debug_handler.close()
 
 
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
@@ -863,7 +904,7 @@ async def ws_endpoint(ws: WebSocket):
             "type": "init", "devices": _devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
             "ssh_locked": ssh_mgr.locked_device_ids(),
-            "debug": _debug_file is not None,
+            "debug": _debug_enabled(),
             "storage_warning": _storage_warning,
             "recovery_mode": _recovery_mode,
             "recovery_retry_available": _recovery_backup_contents is not None,
@@ -1136,17 +1177,27 @@ class DebugIn(BaseModel):
 
 @app.post("/api/debug")
 async def toggle_debug(body: DebugIn):
-    global _debug_file
-    if body.enabled and _debug_file is None:
+    global _debug_handler
+    if body.enabled and _debug_handler is None:
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         path  = os.path.join(LOG_DIR, f"Debug_Log_{stamp}.txt")
-        _debug_file = _open_private_file(path, buffering=1)  # line-buffered
+        handler = _PrivateRotatingFileHandler(
+            path,
+            mode="w",
+            maxBytes=_DEBUG_LOG_MAX_BYTES,
+            backupCount=_DEBUG_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter(fmt="[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+        _debug_logger.addHandler(handler)
+        _debug_handler = handler
         _debug_write("=== Debug log started ===")
         return {"ok": True, "enabled": True, "path": path}
-    if not body.enabled and _debug_file is not None:
+    if not body.enabled and _debug_handler is not None:
         _debug_write("=== Debug log stopped ===")
-        _debug_file.close()
-        _debug_file = None
+        _debug_logger.removeHandler(_debug_handler)
+        _debug_handler.close()
+        _debug_handler = None
     return {"ok": True, "enabled": False}
 
 
