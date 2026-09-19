@@ -1290,7 +1290,7 @@ copy_application_files
 if [ ! -d "$APP_DIR/venv" ]; then
     sudo -u snd python3 -m venv "$APP_DIR/venv"
 fi
-sudo -u snd "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt" --quiet
+sudo -u snd "$APP_DIR/venv/bin/pip" install --require-hashes -r "$APP_DIR/requirements.txt" --quiet
 
 if ! initialize_authentication; then
     restore_previously_active_service
