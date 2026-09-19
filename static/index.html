@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Simple Network Dashboard — https://github.com/JDE-Projects -->
+<!-- Simple Network Dashboard - https://github.com/JDE-Projects -->
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -860,14 +860,55 @@ function csrfToken() {
   return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : '';
 }
 
+function apiFailure(error, {status = 0, timedOut = false, authExpired = false} = {}) {
+  return {ok: false, error, netError: true, status, timedOut, authExpired};
+}
+
 async function api(method, path, body, extraHeaders) {
   const headers = {'Content-Type': 'application/json'};
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) headers['X-CSRF-Token'] = csrfToken();
   if (extraHeaders) Object.assign(headers, extraHeaders);
   const opts = { method, headers };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const r = await fetch(path, opts);
-  return r.json();
+
+  const controller = new AbortController();
+  let timedOutByUs = false;
+  const timer = setTimeout(() => { timedOutByUs = true; controller.abort(); }, 20000);
+  opts.signal = controller.signal;
+
+  let r;
+  try {
+    r = await fetch(path, opts);
+  } catch (e) {
+    if (timedOutByUs) {
+      return apiFailure('The server took too long to respond. Please try again.', {timedOut: true});
+    }
+    return apiFailure('Could not reach the server. Check that it is running and try again.');
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const text = await r.text();
+  let parsed = null;
+  if (text) {
+    try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+  }
+  const isObject = parsed !== null && typeof parsed === 'object';
+
+  if (r.ok) {
+    return isObject ? parsed : {ok: true};
+  }
+
+  if (r.status === 401 || r.status === 403) {
+    return apiFailure('Your session has expired. Please sign in again.', {status: r.status, authExpired: true});
+  }
+
+  if (isObject) return parsed;
+
+  if (r.status >= 500 && r.status <= 599) {
+    return apiFailure('The server hit an error. Please try again.', {status: r.status});
+  }
+  return apiFailure('The server sent an unexpected response. Please try again.', {status: r.status});
 }
 const GET    = path       => api('GET',    path);
 const POST   = (path, b)  => api('POST',   path, b);
@@ -1374,10 +1415,11 @@ function wireCard(card, d) {
   card.querySelector('[data-hostkey]').onclick = async e => {
     e.stopPropagation();
     const r = await GET(`/api/ssh/host_key/${encodeURIComponent(d.host)}`);
+    if (r && r.ok === false) { showErrorBanner(r.error); return; }
     if (r.known && r.entries && r.entries.length) {
-      showInfo(`Host key — ${r.host}`, r.entries.map(x => `${x.key_type}\n${x.fingerprint}`).join('\n\n'));
+      showInfo(`Host key: ${r.host}`, r.entries.map(x => `${x.key_type}\n${x.fingerprint}`).join('\n\n'));
     } else {
-      showInfo(`Host key — ${r.host}`, `No key pinned yet for ${r.host}.\nIt is recorded the first time you connect and accept it.`);
+      showInfo(`Host key: ${r.host}`, `No key pinned yet for ${r.host}.\nIt is recorded the first time you connect and accept it.`);
     }
   };
 
@@ -1572,11 +1614,15 @@ async function persistCommands(d) {
       DEVICES = r.devices;
     } else {
       showErrorBanner(r.error || 'Save failed: your change was NOT stored.');
-      DEVICES = await GET('/api/devices');  // roll back the optimistic local edit
+      const rollback = await GET('/api/devices');  // roll back the optimistic local edit
+      if (Array.isArray(rollback)) DEVICES = rollback;
     }
   } catch (e) {
     showErrorBanner('Save failed: could not reach the server. Your change was NOT stored.');
-    try { DEVICES = await GET('/api/devices'); } catch (e2) { /* server unreachable, keep current DEVICES */ }
+    try {
+      const rollback = await GET('/api/devices');
+      if (Array.isArray(rollback)) DEVICES = rollback;
+    } catch (e2) { /* server unreachable, keep current DEVICES */ }
   }
   renderDevices();
   renderLibrary();
