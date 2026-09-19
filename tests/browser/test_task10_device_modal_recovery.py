@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
 from playwright.sync_api import expect
 
 NAME = "Recovery Test Device"
@@ -75,25 +74,11 @@ def test_device_save_recovers_from_expired_session(logged_in_page, app_server):
     expect(page.locator("#sessionExpiredModal")).to_have_class(re.compile(r"\bshow\b"))
 
 
-@pytest.mark.xfail(
-    reason=(
-        "known pre-existing gap outside Task 10 scope: a 200 response with an "
-        "unparsable body crashes #devSave's success path (DEVICES = undefined). "
-        "See this test's docstring; fixing static/index.html is out of scope here."
-    ),
-    strict=False,
-)
-def test_device_save_survives_malformed_response(logged_in_page, app_server):
-    """Documents a real gap, not something this task is allowed to fix.
-
-    A 200 response whose body is not valid JSON is treated by api() as a bare
-    success ({ok: true}) with no `devices` field. #devSave's success branch
-    then runs `DEVICES = r.devices` (undefined) and calls renderDevices(),
-    which throws on `DEVICES.length`. That is a real front-end crash on this
-    specific input, unrelated to Task 10's network/500/timeout/401 recovery
-    work, and editing static/index.html is out of scope for this change. This
-    test is expected to fail so the gap is visible rather than silently
-    skipped.
+def test_device_save_recovers_from_malformed_response(logged_in_page, app_server):
+    """A 200 response whose body is not valid JSON must be treated as a
+    failure, not a bare success. api() returns a failure object for it, so
+    #devSave shows its inline error and keeps the modal open instead of
+    reading an undefined device list and crashing the device panel.
     """
     page = logged_in_page
     page.route(
@@ -106,5 +91,6 @@ def test_device_save_survives_malformed_response(logged_in_page, app_server):
     page.on("pageerror", lambda exc: errors.append(str(exc)))
     _open_and_fill(page)
     page.click("#devSave")
-    page.wait_for_timeout(300)
-    assert not errors, f"known gap: malformed 200 crashes devSave's success path: {errors}"
+    _assert_modal_recovered(page)
+    expect(page.locator("#devErr")).to_contain_text("unexpected response")
+    assert not errors, f"malformed 200 must not crash devSave: {errors}"

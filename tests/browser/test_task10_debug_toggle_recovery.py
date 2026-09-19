@@ -53,10 +53,10 @@ def test_debug_toggle_reverts_on_expired_session(logged_in_page, app_server):
     expect(page.locator("#sessionExpiredModal")).to_have_class(re.compile(r"\bshow\b"))
 
 
-def test_debug_toggle_survives_malformed_response(logged_in_page, app_server):
-    # A 200 with an unparsable body is treated as bare success by api(), so
-    # the checkbox is left in its new (checked) state and no banner appears.
-    # This just checks that path does not crash or leak the raw body.
+def test_debug_toggle_reverts_on_malformed_response(logged_in_page, app_server):
+    # A 200 with an unparsable body is treated as a failure by api(), so the
+    # checkbox reverts to its prior state and the error banner shows, rather
+    # than the switch being left applied on a response the server never gave.
     page = logged_in_page
     errors: list[str] = []
     page.on("pageerror", lambda exc: errors.append(str(exc)))
@@ -64,7 +64,8 @@ def test_debug_toggle_survives_malformed_response(logged_in_page, app_server):
         "**/api/debug",
         lambda route: route.fulfill(status=200, content_type="application/json", body="not json{"),
     )
-    _toggle(page)
-    page.wait_for_timeout(300)
+    was_checked = _toggle(page)
+    expect(page.locator("#debugChk")).to_have_js_property("checked", was_checked)
+    expect(page.locator(".error-banner .eb-text")).to_contain_text("Could not change debug logging")
     assert not errors
     expect(page.locator("body")).not_to_contain_text("not json")

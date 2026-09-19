@@ -69,11 +69,11 @@ def test_connect_shows_error_on_expired_session(logged_in_page_with_device, app_
     expect(page.locator("#sessionExpiredModal")).to_have_class(re.compile(r"\bshow\b"))
 
 
-def test_connect_survives_malformed_response(logged_in_page_with_device, app_server_with_device):
-    # A 200 with a body that isn't valid JSON is treated by api() as a bare
-    # success ({ok: true}), the same way a normal empty-body 200 would be.
-    # tryConnect() then takes its success branch: it does not crash and does
-    # not render any of the raw "not json{" body.
+def test_connect_recovers_from_malformed_response(logged_in_page_with_device, app_server_with_device):
+    # A 200 with a body that isn't valid JSON is treated by api() as a failure,
+    # so tryConnect() takes its error branch (rather than falsely reporting a
+    # connection): the button recovers, an error shows, and the raw body never
+    # reaches the screen.
     page = logged_in_page_with_device
     page.route(
         "**/api/ssh/connect",
@@ -83,6 +83,7 @@ def test_connect_survives_malformed_response(logged_in_page_with_device, app_ser
     connect_btn = card.locator("[data-connect]")
     expect(connect_btn).to_be_enabled()
     expect(connect_btn).to_have_text("Connect")
+    expect(card.locator("[data-cerr]")).to_contain_text("unexpected response")
     expect(card.locator("[data-cerr]")).not_to_contain_text("not json")
     expect(page.locator("body")).not_to_contain_text("undefined")
 

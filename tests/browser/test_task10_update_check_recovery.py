@@ -55,12 +55,10 @@ def test_update_check_recovers_from_expired_session(logged_in_page, app_server):
     expect(page.locator("#sessionExpiredModal")).to_have_class(re.compile(r"\bshow\b"))
 
 
-def test_update_check_survives_malformed_response(logged_in_page, app_server):
-    # A 200 with an unparsable body is treated as bare success by api(), so
-    # the button's success branch runs. This only checks that path does not
-    # crash or leak the raw response body; see this repo's report for a
-    # separate, pre-existing 'vundefined' text gap on that success path
-    # (r.current is undefined), which is out of scope to fix here.
+def test_update_check_recovers_from_malformed_response(logged_in_page, app_server):
+    # A 200 with an unparsable body is treated as a failure by api(), so the
+    # button takes its failure branch and shows the "couldn't reach GitHub"
+    # notice, rather than "You're on the latest version (vundefined)".
     page = logged_in_page
     errors: list[str] = []
     page.on("pageerror", lambda exc: errors.append(str(exc)))
@@ -69,7 +67,9 @@ def test_update_check_survives_malformed_response(logged_in_page, app_server):
         lambda route: route.fulfill(status=200, content_type="application/json", body="not json{"),
     )
     _check_for_updates(page)
-    page.wait_for_timeout(300)
-    assert not errors
     _assert_button_recovered(page)
-    expect(page.locator("#updateNotice")).not_to_contain_text("not json")
+    notice = page.locator("#updateNotice")
+    expect(notice).to_contain_text("Couldn't reach GitHub")
+    expect(notice).not_to_contain_text("vundefined")
+    expect(notice).not_to_contain_text("not json")
+    assert not errors

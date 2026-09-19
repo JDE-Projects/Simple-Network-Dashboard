@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
 from playwright.sync_api import expect
 
 from tests.browser.conftest import SEEDED_DEVICE_ID
@@ -82,15 +81,11 @@ def test_command_save_recovers_from_expired_session(logged_in_page_with_device, 
     expect(page.locator("#sessionExpiredModal")).to_have_class(re.compile(r"\bshow\b"))
 
 
-@pytest.mark.xfail(
-    reason=(
-        "known pre-existing gap outside Task 10 scope: a 200 response with an "
-        "unparsable body crashes persistCommands()'s success path (DEVICES = "
-        "undefined). Fixing static/index.html is out of scope here."
-    ),
-    strict=False,
-)
-def test_command_save_survives_malformed_response(logged_in_page_with_device, app_server_with_device):
+def test_command_save_recovers_from_malformed_response(logged_in_page_with_device, app_server_with_device):
+    """A 200 response with an unparsable body is treated as a failure, so
+    persistCommands() reports the failed save and the modal stays open,
+    rather than reading an undefined device list and crashing.
+    """
     page = logged_in_page_with_device
     page.route(
         f"**/api/devices/{SEEDED_DEVICE_ID}/commands",
@@ -102,5 +97,6 @@ def test_command_save_survives_malformed_response(logged_in_page_with_device, ap
     page.on("pageerror", lambda exc: errors.append(str(exc)))
     _open_and_fill(page)
     page.click("#cmdSave")
-    page.wait_for_timeout(300)
-    assert not errors, f"known gap: malformed 200 crashes persistCommands' success path: {errors}"
+    _assert_modal_recovered(page)
+    expect(page.locator("#cmdErr")).to_contain_text("Save failed")
+    assert not errors, f"malformed 200 must not crash persistCommands: {errors}"

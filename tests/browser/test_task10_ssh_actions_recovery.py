@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
 from playwright.sync_api import expect
 
 from tests.browser.conftest import SEEDED_DEVICE_ID
@@ -64,11 +63,10 @@ def test_custom_command_restores_typed_text_on_expired_session(connected_device_
     expect(page.locator("#sessionExpiredModal")).to_have_class(re.compile(r"\bshow\b"))
 
 
-def test_custom_command_survives_malformed_response(connected_device_page, app_server_with_device):
-    # A 200 with an unparsable body is treated as bare success by api(), so
-    # runCustom() takes its success branch (the input, already cleared
-    # optimistically, is left empty rather than restored). This just checks
-    # that path does not crash or leak the raw body.
+def test_custom_command_restores_typed_text_on_malformed_response(connected_device_page, app_server_with_device):
+    # A 200 with an unparsable body is treated as a failure by api(), so
+    # runCustom() takes its failure branch and restores the typed text, the
+    # same as any other failed run. The raw body must not leak.
     page = connected_device_page
     errors: list[str] = []
     page.on("pageerror", lambda exc: errors.append(str(exc)))
@@ -76,8 +74,8 @@ def test_custom_command_survives_malformed_response(connected_device_page, app_s
         "**/api/ssh/run",
         lambda route: route.fulfill(status=200, content_type="application/json", body="not json{"),
     )
-    _run_custom(page)
-    page.wait_for_timeout(300)
+    input_ = _run_custom(page)
+    expect(input_).to_have_value(CUSTOM_COMMAND)
     assert not errors
     expect(page.locator("body")).not_to_contain_text("not json")
 
@@ -114,28 +112,16 @@ def test_host_key_view_shows_error_on_expired_session(logged_in_page_with_device
     expect(banner).to_contain_text("Your session has expired")
 
 
-@pytest.mark.xfail(
-    reason=(
-        "real gap found by this test, outside Task 10 scope: a 200 response "
-        "with an unparsable body is treated as bare success by api(), so the "
-        "handler falls into its 'no key pinned yet' branch, but that branch "
-        "reads r.host (missing on the fake success object) and renders "
-        "'No key pinned yet for undefined.' Fixing static/index.html is out "
-        "of scope for this change; flagging rather than silently omitting."
-    ),
-    strict=False,
-)
-def test_host_key_view_survives_malformed_response(logged_in_page_with_device, app_server_with_device):
-    # A 200 with an unparsable body is treated as bare success by api(), so
-    # the handler's `r.known && r.entries` check is false and it falls back
-    # to its own "no key pinned yet" message rather than rendering anything
-    # from the response.
+def test_host_key_view_shows_error_on_malformed_response(logged_in_page_with_device, app_server_with_device):
+    # A 200 with an unparsable body is treated as a failure by api(), so the
+    # handler shows an error banner instead of falling into its "no key pinned
+    # yet" branch and rendering "No key pinned yet for undefined."
     page = logged_in_page_with_device
     page.route(
         "**/api/ssh/host_key/*",
         lambda route: route.fulfill(status=200, content_type="application/json", body="not json{"),
     )
     _card(page).locator("[data-hostkey]").click()
-    info = page.locator("#confirmMsg")
-    expect(info).to_contain_text("No key pinned yet")
-    expect(info).not_to_contain_text("undefined")
+    banner = page.locator(".error-banner .eb-text")
+    expect(banner).to_contain_text("unexpected response")
+    expect(page.locator("body")).not_to_contain_text("undefined")
