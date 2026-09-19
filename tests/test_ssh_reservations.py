@@ -268,6 +268,60 @@ def test_cancel_before_channel_is_wired_still_takes_effect(monkeypatch):
     assert any("cancelled" in str(call) for call in logs)
 
 
+def test_reconnect_failure_after_retiring_a_live_session_unlocks_and_goes_idle(monkeypatch):
+    mgr = _mgr()
+    device = _device()
+
+    # First, a real successful connect so the device ends up connected and
+    # locked, exactly like a browser would see it.
+    def ok_connect(self):
+        self.client = _FakeClient()
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", ok_connect)
+    result1 = mgr.connect("d1", "pw", device, "owner-1")
+    assert result1 == {"ok": True}
+    assert mgr.sessions["d1"].state == "connected"
+
+    statuses = []
+    locks = []
+    monkeypatch.setattr(mgr, "_status", lambda did, state, owner=None, gen=None: statuses.append((did, state)))
+    monkeypatch.setattr(mgr, "_lock", lambda did, locked, gen=None: locks.append((did, locked)))
+
+    # Same owner reconnects, retiring the live session, but the replacement
+    # connect fails outright.
+    def boom(self):
+        raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", boom)
+    result2 = mgr.connect("d1", "pw", device, "owner-1")
+
+    assert result2["ok"] is False
+    assert "d1" not in mgr.sessions
+    assert ("d1", "idle") in statuses
+    assert ("d1", False) in locks
+
+
+def test_fresh_failed_connect_with_no_prior_session_does_not_unlock(monkeypatch):
+    mgr = _mgr()
+    device = _device()
+
+    statuses = []
+    locks = []
+    monkeypatch.setattr(mgr, "_status", lambda did, state, owner=None, gen=None: statuses.append((did, state)))
+    monkeypatch.setattr(mgr, "_lock", lambda did, locked, gen=None: locks.append((did, locked)))
+
+    def boom(self):
+        raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", boom)
+    result = mgr.connect("d1", "pw", device, "owner-1")
+
+    assert result["ok"] is False
+    assert "d1" not in mgr.sessions
+    assert statuses == []
+    assert locks == []
+
+
 def test_locked_device_ids_and_owner_connected_ids_exclude_reserved_sessions():
     mgr = _mgr()
     device = _device()
