@@ -1219,9 +1219,10 @@ $('retryRecovery').onclick = async () => {
     }
   } catch (error) {
     $('recoveryRetryStatus').textContent = 'Recovery could not finish. Data remains protected.';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Try recovery again';
   }
-  button.disabled = false;
-  button.textContent = 'Try recovery again';
 };
 
 function renderTabs() {
@@ -1449,45 +1450,48 @@ function wireCard(card, d) {
   async function tryConnect() {
     err.classList.remove('show'); err.textContent = '';
     connectBtn.disabled = true; connectBtn.textContent = 'Connecting…';
-    const r = await sshPost('/api/ssh/connect', {device_id: id, password: pwInput.value});
-    connectBtn.disabled = false; connectBtn.textContent = 'Connect';
-    if (r.ok) { pwInput.value = ''; setActiveTab(id); return; }
-    if (r.in_use) { err.textContent = r.error || 'This device is in use by another session.'; err.classList.add('show'); return; }
-    if (r.host_key_unknown) {
-      askConfirm('Unknown host key',
-        `First connection to ${r.host}.\n\nType: ${r.key_type}\nFingerprint: ${r.fingerprint}\n\nAccept and remember this host?`,
-        async () => {
-          const t = await sshPost('/api/ssh/trust_key', {device_id: id, code: r.code});
-          if (!t.ok) {
-            err.textContent = t.expired
-              ? 'This host-key prompt expired or was already used. Reconnect to try again.'
-              : t.error;
-            err.classList.add('show');
-            return;
-          }
-          tryConnect();
-        }, 'Accept & connect', 'Cancel',
-        () => { sshPost('/api/ssh/reject_key', {device_id: id, code: r.code}); });
-      return;
+    try {
+      const r = await sshPost('/api/ssh/connect', {device_id: id, password: pwInput.value});
+      if (r.ok) { pwInput.value = ''; setActiveTab(id); return; }
+      if (r.in_use) { err.textContent = r.error || 'This device is in use by another session.'; err.classList.add('show'); return; }
+      if (r.host_key_unknown) {
+        askConfirm('Unknown host key',
+          `First connection to ${r.host}.\n\nType: ${r.key_type}\nFingerprint: ${r.fingerprint}\n\nAccept and remember this host?`,
+          async () => {
+            const t = await sshPost('/api/ssh/trust_key', {device_id: id, code: r.code});
+            if (!t.ok) {
+              err.textContent = t.expired
+                ? 'This host-key prompt expired or was already used. Reconnect to try again.'
+                : t.error;
+              err.classList.add('show');
+              return;
+            }
+            tryConnect();
+          }, 'Accept & connect', 'Cancel',
+          () => { sshPost('/api/ssh/reject_key', {device_id: id, code: r.code}); });
+        return;
+      }
+      if (r.host_key_changed) {
+        askConfirm('⚠ Host key changed',
+          `The key for ${r.host} has CHANGED.\n\nOld: ${r.old_fingerprint}\nNew (${r.key_type}): ${r.new_fingerprint}\n\nOnly replace if you expected this (e.g. OS reinstall).`,
+          async () => {
+            const t = await sshPost('/api/ssh/trust_key', {device_id: id, code: r.code});
+            if (!t.ok) {
+              err.textContent = t.expired
+                ? 'This host-key prompt expired or was already used. Reconnect to try again.'
+                : t.error;
+              err.classList.add('show');
+              return;
+            }
+            tryConnect();
+          }, 'Replace key', 'Cancel',
+          () => { sshPost('/api/ssh/reject_key', {device_id: id, code: r.code}); });
+        return;
+      }
+      err.textContent = r.error; err.classList.add('show');
+    } finally {
+      connectBtn.disabled = false; connectBtn.textContent = 'Connect';
     }
-    if (r.host_key_changed) {
-      askConfirm('⚠ Host key changed',
-        `The key for ${r.host} has CHANGED.\n\nOld: ${r.old_fingerprint}\nNew (${r.key_type}): ${r.new_fingerprint}\n\nOnly replace if you expected this (e.g. OS reinstall).`,
-        async () => {
-          const t = await sshPost('/api/ssh/trust_key', {device_id: id, code: r.code});
-          if (!t.ok) {
-            err.textContent = t.expired
-              ? 'This host-key prompt expired or was already used. Reconnect to try again.'
-              : t.error;
-            err.classList.add('show');
-            return;
-          }
-          tryConnect();
-        }, 'Replace key', 'Cancel',
-        () => { sshPost('/api/ssh/reject_key', {device_id: id, code: r.code}); });
-      return;
-    }
-    err.textContent = r.error; err.classList.add('show');
   }
 
   connectBtn.onclick = e => { e.stopPropagation(); tryConnect(); };
@@ -1684,11 +1688,17 @@ $('cmdSave').onclick   = async () => {
   if (!d.commands) d.commands = [];
   if (cmdCtx.index !== null) d.commands[cmdCtx.index] = obj;
   else d.commands.push(obj);
-  const okSaved = await persistCommands(d);
-  if (okSaved) {
-    $('cmdModal').classList.remove('show');
-  } else {
-    $('cmdErr').textContent = 'Save failed. Your command was not stored. Fix and try again, or close to discard.';
+  const btn = $('cmdSave'); const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const okSaved = await persistCommands(d);
+    if (okSaved) {
+      $('cmdModal').classList.remove('show');
+    } else {
+      $('cmdErr').textContent = 'Save failed. Your command was not stored. Fix and try again, or close to discard.';
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = label;
   }
 };
 $('addCmdBtn').onclick = () => { if (currentDeviceId) openCmdEditor(currentDeviceId, null); };
@@ -1749,13 +1759,19 @@ $('devSave').onclick   = async () => {
   const port = parseInt($('fPort').value) || 9100;
   if (!name || !host || !user) { $('devErr').textContent = 'Name, host and username are required.'; return; }
   const body = {id: $('fId').value || null, name, host, username: user, metrics_port: port};
-  const r = await POST('/api/devices', body);
-  if (!r.ok) { $('devErr').textContent = r.error || 'Save failed.'; return; }
-  DEVICES = r.devices;
-  $('deviceModal').classList.remove('show');
-  renderDevices(); renderStats(); renderLibrary();
-  const saved = DEVICES.find(x => x.name === name && x.host === host);
-  if (saved) selectDevice(saved.id);
+  const btn = $('devSave'); const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const r = await POST('/api/devices', body);
+    if (!r.ok) { $('devErr').textContent = r.error || 'Save failed.'; return; }
+    DEVICES = r.devices;
+    $('deviceModal').classList.remove('show');
+    renderDevices(); renderStats(); renderLibrary();
+    const saved = DEVICES.find(x => x.name === name && x.host === host);
+    if (saved) selectDevice(saved.id);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
 };
 
 /* ============================================================
@@ -1901,8 +1917,13 @@ $('clearBtn').onclick = () => {
 /* ============================================================
    Debug log toggle
    ============================================================ */
-$('debugChk').addEventListener('change', () => {
-  POST('/api/debug', {enabled: $('debugChk').checked});
+$('debugChk').addEventListener('change', async () => {
+  const desired = $('debugChk').checked;
+  const r = await POST('/api/debug', {enabled: desired});
+  if (!r || !r.ok) {
+    $('debugChk').checked = !desired;
+    showErrorBanner('Could not change debug logging. The setting was not applied.');
+  }
 });
 
 /* ============================================================
@@ -1938,9 +1959,10 @@ $('updateBtn').onclick = async () => {
     notice.textContent = "Couldn't reach GitHub to check for updates.";
     fadeNotice();
     openUpdateErrorModal();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check for updates';
   }
-  btn.disabled = false;
-  btn.textContent = 'Check for updates';
 };
 
 function fadeNotice() {
