@@ -895,9 +895,10 @@ async function api(method, path, body, extraHeaders) {
   const timer = setTimeout(() => { timedOutByUs = true; controller.abort(); }, 20000);
   opts.signal = controller.signal;
 
-  let r;
+  let r, text;
   try {
     r = await fetch(path, opts);
+    text = await r.text();
   } catch (e) {
     if (timedOutByUs) {
       return apiFailure('The server took too long to respond. Please try again.', {timedOut: true});
@@ -907,7 +908,6 @@ async function api(method, path, body, extraHeaders) {
     clearTimeout(timer);
   }
 
-  const text = await r.text();
   let parsed = null;
   if (text) {
     try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
@@ -929,7 +929,11 @@ async function api(method, path, body, extraHeaders) {
     return apiFailure('Your session has expired. Please sign in again.', {status: r.status, authExpired: true});
   }
 
-  if (isObject) return parsed;
+  // Only forward the parsed body when it is the app's own error shape
+  // ({ok:false, error: "..."}); anything else (e.g. FastAPI's generic
+  // {"detail": "..."} 500 body) falls through to the friendly messages
+  // below so callers never see a blank or raw server error.
+  if (isObject && typeof parsed.error === 'string') return parsed;
 
   if (r.status >= 500 && r.status <= 599) {
     return apiFailure('The server hit an error. Please try again.', {status: r.status});

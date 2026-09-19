@@ -431,11 +431,23 @@ class SSHManager:
             with self._device_lock(device_id):
                 if self.sessions.get(device_id) is sess:
                     del self.sessions[device_id]
+                    removed = True
+                else:
+                    removed = False
+            if removed and old_sess is not None:
+                self._status(device_id, "idle", owner)
+                self._lock(device_id, False)
             return {"ok": False, "error": "Authentication failed. Check username and password."}
         except Exception as e:
             with self._device_lock(device_id):
                 if self.sessions.get(device_id) is sess:
                     del self.sessions[device_id]
+                    removed = True
+                else:
+                    removed = False
+            if removed and old_sess is not None:
+                self._status(device_id, "idle", owner)
+                self._lock(device_id, False)
             return {"ok": False, "error": f"Could not connect: {e}"}
 
         with self._device_lock(device_id):

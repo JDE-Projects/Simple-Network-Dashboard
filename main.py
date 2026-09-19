@@ -54,7 +54,7 @@ MIN_METRICS_PORT = 1
 MAX_METRICS_PORT = 65535
 
 APP_NAME    = "Simple Network Dashboard"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 # Runtime storage roots. Default to the installed Linux locations; override with
 # SND_DATA_DIR / SND_LOG_DIR to run the app off Linux (local development, tests).
