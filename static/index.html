@@ -326,7 +326,7 @@
   .ln .tag { flex: none; color: var(--text-faint); font-size: 10px; width: 64px; text-align: right; opacity: 0.7; padding-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ln .msg { flex: 1; }
   .ln.cmd  .msg { color: var(--accent); font-weight: 600; }
-  .ln.cmd .reveal-toggle { cursor: pointer; text-decoration: underline; opacity: 0.75; }
+  .ln.cmd .reveal-toggle { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-decoration: underline; opacity: 0.75; }
   .ln.cmd .reveal-toggle:hover { opacity: 1; }
   .ln.ok   .msg { color: var(--green); }
   .ln.err  .msg { color: var(--red); }
@@ -637,9 +637,9 @@
 <div class="overlay" id="exportPrompt">
   <div class="modal" style="width:440px;">
     <h3>Export console</h3>
-    <p class="hint" style="white-space:pre-line; overflow-wrap:anywhere;">This console includes custom commands you typed. Choose how they appear in the exported file.
+    <p class="hint" style="white-space:pre-line; overflow-wrap:anywhere;">This console can include custom commands you typed and commands you ran from a device's saved library. Choose how they appear in the exported file.
 
-"Show commands" writes the exact text you entered. "Hide commands" replaces each with "Custom Command" so nothing you typed lands in the file.</p>
+"Show commands" writes the exact command text. "Hide commands" replaces each with a generic label ("Custom Command" or "Library Command") so no command text lands in the file.</p>
     <div class="modal-actions">
       <button class="btn ghost" id="exportCancel">Cancel</button>
       <button class="btn ghost" id="exportShow">Show commands</button>
@@ -751,9 +751,9 @@ let askSaveCustom = true;
 let confirmCb = null;
 let confirmCancelCb = null;
 let cmdCtx    = null;   // {deviceId, index|null}
-const customCmdById = new Map();   // tag -> the real typed command, awaiting its echoed console line (client-side only, never sent to server, never persisted)
+const customCmdById = new Map();   // tag -> {command, placeholder}, awaiting its echoed console line (client-side only, never sent to server, never persisted)
 let _cmdSeq = 0;
-const customCmdText = new WeakMap();   // .ln element -> the real typed command (memory only, never in the DOM or persisted unless the user picks Show on export)
+const customCmdText = new WeakMap();   // .ln element -> {command, placeholder} (memory only, never in the DOM or persisted unless the user picks Show on export)
 let saveCtx   = null;   // {deviceId, command, sudo}
 let copyState = null;   // {srcId, idx}
 const MAX_LINES = 1500;
@@ -1127,22 +1127,25 @@ function consoleFor(id) {
   return el;
 }
 
-/* Builds the console line for a custom-command echo without ever putting the
-   real typed command into stored/exportable text. The real command is looked
+/* Builds the console line for a concealed-command echo without ever putting the
+   real command into stored/exportable text. The real command is looked
    up by its tag (see customCmdById) rather than pulled from a queue, so it
    toggles on/off on click without depending on message order or timing. */
-function renderCustomCmd(msgEl, real) {
-  if (real === null) {
-    msgEl.textContent = '$ Custom Command';
+function renderCustomCmd(msgEl, entry) {
+  if (entry === null) {
+    msgEl.textContent = '$ Command';
     return;
   }
   let shown = false;
   const label  = document.createElement('span');
-  const toggle = document.createElement('span');
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
   toggle.className = 'reveal-toggle';
   function paint() {
-    label.textContent  = shown ? ('$ ' + real + ' ') : '$ Custom Command ';
+    label.textContent  = shown ? ('$ ' + entry.command + ' ') : ('$ ' + entry.placeholder + ' ');
     toggle.textContent = shown ? '(hide)' : '(click to reveal)';
+    toggle.setAttribute('aria-expanded', String(shown));
+    toggle.setAttribute('aria-label', shown ? 'Hide command' : 'Reveal command');
   }
   toggle.onclick = () => { shown = !shown; paint(); };
   paint();
@@ -1161,10 +1164,10 @@ function addLine(id, text, level, cmdId) {
   const msgEl = ln.querySelector('.msg');
   if (level === 'cmd' && cmdId != null) {
     ln.classList.add('custom-cmd');
-    const real = customCmdById.has(cmdId) ? customCmdById.get(cmdId) : null;
+    const entry = customCmdById.has(cmdId) ? customCmdById.get(cmdId) : null;
     customCmdById.delete(cmdId);
-    if (real !== null) customCmdText.set(ln, real);
-    renderCustomCmd(msgEl, real);
+    if (entry !== null) customCmdText.set(ln, entry);
+    renderCustomCmd(msgEl, entry);
   } else {
     msgEl.textContent = text;
   }
@@ -1539,7 +1542,7 @@ function wireCard(card, d) {
     // (busy, not connected, owned by another session), remove the tag so it
     // can never be attached to a later, unrelated line.
     const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
-    customCmdById.set(cmdId, cmd);
+    customCmdById.set(cmdId, {command: cmd, placeholder: 'Custom Command'});
     const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId});
     if (r && r.ok) {
       // stored above; its echoed line will consume the tag
@@ -1630,9 +1633,15 @@ function renderLibrary() {
 function runLibCmd(deviceId, index) {
   const d = dev(deviceId); if (!d) return;
   const c = (d.commands || [])[index]; if (!c) return;
-  const go = () => {
+  const go = async () => {
     ensureTab(deviceId); setActiveTab(deviceId);
-    sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name});
+    const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
+    customCmdById.set(cmdId, {command: c.command, placeholder: 'Library Command'});
+    const r = await sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name, cmd_id: cmdId});
+    if (!(r && r.ok)) {
+      customCmdById.delete(cmdId);
+      if (r && r.error) addLine(deviceId, r.error, 'err');
+    }
   };
   if (c.confirm) askConfirm(c.name, c.confirm, go);
   else go();
@@ -1885,7 +1894,8 @@ function doExport(showCustom) {
     const t = ln.querySelector('.tag').textContent;
     let m;
     if (ln.classList.contains('custom-cmd')) {
-      m = (showCustom && customCmdText.has(ln)) ? ('$ ' + customCmdText.get(ln)) : '$ Custom Command';
+      const entry = customCmdText.get(ln);
+      m = (showCustom && entry) ? ('$ ' + entry.command) : ('$ ' + (entry ? entry.placeholder : 'Command'));
     } else {
       m = ln.querySelector('.msg').textContent;
     }
