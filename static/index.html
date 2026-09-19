@@ -659,6 +659,17 @@
   </div>
 </div>
 
+<!-- session expired modal -->
+<div class="overlay" id="sessionExpiredModal">
+  <div class="modal" style="width:400px;">
+    <h3>Session expired</h3>
+    <p class="hint">Your session has expired. Please sign in again. Anything you were typing is still here until you leave this page.</p>
+    <div class="modal-actions">
+      <button class="btn primary" id="sessionExpiredSignIn">Sign in</button>
+    </div>
+  </div>
+</div>
+
 <!-- copy-to-device picker -->
 <div class="overlay" id="copyModal">
   <div class="modal" style="width:400px;">
@@ -864,6 +875,14 @@ function apiFailure(error, {status = 0, timedOut = false, authExpired = false} =
   return {ok: false, error, netError: true, status, timedOut, authExpired};
 }
 
+let _sessionExpiredShown = false;
+function showSessionExpired() {
+  if (_sessionExpiredShown) return;
+  _sessionExpiredShown = true;
+  $('sessionExpiredModal').classList.add('show');
+}
+$('sessionExpiredSignIn').onclick = () => location.assign('/login');
+
 async function api(method, path, body, extraHeaders) {
   const headers = {'Content-Type': 'application/json'};
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) headers['X-CSRF-Token'] = csrfToken();
@@ -900,6 +919,7 @@ async function api(method, path, body, extraHeaders) {
   }
 
   if (r.status === 401 || r.status === 403) {
+    showSessionExpired();
     return apiFailure('Your session has expired. Please sign in again.', {status: r.status, authExpired: true});
   }
 
@@ -1516,6 +1536,7 @@ function wireCard(card, d) {
     } else {
       customCmdById.delete(cmdId);
       if (r && r.error) addLine(id, r.error, 'err');
+      input.value = cmd; // restore the typed command so it can be corrected and retried
     }
     maybeOfferSave(id, cmd, sudo);
   };
@@ -1608,10 +1629,12 @@ function runLibCmd(deviceId, index) {
 }
 
 async function persistCommands(d) {
+  let ok = false;
   try {
     const r = await PUT(`/api/devices/${d.id}/commands`, {commands: d.commands});
     if (r.ok) {
       DEVICES = r.devices;
+      ok = true;
     } else {
       showErrorBanner(r.error || 'Save failed: your change was NOT stored.');
       const rollback = await GET('/api/devices');  // roll back the optimistic local edit
@@ -1626,6 +1649,7 @@ async function persistCommands(d) {
   }
   renderDevices();
   renderLibrary();
+  return ok;
 }
 
 function deleteCmd(deviceId, index) {
@@ -1651,7 +1675,7 @@ function openCmdEditor(deviceId, index) {
   setTimeout(() => $('cName').focus(), 40);
 }
 $('cmdCancel').onclick = () => $('cmdModal').classList.remove('show');
-$('cmdSave').onclick   = () => {
+$('cmdSave').onclick   = async () => {
   const name    = $('cName').value.trim();
   const command = $('cCmd').value.trim();
   if (!name || !command) { $('cmdErr').textContent = 'Name and command are required.'; return; }
@@ -1660,8 +1684,12 @@ $('cmdSave').onclick   = () => {
   if (!d.commands) d.commands = [];
   if (cmdCtx.index !== null) d.commands[cmdCtx.index] = obj;
   else d.commands.push(obj);
-  $('cmdModal').classList.remove('show');
-  persistCommands(d);
+  const okSaved = await persistCommands(d);
+  if (okSaved) {
+    $('cmdModal').classList.remove('show');
+  } else {
+    $('cmdErr').textContent = 'Save failed. Your command was not stored. Fix and try again, or close to discard.';
+  }
 };
 $('addCmdBtn').onclick = () => { if (currentDeviceId) openCmdEditor(currentDeviceId, null); };
 
