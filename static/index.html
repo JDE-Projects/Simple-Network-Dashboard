@@ -915,7 +915,13 @@ async function api(method, path, body, extraHeaders) {
   const isObject = parsed !== null && typeof parsed === 'object';
 
   if (r.ok) {
-    return isObject ? parsed : {ok: true};
+    if (isObject) return parsed;
+    // An empty 2xx body is a legitimate bare success. A non-empty body we
+    // could not parse into an object is not: treating it as success would let
+    // callers read fields that are not there (undefined device lists, host
+    // keys, versions). Surface it as a failure so those paths recover.
+    if (!text) return {ok: true};
+    return apiFailure('The server sent an unexpected response. Please try again.', {status: r.status});
   }
 
   if (r.status === 401 || r.status === 403) {
