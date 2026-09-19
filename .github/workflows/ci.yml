@@ -5,8 +5,12 @@ on:
     branches: [main]
 jobs:
   ci:
-    uses: JDE-Projects/Build-Tools/.github/workflows/ci.yml@5ecb1d806d02d7dbf6af2b53c932b7e7cb64a7ed # Build-Tools main (ruff, import check, pytest)
+    uses: JDE-Projects/Build-Tools/.github/workflows/ci.yml@11b8f56cafce614e93f8453826251598311a31b9 # Build-Tools (ruff, import check, pytest, dev-pins, runtime-lock, shellcheck)
     permissions:
       contents: read
     with:
       entry_script: "main.py"
+      verify_dev_pins: true
+      verify_runtime_lock: true
+      shellcheck: true
+      shellcheck_paths: "install.sh uninstall.sh"

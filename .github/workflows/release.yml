@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 jobs:
   release:
-    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@5ecb1d806d02d7dbf6af2b53c932b7e7cb64a7ed # Build-Tools main (CI checks + RC tags auto-marked prerelease)
+    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@11b8f56cafce614e93f8453826251598311a31b9 # Build-Tools (CI checks + dev-pins, runtime-lock, release-version, shellcheck; RC tags auto-marked prerelease)
     permissions:
       id-token: write
       attestations: write
@@ -13,3 +13,8 @@ jobs:
     with:
       app_name: simple-network-dashboard
       entry_script: "main.py"
+      verify_dev_pins: true
+      verify_runtime_lock: true
+      verify_release_version: true
+      shellcheck: true
+      shellcheck_paths: "install.sh uninstall.sh"
