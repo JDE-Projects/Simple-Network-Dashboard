@@ -17,6 +17,7 @@ pytest suite still runs everywhere.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
 import socket
@@ -105,6 +106,32 @@ def _seed_auth_state(data_dir: Path) -> None:
     publish_auth_state(data_dir / "auth.json", create_auth_state(DASHBOARD_PASSWORD))
 
 
+# A single seeded device for tests that need one already present (connect,
+# host-key view, custom-command run, command-save). Mirrors the on-disk shape
+# main.py writes: {"_app": ..., "devices": [...]} (see main.py's _save()).
+SEEDED_DEVICE_ID = "dev_browsertest01"
+SEEDED_DEVICE_HOST = "10.0.0.99"
+SEEDED_DEVICE_NAME = "Seeded Test Device"
+
+
+def _seed_devices(data_dir: Path) -> None:
+    """Write a minimal devices.json with one device so tests skip Add Device."""
+    payload = {
+        "_app": "Simple Network Dashboard",
+        "devices": [
+            {
+                "id": SEEDED_DEVICE_ID,
+                "name": SEEDED_DEVICE_NAME,
+                "host": SEEDED_DEVICE_HOST,
+                "username": "tester",
+                "metrics_port": 9100,
+                "commands": [],
+            }
+        ],
+    }
+    (data_dir / "devices.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def _wait_for_server(base_url: str, process: subprocess.Popen) -> None:
     """Poll the login page until the HTTPS server answers, or fail loudly."""
     context = ssl.create_default_context()
@@ -125,14 +152,15 @@ def _wait_for_server(base_url: str, process: subprocess.Popen) -> None:
     raise RuntimeError(f"app server did not become ready within {_SERVER_START_TIMEOUT}s: {last_error}")
 
 
-@pytest.fixture
-def app_server(tmp_path: Path) -> str:
-    """Run the dashboard over HTTPS on fresh temp storage; yield its base URL."""
+def _start_app_server(tmp_path: Path, *, with_device: bool = False):
+    """Shared body for the app_server fixtures: start uvicorn on fresh storage."""
     data_dir = tmp_path / "data"
     log_dir = tmp_path / "log"
     data_dir.mkdir()
     log_dir.mkdir()
     _seed_auth_state(data_dir)
+    if with_device:
+        _seed_devices(data_dir)
 
     cert_path = tmp_path / "cert.pem"
     key_path = tmp_path / "key.pem"
@@ -171,6 +199,18 @@ def app_server(tmp_path: Path) -> str:
             process.wait(timeout=10)
 
 
+@pytest.fixture
+def app_server(tmp_path: Path) -> str:
+    """Run the dashboard over HTTPS on fresh temp storage; yield its base URL."""
+    yield from _start_app_server(tmp_path)
+
+
+@pytest.fixture
+def app_server_with_device(tmp_path: Path) -> str:
+    """Like app_server, but devices.json is seeded with one device already."""
+    yield from _start_app_server(tmp_path, with_device=True)
+
+
 @pytest.fixture(scope="session")
 def _chromium_available(browser_type) -> None:
     """Skip the whole browser suite when Playwright's Chromium is not installed."""
@@ -197,4 +237,58 @@ def logged_in_page(_chromium_available, page, app_server: str):
     # app's Content Security Policy forbids eval, so use a locator assertion
     # (DOM snapshot polling) rather than wait_for_function (page-side eval).
     expect(page.locator("#verLabel")).to_have_text(re.compile(r"^v"))
+    return page
+
+
+@pytest.fixture
+def logged_in_page_with_device(_chromium_available, page, app_server_with_device: str):
+    """Like logged_in_page, but one device card is already on the dashboard."""
+    page.goto(f"{app_server_with_device}/login")
+    page.fill("#password", DASHBOARD_PASSWORD)
+    page.click("#submit")
+    page.wait_for_url(f"{app_server_with_device}/")
+    expect(page.locator("#verLabel")).to_have_text(re.compile(r"^v"))
+    expect(page.locator(f'[data-card="{SEEDED_DEVICE_ID}"]')).to_be_visible()
+    return page
+
+
+@pytest.fixture
+def connected_device_page(_chromium_available, page, app_server_with_device: str):
+    """A logged-in page whose one device already looks SSH-connected.
+
+    The seeded device's host is not a real SSH server, so a genuine connect
+    would just fail. Instead this passes the real WebSocket traffic straight
+    through to the live server (so login and the dashboard's own 'init' state
+    still work normally), then injects one extra 'ssh_status: connected'
+    frame on the client side only. That flips the same client-side state
+    (SSH_STATE / the card's 'ssh-on' class) a real successful connect would,
+    which is what reveals the custom-command input the recovery tests need to
+    reach. The server never sees a real connection, so nothing there needs
+    cleanup; the app_server fixture kills the process at teardown regardless.
+    """
+    ws_routes: list = []
+
+    def handle_ws(ws) -> None:
+        server = ws.connect_to_server()
+        ws.on_message(lambda message: server.send(message))
+        server.on_message(lambda message: ws.send(message))
+        ws_routes.append(ws)
+
+    page.route_web_socket(re.compile(r"/ws"), handle_ws)
+
+    page.goto(f"{app_server_with_device}/login")
+    page.fill("#password", DASHBOARD_PASSWORD)
+    page.click("#submit")
+    page.wait_for_url(f"{app_server_with_device}/")
+    expect(page.locator("#verLabel")).to_have_text(re.compile(r"^v"))
+    card = page.locator(f'[data-card="{SEEDED_DEVICE_ID}"]')
+    expect(card).to_be_visible()
+
+    assert ws_routes, "the dashboard's WebSocket never connected"
+    ws_routes[0].send(json.dumps({
+        "type": "ssh_status",
+        "device_id": SEEDED_DEVICE_ID,
+        "state": "connected",
+    }))
+    expect(card).to_have_class(re.compile(r"\bssh-on\b"))
     return page
