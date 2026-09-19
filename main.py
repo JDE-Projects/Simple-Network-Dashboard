@@ -56,8 +56,10 @@ MAX_METRICS_PORT = 65535
 APP_NAME    = "Simple Network Dashboard"
 APP_VERSION = "1.5.1"
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = "/var/lib/simple-network-dashboard"
-LOG_DIR = "/var/log/simple-network-dashboard"
+# Runtime storage roots. Default to the installed Linux locations; override with
+# SND_DATA_DIR / SND_LOG_DIR to run the app off Linux (local development, tests).
+DATA_DIR = os.environ.get("SND_DATA_DIR", "/var/lib/simple-network-dashboard")
+LOG_DIR = os.environ.get("SND_LOG_DIR", "/var/log/simple-network-dashboard")
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 DASHBOARD_ROOT_CERT = os.path.join(DATA_DIR, "caddy-root-ca.crt")
 AUTH_FILE = os.path.join(DATA_DIR, "auth.json")

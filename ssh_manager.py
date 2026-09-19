@@ -23,7 +23,8 @@ HOST_KEY_PENDING_SECONDS = 300   # a host-key prompt expires 5 minutes after it 
 
 _EXPIRED_ERROR = "This host-key prompt expired or was already used. Reconnect to try again."
 
-DATA_DIR         = "/var/lib/simple-network-dashboard"
+# Shares SND_DATA_DIR with main.py so known_hosts stays with the rest of the data.
+DATA_DIR         = os.environ.get("SND_DATA_DIR", "/var/lib/simple-network-dashboard")
 KNOWN_HOSTS_FILE = os.path.join(DATA_DIR, "known_hosts")
 
 # Strip ANSI escape sequences and dpkg progress spam from command output
