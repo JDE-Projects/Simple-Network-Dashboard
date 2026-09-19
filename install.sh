@@ -360,7 +360,10 @@ install_caddy_if_fresh() {
     fi
 
     apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg || return 1
-    command -v curl &>/dev/null && command -v gpg &>/dev/null || { echo "Error: Caddy prerequisites did not install curl and gpg."; return 1; }
+    if ! command -v curl &>/dev/null || ! command -v gpg &>/dev/null; then
+        echo "Error: Caddy prerequisites did not install curl and gpg."
+        return 1
+    fi
     caddy_key=$(mktemp) || return 1
     caddy_list=$(mktemp) || { rm -f -- "$caddy_key"; return 1; }
     trap 'rm -f -- "$caddy_key" "$caddy_list"' RETURN
@@ -1351,8 +1354,10 @@ echo "Simple Network Dashboard is running."
 echo "Open https://${HTTPS_HOST}:${HTTPS_PORT} in your browser."
 echo "Certificate setup: https://${HTTPS_HOST}:${HTTPS_PORT}/certificate-setup"
 echo "Before importing the certificate, compare this command's SHA-256 checksum with the checksum printed above:"
+# shellcheck disable=SC2016  # literal PowerShell shown for the user to copy; $env must not be expanded by bash
 echo 'Get-FileHash -Path "$env:USERPROFILE\Downloads\caddy-root-ca.crt" -Algorithm SHA256'
 echo "Import it only after the checksums match:"
+# shellcheck disable=SC2016  # literal PowerShell shown for the user to copy; $env must not be expanded by bash
 echo 'Import-Certificate -FilePath "$env:USERPROFILE\Downloads\caddy-root-ca.crt" -CertStoreLocation Cert:\CurrentUser\Root'
 echo "To uninstall later: sudo bash $APP_DIR/uninstall.sh"
 if [ "$ADDED_TO_GROUP" = true ]; then
