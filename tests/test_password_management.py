@@ -375,6 +375,25 @@ test "$(cat "$RESET_COMMAND")" = foreign
     assert result.returncode == 0, result.stderr
 
 
+def test_uninstaller_removes_owned_reset_command() -> None:
+    result = _run_bash_contract(
+        """
+source ./uninstall.sh
+TEST_ROOT=$(mktemp -d)
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+APP_DIR="$TEST_ROOT/app"
+RESET_COMMAND="$TEST_ROOT/snd-reset-password"
+mkdir -p "$APP_DIR"
+cp snd-reset-password "$APP_DIR/snd-reset-password"
+cp snd-reset-password "$RESET_COMMAND"
+stat() { printf '0:0:755\\n'; }
+remove_owned_reset_command
+test ! -e "$RESET_COMMAND"
+"""
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_installer_rejects_marker_and_metadata_spoof_without_matching_deployed_wrapper() -> None:
     result = _run_bash_contract(
         """
