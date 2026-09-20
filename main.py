@@ -42,6 +42,7 @@ from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageErr
 
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
+WS_REVALIDATE_SECONDS = 10  # how often a live WebSocket re-checks that the session token it connected with is still valid
 MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MB cap on incoming HTTP request bodies
 MAX_DEVICES = 250  # cap on total saved devices
 MAX_COMMANDS_PER_DEVICE = 250  # cap on saved commands per device, per request
@@ -1010,6 +1011,7 @@ async def ws_endpoint(ws: WebSocket):
         return
     owner = ws.query_params.get("bid") or ""
     await ws_mgr.connect(ws, owner)
+    session_token = ws.cookies.get(SESSION_COOKIE_NAME)
     if owner:
         # Reconnecting within the grace window keeps the owner's SSH sessions
         _cancel_pending_release(owner)
@@ -1033,7 +1035,13 @@ async def ws_endpoint(ws: WebSocket):
             public = {k: v for k, v in m.items() if not k.startswith("_")}
             await ws.send_text(json.dumps({"type": "metrics", "device_id": did, "data": public}))
         while True:
-            raw = await ws.receive_text()
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=WS_REVALIDATE_SECONDS)
+            except asyncio.TimeoutError:
+                if not await _session_token_is_valid(session_token):
+                    await ws.close(code=WS_POLICY_VIOLATION_CODE)
+                    break
+                continue
             try:
                 msg = json.loads(raw)
             except ValueError:

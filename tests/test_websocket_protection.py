@@ -97,6 +97,38 @@ def test_websocket_rejects_expired_or_generation_invalidated_sessions(tmp_path: 
     _assert_policy_rejection(client, {"Origin": "https://dashboard.lan"})
 
 
+def test_live_websocket_closes_when_its_session_token_is_revoked(tmp_path: Path, monkeypatch) -> None:
+    """A live socket closes after its own session token is revoked."""
+    monkeypatch.setattr(main, "WS_REVALIDATE_SECONDS", 0.05)
+    client = _authenticated_client(tmp_path, monkeypatch)
+    token = client.cookies.get(main.SESSION_COOKIE_NAME)
+    assert token
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["type"] == "init"
+        main._session_store.revoke(token)
+
+        with pytest.raises(WebSocketDisconnect) as closed:
+            while True:
+                websocket.receive_json()
+        assert closed.value.code == main.WS_POLICY_VIOLATION_CODE
+
+
+def test_live_websocket_closes_when_session_generation_changes(tmp_path: Path, monkeypatch) -> None:
+    """A live socket closes after all sessions are invalidated."""
+    monkeypatch.setattr(main, "WS_REVALIDATE_SECONDS", 0.05)
+    client = _authenticated_client(tmp_path, monkeypatch)
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["type"] == "init"
+        auth.publish_auth_state(main.AUTH_FILE, auth.create_auth_state("a" * 15))
+
+        with pytest.raises(WebSocketDisconnect) as closed:
+            while True:
+                websocket.receive_json()
+        assert closed.value.code == main.WS_POLICY_VIOLATION_CODE
+
+
 @pytest.mark.parametrize(
     "headers",
     [
