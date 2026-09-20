@@ -881,6 +881,10 @@ record_install_state() {
     )
 }
 
+# This reader validates the whole record but install.sh consumes only the
+# recorded IDs. RECORDED_DASHBOARD_INSTALLED_CADDY is set for parity with
+# uninstall.sh's reader, which does act on it.
+# shellcheck disable=SC2034
 read_install_state() {
     local state_metadata
     local -a state_lines
