@@ -657,9 +657,11 @@ def test_uninstall_removes_only_owned_caddy_and_ufw_integration() -> None:
     assert 'UFW_COMMENT="Simple Network Dashboard HTTPS"' in uninstaller
     assert 'awk -v comment="$CADDY_IMPORT_COMMENT" -v import_line="$CADDY_IMPORT_LINE"' in uninstaller
     assert 'validate --config "$staged_caddyfile" --adapter caddyfile' in uninstaller
-    assert "apt-get remove" not in uninstaller
+    # The dashboard-owned proxy import is removed here; a dashboard-installed
+    # Caddy package is removed with apt-get remove, never purge (which would also
+    # delete the caddy service account).
+    assert "apt-get purge" not in uninstaller
     assert 'CADDY_HOME="/var/lib/caddy"' in uninstaller
-    assert "rm -rf \"$CADDY_HOME\"" not in uninstaller
 
 
 def test_uninstall_executes_owned_cleanup_and_preserves_shared_config() -> None:

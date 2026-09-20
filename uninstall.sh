@@ -16,6 +16,7 @@ CADDY_IMPORT_COMMENT="# Simple Network Dashboard managed Caddy import"
 CADDY_HOME="/var/lib/caddy"
 CADDY_APT_SOURCE="/etc/apt/sources.list.d/caddy-stable.list"
 CADDY_APT_KEYRING="/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+CADDY_CONFIG_DIR="/etc/caddy"
 
 is_owned_caddy_app_config() {
     local metadata
@@ -218,7 +219,29 @@ caddy_config_is_safe_to_remove() {
     fi
 }
 
+remove_caddy_owned_dir() {
+    # Remove a Caddy-owned directory. An already-absent path is success (a
+    # package hook may have removed it first). A path that is not the expected
+    # absolute path, is a symlink, or is not a real directory is refused, so the
+    # uninstaller never deletes an unexpected target.
+    local path="$1" expected="$2" label="$3"
+
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        return 0
+    fi
+    if [ "$path" != "$expected" ] || [ -L "$path" ] || [ ! -d "$path" ]; then
+        echo "Error: the Caddy ${label} path ${path} was unsafe or not a real directory; it was left in place."
+        return 1
+    fi
+    if ! rm -rf -- "$path"; then
+        echo "Error: the Caddy ${label} at ${path} could not be removed."
+        return 1
+    fi
+}
+
 remove_dashboard_caddy() {
+    local failures=""
+
     CADDY_REMOVAL_STATUS=failed
 
     if systemctl is-active --quiet caddy 2>/dev/null; then
@@ -227,21 +250,29 @@ remove_dashboard_caddy() {
     if systemctl is-enabled --quiet caddy 2>/dev/null; then
         systemctl disable caddy --quiet || echo "Error: could not disable the Caddy service before removal."
     fi
-    if ! apt-get purge -y caddy; then
+
+    # Plain remove, not purge: a purge runs the package's own account cleanup,
+    # which deletes the caddy service account. This uninstaller intentionally
+    # leaves that account in place, so it removes the package's data directories
+    # itself below.
+    if ! apt-get remove -y caddy; then
         echo "Error: Caddy cleanup incomplete: the Caddy package was not removed; its certificate store at $CADDY_HOME and Caddy apt source files were left in place."
         return 1
     fi
 
-    if [ "$CADDY_HOME" != "/var/lib/caddy" ] || [ ! -d "$CADDY_HOME" ] || [ -L "$CADDY_HOME" ]; then
-        echo "Error: Caddy cleanup incomplete: the Caddy package was removed, but the certificate store at $CADDY_HOME and Caddy apt source files were left in place because the certificate-store path was unsafe or not a real directory."
-        return 1
-    fi
-    if ! rm -rf -- "$CADDY_HOME"; then
-        echo "Error: Caddy cleanup incomplete: the Caddy package was removed, but the certificate store at $CADDY_HOME and Caddy apt source files were left in place."
-        return 1
-    fi
+    remove_caddy_owned_dir "$CADDY_HOME" "/var/lib/caddy" "certificate store" \
+        || failures="${failures:+$failures, }certificate store"
+    remove_caddy_owned_dir "$CADDY_CONFIG_DIR" "/etc/caddy" "config directory" \
+        || failures="${failures:+$failures, }config directory"
+
+    # rm -f treats an already-absent file as success.
     if ! rm -f -- "$CADDY_APT_SOURCE" "$CADDY_APT_KEYRING"; then
-        echo "Error: Caddy cleanup incomplete: the Caddy package and certificate store were removed, but one or more Caddy apt source files were not removed."
+        echo "Error: one or more Caddy apt source files could not be removed."
+        failures="${failures:+$failures, }apt source files"
+    fi
+
+    if [ -n "$failures" ]; then
+        echo "Error: Caddy cleanup incomplete: the Caddy package was removed, but these were left in place: ${failures}."
         return 1
     fi
 

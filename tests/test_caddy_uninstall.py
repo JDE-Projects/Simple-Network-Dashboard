@@ -134,7 +134,7 @@ printf 'interactive_intent=%s\\n' "$CADDY_INTENT"
     assert result.stdout == "yes_intent=keep\ninteractive_intent=keep\n"
 
 
-def test_caddy_removal_purges_without_autoremove_and_leaves_identity() -> None:
+def test_caddy_removal_uses_remove_not_purge_and_leaves_identity() -> None:
     result = _run_shell(
         """
 CALLS="$TEST_ROOT/calls"
@@ -144,8 +144,10 @@ rm() { printf 'rm:%s\\n' "$*" >> "$CALLS"; }
 userdel() { printf 'userdel:%s\\n' "$*" >> "$CALLS"; }
 groupdel() { printf 'groupdel:%s\\n' "$*" >> "$CALLS"; }
 [() {
+    if builtin test "$1" = -e && builtin test "$2" = /var/lib/caddy; then return 0; fi
     if builtin test "$1" = -d && builtin test "$2" = /var/lib/caddy; then return 0; fi
     if builtin test "$1" = -L && builtin test "$2" = /var/lib/caddy; then return 1; fi
+    if builtin test "$1" = ! && builtin test "$2" = -e && builtin test "$3" = /var/lib/caddy; then return 1; fi
     if builtin test "$1" = ! && builtin test "$2" = -d && builtin test "$3" = /var/lib/caddy; then return 1; fi
     if builtin test "$1" = ! && builtin test "$2" = -L && builtin test "$3" = /var/lib/caddy; then return 0; fi
     builtin [ "$@"
@@ -156,7 +158,8 @@ cat "$CALLS"
     )
 
     assert result.returncode == 0, result.stderr
-    assert "apt-get:purge -y caddy" in result.stdout
+    assert "apt-get:remove -y caddy" in result.stdout
+    assert "purge" not in result.stdout
     assert "autoremove" not in result.stdout
     assert "rm:-rf -- /var/lib/caddy" in result.stdout
     assert "rm:-f -- /etc/apt/sources.list.d/caddy-stable.list /usr/share/keyrings/caddy-stable-archive-keyring.gpg" in result.stdout
@@ -165,18 +168,20 @@ cat "$CALLS"
     assert "caddy service account and group were intentionally left in place" in result.stdout
 
 
-@pytest.mark.parametrize("failure", ["purge", "home"])
+@pytest.mark.parametrize("failure", ["remove", "home"])
 def test_caddy_removal_failure_is_loud_and_never_claims_success(failure: str) -> None:
     result = _run_shell(
         f"""
-apt-get() {{ [ '{failure}' = purge ] && return 1; return 0; }}
+apt-get() {{ [ '{failure}' = remove ] && return 1; return 0; }}
 rm() {{
     if [ '{failure}' = home ] && [ "$1" = -rf ] && [ "$3" = /var/lib/caddy ]; then return 1; fi
     return 0
 }}
 [() {{
+    if builtin test "$1" = -e && builtin test "$2" = /var/lib/caddy; then return 0; fi
     if builtin test "$1" = -d && builtin test "$2" = /var/lib/caddy; then return 0; fi
     if builtin test "$1" = -L && builtin test "$2" = /var/lib/caddy; then return 1; fi
+    if builtin test "$1" = ! && builtin test "$2" = -e && builtin test "$3" = /var/lib/caddy; then return 1; fi
     if builtin test "$1" = ! && builtin test "$2" = -d && builtin test "$3" = /var/lib/caddy; then return 1; fi
     if builtin test "$1" = ! && builtin test "$2" = -L && builtin test "$3" = /var/lib/caddy; then return 0; fi
     builtin [ "$@"
@@ -190,3 +195,33 @@ printf 'status=%s\\n' "$CADDY_REMOVAL_STATUS"
     assert "Error: Caddy cleanup incomplete:" in result.stdout
     assert "Caddy and its certificate store were removed." not in result.stdout
     assert result.stdout.endswith("status=failed\n")
+
+
+def test_caddy_removal_treats_already_removed_store_as_success() -> None:
+    # apt-get remove may delete /var/lib/caddy and /etc/caddy via package hooks
+    # before this code runs. An already-absent path must count as success, not a
+    # false failure, and the apt source files must still be removed.
+    result = _run_shell(
+        """
+CALLS="$TEST_ROOT/calls"
+systemctl() { return 1; }
+apt-get() { printf 'apt-get:%s\\n' "$*" >> "$CALLS"; return 0; }
+rm() { printf 'rm:%s\\n' "$*" >> "$CALLS"; return 0; }
+[() {
+    if builtin test "$1" = -e && builtin test "$2" = /var/lib/caddy; then return 1; fi
+    if builtin test "$1" = -L && builtin test "$2" = /var/lib/caddy; then return 1; fi
+    if builtin test "$1" = ! && builtin test "$2" = -e && builtin test "$3" = /var/lib/caddy; then return 0; fi
+    if builtin test "$1" = ! && builtin test "$2" = -L && builtin test "$3" = /var/lib/caddy; then return 0; fi
+    builtin [ "$@"
+}
+remove_dashboard_caddy
+printf 'status=%s\\n' "$CADDY_REMOVAL_STATUS"
+cat "$CALLS"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Error:" not in result.stdout
+    assert "rm:-rf -- /var/lib/caddy" not in result.stdout
+    assert "rm:-f -- /etc/apt/sources.list.d/caddy-stable.list /usr/share/keyrings/caddy-stable-archive-keyring.gpg" in result.stdout
+    assert "status=removed\n" in result.stdout
