@@ -66,18 +66,30 @@ def test_certificate_setup_page_is_local_themed_and_accessible() -> None:
 
 
 def test_certificate_page_orders_independent_verification_before_import() -> None:
+    """The certificate page presents collapsed per-OS instructions after shared verification guidance."""
     page = PAGE.read_text(encoding="utf-8")
-    checksum = page.index("installer printed its independent SHA-256 checksum")
+    checksum = page.index("independent SHA-256 checksum")
+    windows = page.index("<summary>Windows</summary>")
     verify = page.index("Get-FileHash -Path")
     import_certificate = page.index("Import-Certificate -FilePath")
-    assert checksum < verify < import_certificate
+    assert checksum < windows
+    assert verify < import_certificate
+    assert "<summary>Windows</summary>" in page
+    assert "<summary>Linux</summary>" in page
+    assert "<summary>macOS</summary>" in page
+    assert "<details open" not in page
+    assert page.count("<details") == page.count("<details>")
+    assert "We do not have a Mac to test" in page
+    assert "Uninstalling the dashboard does not remove it" in page
     assert "Do not treat this page or its download as trusted until" in page
 
 
-def test_installer_prints_certificate_setup_and_ordered_windows_guidance() -> None:
+def test_installer_prints_certificate_setup_pointer_not_windows_commands() -> None:
+    """The installer points every operating system to the certificate setup page."""
     installer = (ROOT / "install.sh").read_text(encoding="utf-8")
     checksum = installer.index("Exported Caddy root certificate file SHA-256 checksum:")
     setup_url = installer.index("Certificate setup: https://${HTTPS_HOST}:${HTTPS_PORT}/certificate-setup")
-    verify = installer.index('Get-FileHash -Path "$env:USERPROFILE\\Downloads\\caddy-root-ca.crt" -Algorithm SHA256')
-    import_certificate = installer.index('Import-Certificate -FilePath "$env:USERPROFILE\\Downloads\\caddy-root-ca.crt" -CertStoreLocation Cert:\\CurrentUser\\Root')
-    assert checksum < setup_url < verify < import_certificate
+    assert checksum < setup_url
+    assert "step-by-step trust instructions for Windows, Linux, and macOS" in installer
+    assert "Import-Certificate -FilePath" not in installer
+    assert "Get-FileHash -Path" not in installer

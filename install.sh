@@ -1353,12 +1353,8 @@ echo ""
 echo "Simple Network Dashboard is running."
 echo "Open https://${HTTPS_HOST}:${HTTPS_PORT} in your browser."
 echo "Certificate setup: https://${HTTPS_HOST}:${HTTPS_PORT}/certificate-setup"
-echo "Before importing the certificate, compare this command's SHA-256 checksum with the checksum printed above:"
-# shellcheck disable=SC2016  # literal PowerShell shown for the user to copy; $env must not be expanded by bash
-echo 'Get-FileHash -Path "$env:USERPROFILE\Downloads\caddy-root-ca.crt" -Algorithm SHA256'
-echo "Import it only after the checksums match:"
-# shellcheck disable=SC2016  # literal PowerShell shown for the user to copy; $env must not be expanded by bash
-echo 'Import-Certificate -FilePath "$env:USERPROFILE\Downloads\caddy-root-ca.crt" -CertStoreLocation Cert:\CurrentUser\Root'
+echo "That page has step-by-step trust instructions for Windows, Linux, and macOS."
+echo "Verify the certificate against the SHA-256 checksum printed above before importing it."
 echo "To uninstall later: sudo bash $APP_DIR/uninstall.sh"
 if [ "$ADDED_TO_GROUP" = true ]; then
     echo ""
