@@ -478,6 +478,10 @@ def _open_private_temp_file() -> tuple[str, object]:
 
 def _fsync_data_directory() -> None:
     """Persist the replacement entry after the temporary file is replaced."""
+    # Windows does not force-flush this directory entry, so a crash or power loss
+    # can lose the just-replaced file's directory update during local development.
+    if os.name == "nt":
+        return
     fd = None
     try:
         fd = os.open(DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))

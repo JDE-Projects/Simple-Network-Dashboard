@@ -191,6 +191,13 @@ def test_devices_save_uses_private_temp_file_and_atomic_replace(monkeypatch) -> 
 
     devices = [{"id": "new"}]
     assert main._save(devices)
+    directory_sync_events = []
+    if os.name != "nt":
+        directory_sync_events = [
+            ("open", main.DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
+            ("fsync", 12),
+            ("close", 12),
+        ]
     assert events == [
         ("mkstemp", {"prefix": ".devices-", "suffix": ".tmp", "dir": main.DATA_DIR}),
         ("fchmod", 11, 0o600),
@@ -199,9 +206,7 @@ def test_devices_save_uses_private_temp_file_and_atomic_replace(monkeypatch) -> 
         ("fsync", 11),
         ("close-file",),
         ("replace", temp_path, main.DEVICES_FILE),
-        ("open", main.DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
-        ("fsync", 12),
-        ("close", 12),
+        *directory_sync_events,
         ("mkstemp", {"prefix": ".devices-", "suffix": ".tmp", "dir": main.DATA_DIR}),
         ("fchmod", 11, 0o600),
         ("fdopen", 11),
@@ -209,11 +214,29 @@ def test_devices_save_uses_private_temp_file_and_atomic_replace(monkeypatch) -> 
         ("fsync", 11),
         ("close-file",),
         ("replace", temp_path, f"{main.DEVICES_FILE}.bak"),
-        ("open", main.DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
+        *directory_sync_events,
+    ]
+    assert main._devices_cache == devices
+
+
+def test_fsync_data_directory_skips_windows_and_syncs_other_platforms(monkeypatch) -> None:
+    events = []
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    monkeypatch.setattr(main.os, "open", lambda path, open_flags: events.append(("open", path, open_flags)) or 12)
+    monkeypatch.setattr(main.os, "fsync", lambda fd: events.append(("fsync", fd)))
+    monkeypatch.setattr(main.os, "close", lambda fd: events.append(("close", fd)))
+
+    monkeypatch.setattr(main.os, "name", "nt")
+    main._fsync_data_directory()
+    assert events == []
+
+    monkeypatch.setattr(main.os, "name", "posix")
+    main._fsync_data_directory()
+    assert events == [
+        ("open", main.DATA_DIR, flags),
         ("fsync", 12),
         ("close", 12),
     ]
-    assert main._devices_cache == devices
 
 
 def test_devices_save_durably_replaces_primary_before_backup(monkeypatch) -> None:
@@ -432,6 +455,22 @@ def test_first_devices_save_creates_matching_primary_and_backup(monkeypatch, tmp
     assert list(data_dir.glob(".devices-*.tmp")) == []
     if os.name != "nt":
         assert stat.S_IMODE(devices_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Exercises the Windows directory fsync guard")
+def test_windows_devices_save_with_real_directory_fsync_guard(monkeypatch, tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    devices_file = data_dir / "devices.json"
+    monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
+
+    devices = [{"id": "saved"}]
+    assert main._save(devices)
+    assert devices_file.exists()
+    backup_file = data_dir / "devices.json.bak"
+    assert backup_file.exists()
+    assert backup_file.read_text(encoding="utf-8") == devices_file.read_text(encoding="utf-8")
 
 
 def test_devices_save_mirrors_exact_new_payload_to_private_backup(monkeypatch, tmp_path) -> None:
