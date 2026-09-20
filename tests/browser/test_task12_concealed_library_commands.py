@@ -7,11 +7,7 @@ import json
 import pytest
 from playwright.sync_api import expect
 
-from tests.browser.conftest import (
-    SEEDED_DEVICE_HOST,
-    SEEDED_DEVICE_ID,
-    SEEDED_DEVICE_NAME,
-)
+from tests.browser.conftest import SEEDED_DEVICE_ID
 
 LIBRARY_NAME = "Test library command"
 LIBRARY_COMMAND = "echo library-command-secret"
@@ -26,28 +22,6 @@ def test_library_and_custom_commands_conceal_reveal_and_export(connected_device_
         route.fulfill(status=200, content_type="application/json", body='{"ok": true}')
 
     page.route("**/api/ssh/run", run_route)
-
-    # The app runs on Windows in this harness, where a genuine disk save trips on
-    # POSIX-only calls (directory fsync, fchmod). Fulfill the command-save PUT with
-    # a valid success so the modal closes; this test is about console concealment,
-    # not persistence, which the Linux install and pytest suite cover.
-    def commands_route(route):
-        body = json.loads(route.request.post_data)
-        device = {
-            "id": SEEDED_DEVICE_ID,
-            "name": SEEDED_DEVICE_NAME,
-            "host": SEEDED_DEVICE_HOST,
-            "username": "tester",
-            "metrics_port": 9100,
-            "commands": body["commands"],
-        }
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"ok": True, "devices": [device]}),
-        )
-
-    page.route(f"**/api/devices/{SEEDED_DEVICE_ID}/commands", commands_route)
 
     page.click(f'[data-card="{SEEDED_DEVICE_ID}"]')  # select the device so #addCmdBtn enables
     page.click("#addCmdBtn")
