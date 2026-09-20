@@ -40,9 +40,18 @@ from ssh_manager import SSHManager
 from auth import load_auth_state, verify_password
 from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageError, SessionStore
 
+def _ws_revalidate_seconds() -> float:
+    """Return the live WebSocket session revalidation interval."""
+    try:
+        seconds = float(os.environ.get("SND_WS_REVALIDATE_SECONDS", ""))
+    except ValueError:
+        return 10
+    return seconds if seconds > 0 else 10
+
+
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
-WS_REVALIDATE_SECONDS = 10  # how often a live WebSocket re-checks that the session token it connected with is still valid
+WS_REVALIDATE_SECONDS = _ws_revalidate_seconds()  # how often a live WebSocket re-checks that the session token it connected with is still valid
 MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MB cap on incoming HTTP request bodies
 MAX_DEVICES = 250  # cap on total saved devices
 MAX_COMMANDS_PER_DEVICE = 250  # cap on saved commands per device, per request

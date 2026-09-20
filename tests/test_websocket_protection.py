@@ -39,6 +39,25 @@ def _assert_policy_rejection(client: TestClient, headers=None, path: str = "/ws"
     assert rejected.value.code == main.WS_POLICY_VIOLATION_CODE
 
 
+def test_ws_revalidate_seconds_defaults_to_ten_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("SND_WS_REVALIDATE_SECONDS", raising=False)
+
+    assert main._ws_revalidate_seconds() == 10
+
+
+def test_ws_revalidate_seconds_honors_valid_environment_value(monkeypatch) -> None:
+    monkeypatch.setenv("SND_WS_REVALIDATE_SECONDS", "1.5")
+
+    assert main._ws_revalidate_seconds() == 1.5
+
+
+@pytest.mark.parametrize("value", ["", "garbage", "0", "-1"])
+def test_ws_revalidate_seconds_falls_back_to_ten_for_invalid_values(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("SND_WS_REVALIDATE_SECONDS", value)
+
+    assert main._ws_revalidate_seconds() == 10
+
+
 def test_websocket_accepts_only_an_authenticated_browser_at_the_configured_origin(tmp_path: Path, monkeypatch) -> None:
     client = _authenticated_client(tmp_path, monkeypatch)
 

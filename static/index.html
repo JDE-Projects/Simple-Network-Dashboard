@@ -778,7 +778,13 @@ function connectWS() {
     if (currentDeviceId) ws.send(JSON.stringify({type: 'select_device', id: currentDeviceId}));
   };
 
-  ws.onclose = () => {
+  ws.onclose = event => {
+    // 1008 mirrors the server's WS_POLICY_VIOLATION_CODE: session invalidated
+    // by sign-out, expiry, or a session-generation change.
+    if (event.code === 1008) {
+      showSessionExpired();
+      return;
+    }
     $('wsChip').className = 'ws-dot err';
     setTimeout(connectWS, 3000);
   };

@@ -152,7 +152,12 @@ def _wait_for_server(base_url: str, process: subprocess.Popen) -> None:
     raise RuntimeError(f"app server did not become ready within {_SERVER_START_TIMEOUT}s: {last_error}")
 
 
-def _start_app_server(tmp_path: Path, *, with_device: bool = False):
+def _start_app_server(
+    tmp_path: Path,
+    *,
+    with_device: bool = False,
+    extra_env: dict[str, str] | None = None,
+):
     """Shared body for the app_server fixtures: start uvicorn on fresh storage."""
     data_dir = tmp_path / "data"
     log_dir = tmp_path / "log"
@@ -182,6 +187,8 @@ def _start_app_server(tmp_path: Path, *, with_device: bool = False):
             "PYTHONPATH": str(REPO_ROOT),
         }
     )
+    if extra_env:
+        env.update(extra_env)
     process = subprocess.Popen(
         [sys.executable, str(LAUNCHER)],
         cwd=str(REPO_ROOT),
@@ -209,6 +216,12 @@ def app_server(tmp_path: Path) -> str:
 def app_server_with_device(tmp_path: Path) -> str:
     """Like app_server, but devices.json is seeded with one device already."""
     yield from _start_app_server(tmp_path, with_device=True)
+
+
+@pytest.fixture
+def app_server_with_short_ws_revalidation(tmp_path: Path) -> str:
+    """Run the dashboard with a short live WebSocket session recheck interval."""
+    yield from _start_app_server(tmp_path, extra_env={"SND_WS_REVALIDATE_SECONDS": "1"})
 
 
 @pytest.fixture(scope="session")
