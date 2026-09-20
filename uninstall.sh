@@ -14,6 +14,8 @@ UFW_COMMENT="Simple Network Dashboard HTTPS"
 CADDY_APP_MARKER="# Simple Network Dashboard managed proxy v1"
 CADDY_IMPORT_COMMENT="# Simple Network Dashboard managed Caddy import"
 CADDY_HOME="/var/lib/caddy"
+CADDY_APT_SOURCE="/etc/apt/sources.list.d/caddy-stable.list"
+CADDY_APT_KEYRING="/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
 
 is_owned_caddy_app_config() {
     local metadata
@@ -133,6 +135,120 @@ remove_dashboard_caddy_integration() {
     rm -f -- "$backup_app_config"
 }
 
+parse_uninstall_flags() {
+    AUTO_YES=false
+    REMOVE_CADDY_REQUESTED=false
+
+    local flag
+    for flag in "$@"; do
+        case "$flag" in
+            --yes) AUTO_YES=true ;;
+            --remove-caddy) REMOVE_CADDY_REQUESTED=true ;;
+            *) : ;;
+        esac
+    done
+}
+
+resolve_caddy_removal_eligibility() {
+    CADDY_REMOVAL_ELIGIBLE=false
+    if [ "${CADDY_INSTALL_STATE_READ_SUCCEEDED:-false}" = true ] \
+        && [ "${RECORDED_DASHBOARD_INSTALLED_CADDY:-}" = true ]; then
+        CADDY_REMOVAL_ELIGIBLE=true
+    fi
+}
+
+resolve_caddy_removal_intent() {
+    local remove_caddy_answer
+
+    CADDY_INTENT=keep
+    if [ "$CADDY_REMOVAL_ELIGIBLE" != true ]; then
+        if [ "$REMOVE_CADDY_REQUESTED" = true ]; then
+            echo "Caddy will be kept because there is no record that this dashboard installed it."
+        fi
+        return 0
+    fi
+
+    if [ "$REMOVE_CADDY_REQUESTED" = true ]; then
+        CADDY_INTENT=remove
+    elif [ "$AUTO_YES" = false ]; then
+        # A closed or non-interactive input stream defaults to keeping Caddy.
+        if ! read -r -p "This dashboard installed the Caddy web server. Remove Caddy and its certificate store too? It will be kept if anything else still uses it. [y/N] " remove_caddy_answer; then
+            remove_caddy_answer="n"
+        fi
+        remove_caddy_answer="${remove_caddy_answer:-n}"
+        if [[ "$remove_caddy_answer" =~ ^[Yy]$ ]]; then
+            CADDY_INTENT=remove
+        fi
+    fi
+}
+
+caddy_config_is_safe_to_remove() {
+    local import_counts import_count managed_import_count
+
+    CADDY_KEEP_REASON=""
+    if [ "$CADDY_REMOVAL_ELIGIBLE" != true ] || [ "$CADDY_INTENT" != remove ]; then
+        return 1
+    fi
+    if ! inspect_caddy_for_cleanup; then
+        CADDY_KEEP_REASON="Caddy was kept because it is not a supported Caddyfile-managed service."
+        echo "$CADDY_KEEP_REASON"
+        return 1
+    fi
+    if [ ! -r "$CADDY_CONFIG_PATH" ]; then
+        CADDY_KEEP_REASON="Caddy was kept because its Caddyfile could not be read."
+        echo "$CADDY_KEEP_REASON"
+        return 1
+    fi
+    import_counts=$(count_caddy_imports "$CADDY_CONFIG_PATH") || {
+        CADDY_KEEP_REASON="Caddy was kept because its Caddyfile could not be read."
+        echo "$CADDY_KEEP_REASON"
+        return 1
+    }
+    read -r import_count managed_import_count <<< "$import_counts"
+    if [[ ! "$import_count" =~ ^[0-9]+$ ]] || [[ ! "$managed_import_count" =~ ^[0-9]+$ ]]; then
+        CADDY_KEEP_REASON="Caddy was kept because its Caddyfile could not be read."
+        echo "$CADDY_KEEP_REASON"
+        return 1
+    fi
+    if [ "$import_count" -ne 0 ] \
+        || ! awk '/^[[:space:]]*$/ { next } /^[[:space:]]*#/ { next } { exit 1 }' "$CADDY_CONFIG_PATH"; then
+        CADDY_KEEP_REASON="Caddy was kept because other sites still use it."
+        echo "$CADDY_KEEP_REASON"
+        return 1
+    fi
+}
+
+remove_dashboard_caddy() {
+    CADDY_REMOVAL_STATUS=failed
+
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+        systemctl stop caddy || echo "Error: could not stop the Caddy service before removal."
+    fi
+    if systemctl is-enabled --quiet caddy 2>/dev/null; then
+        systemctl disable caddy --quiet || echo "Error: could not disable the Caddy service before removal."
+    fi
+    if ! apt-get purge -y caddy; then
+        echo "Error: Caddy cleanup incomplete: the Caddy package was not removed; its certificate store at $CADDY_HOME and Caddy apt source files were left in place."
+        return 1
+    fi
+
+    if [ "$CADDY_HOME" != "/var/lib/caddy" ] || [ ! -d "$CADDY_HOME" ] || [ -L "$CADDY_HOME" ]; then
+        echo "Error: Caddy cleanup incomplete: the Caddy package was removed, but the certificate store at $CADDY_HOME and Caddy apt source files were left in place because the certificate-store path was unsafe or not a real directory."
+        return 1
+    fi
+    if ! rm -rf -- "$CADDY_HOME"; then
+        echo "Error: Caddy cleanup incomplete: the Caddy package was removed, but the certificate store at $CADDY_HOME and Caddy apt source files were left in place."
+        return 1
+    fi
+    if ! rm -f -- "$CADDY_APT_SOURCE" "$CADDY_APT_KEYRING"; then
+        echo "Error: Caddy cleanup incomplete: the Caddy package and certificate store were removed, but one or more Caddy apt source files were not removed."
+        return 1
+    fi
+
+    CADDY_REMOVAL_STATUS=removed
+    echo "Caddy and its certificate store were removed. The caddy service account and group were intentionally left in place."
+}
+
 remove_dashboard_ufw_rules() {
     local rule_numbers
 
@@ -216,19 +332,25 @@ read_current_snd_ids() {
 classify_uninstall_account_state() {
     REMOVE_SND_IDENTITIES=false
     RETAIN_SND_REASON=""
+    CADDY_INSTALL_STATE_READ_SUCCEEDED=false
 
     if [ ! -e "$INSTALL_STATE" ] && [ ! -L "$INSTALL_STATE" ]; then
         RETAIN_SND_REASON="the ownership record is absent"
-    elif ! read_install_state; then
-        RETAIN_SND_REASON="the ownership record is ${INSTALL_STATE_ERROR}"
-    elif ! read_current_snd_ids; then
-        RETAIN_SND_REASON="the snd user or group is missing or has invalid IDs"
-    elif [ "$CURRENT_SND_UID" != "$RECORDED_SND_UID" ] \
-        || [ "$CURRENT_SND_PRIMARY_GID" != "$RECORDED_SND_GID" ] \
-        || [ "$CURRENT_SND_GROUP_GID" != "$RECORDED_SND_GID" ]; then
-        RETAIN_SND_REASON="the current snd IDs do not match the ownership record"
     else
-        REMOVE_SND_IDENTITIES=true
+        if ! read_install_state; then
+            RETAIN_SND_REASON="the ownership record is ${INSTALL_STATE_ERROR}"
+        else
+            CADDY_INSTALL_STATE_READ_SUCCEEDED=true
+            if ! read_current_snd_ids; then
+                RETAIN_SND_REASON="the snd user or group is missing or has invalid IDs"
+            elif [ "$CURRENT_SND_UID" != "$RECORDED_SND_UID" ] \
+                || [ "$CURRENT_SND_PRIMARY_GID" != "$RECORDED_SND_GID" ] \
+                || [ "$CURRENT_SND_GROUP_GID" != "$RECORDED_SND_GID" ]; then
+                RETAIN_SND_REASON="the current snd IDs do not match the ownership record"
+            else
+                REMOVE_SND_IDENTITIES=true
+            fi
+        fi
     fi
 }
 
@@ -374,11 +496,10 @@ BACKUP_GROUP=$(id -gn "$BACKUP_OWNER") || {
 # Decide account deletion before any removal mutation.
 classify_uninstall_account_state
 
-# Parse flags
-AUTO_YES=false
-if [ "${1:-}" = "--yes" ]; then
-    AUTO_YES=true
-fi
+# Parse flags and resolve the optional Caddy removal before the summary.
+parse_uninstall_flags "$@"
+resolve_caddy_removal_eligibility
+resolve_caddy_removal_intent
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -394,6 +515,11 @@ if [ "$REMOVE_SND_IDENTITIES" = true ]; then
     echo "  - verified service account and group: snd"
 else
     echo "  - service account and group: retained because ${RETAIN_SND_REASON}"
+fi
+if [ "$CADDY_REMOVAL_ELIGIBLE" = true ] && [ "$CADDY_INTENT" = remove ]; then
+    echo "  - Caddy web server and certificate store: if nothing else still uses it"
+else
+    echo "  - Caddy web server: kept"
 fi
 echo ""
 
@@ -462,10 +588,8 @@ if [ "$AUTO_YES" = false ]; then
 fi
 
 # Remove only the dashboard-owned proxy integration and labelled firewall
-# rules before application files are touched.  A failed cleanup leaves the
-# installation in place for an administrator to inspect and retry. The Caddy
-# package and its shared persistent CA storage under $CADDY_HOME are never
-# modified by this uninstaller.
+# rules before application files are touched. A failed cleanup leaves the
+# installation in place for an administrator to inspect and retry.
 if ! remove_dashboard_caddy_integration; then
     echo "Error: dashboard Caddy integration cleanup failed. Application files were not removed."
     exit 1
@@ -516,6 +640,13 @@ if [ -d "$LOG_DIR" ]; then
     rm -rf "$LOG_DIR"
 fi
 
+CADDY_REMOVAL_STATUS=kept
+if [ "$CADDY_REMOVAL_ELIGIBLE" = true ] && [ "$CADDY_INTENT" = remove ]; then
+    if caddy_config_is_safe_to_remove; then
+        remove_dashboard_caddy || true
+    fi
+fi
+
 # Re-check ownership at the point of account deletion, after prompts and removal.
 if ! remove_snd_identities_if_verified; then
     echo ""
@@ -529,7 +660,23 @@ fi
 
 echo ""
 echo "Simple Network Dashboard has been removed."
-echo "The Caddy package and persistent CA storage at $CADDY_HOME were preserved."
+case "$CADDY_REMOVAL_STATUS" in
+    removed)
+        echo "Caddy and its certificate store at $CADDY_HOME were removed. The caddy service account and group were left in place."
+        ;;
+    kept)
+        if [ "$CADDY_REMOVAL_ELIGIBLE" != true ]; then
+            echo "The Caddy package and persistent CA storage at $CADDY_HOME were preserved."
+        elif [ "$CADDY_INTENT" = remove ]; then
+            echo "${CADDY_KEEP_REASON:-Caddy was kept because its configuration could not be safely inspected.}"
+        else
+            echo "The Caddy package and persistent CA storage at $CADDY_HOME were preserved."
+        fi
+        ;;
+    failed)
+        echo "Caddy cleanup did not finish. Some Caddy files may remain; see the error above."
+        ;;
+esac
 echo ""
 if [ "$SND_IDENTITIES_REMOVED" = true ]; then
     echo "If your account was previously added to the snd group, that membership"
