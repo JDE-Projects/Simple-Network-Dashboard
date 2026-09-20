@@ -162,6 +162,90 @@ cat "$TEST_ROOT/metadata-calls"
     assert temp_chmod == temp_chown
 
 
+@pytest.mark.parametrize("caddy_installed", ["true", "false"])
+def test_record_install_state_writes_version_two_record(caddy_installed: str) -> None:
+    result = _run_shell(
+        "install.sh",
+        f"""
+CURRENT_SND_UID=999
+CURRENT_SND_GROUP_GID=998
+DASHBOARD_INSTALLED_CADDY={caddy_installed}
+record_install_state
+cat "$INSTALL_STATE"
+""",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "RECORD_VERSION=2\n"
+        "SND_UID=999\n"
+        "SND_GID=998\n"
+        f"DASHBOARD_INSTALLED_CADDY={caddy_installed}\n"
+    )
+
+
+@pytest.mark.parametrize("script_name", ["install.sh", "uninstall.sh"])
+@pytest.mark.parametrize("caddy_installed", ["true", "false"])
+def test_read_install_state_accepts_version_two_record(
+    script_name: str, caddy_installed: str
+) -> None:
+    result = _run_shell(
+        script_name,
+        f"""
+mkdir -p "$INSTALL_STATE_DIR"
+printf 'RECORD_VERSION=2\\nSND_UID=999\\nSND_GID=998\\nDASHBOARD_INSTALLED_CADDY={caddy_installed}\\n' > "$INSTALL_STATE"
+read_install_state
+printf 'uid=%s gid=%s caddy=%s\\n' "$RECORDED_SND_UID" "$RECORDED_SND_GID" "$RECORDED_DASHBOARD_INSTALLED_CADDY"
+""",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"uid=999 gid=998 caddy={caddy_installed}\n"
+
+
+@pytest.mark.parametrize("script_name", ["install.sh", "uninstall.sh"])
+def test_read_install_state_accepts_legacy_record_with_unknown_caddy_origin(script_name: str) -> None:
+    result = _run_shell(
+        script_name,
+        """
+mkdir -p "$INSTALL_STATE_DIR"
+printf 'SND_UID=999\\nSND_GID=998\\n' > "$INSTALL_STATE"
+read_install_state
+printf 'uid=%s gid=%s caddy=%s\\n' "$RECORDED_SND_UID" "$RECORDED_SND_GID" "$RECORDED_DASHBOARD_INSTALLED_CADDY"
+""",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "uid=999 gid=998 caddy=unknown\n"
+
+
+@pytest.mark.parametrize("script_name", ["install.sh", "uninstall.sh"])
+@pytest.mark.parametrize(
+    "record",
+    [
+        "RECORD_VERSION=2\\nSND_UID=999\\nSND_GID=998\\n",
+        "RECORD_VERSION=2\\nSND_UID=999\\nSND_GROUP=998\\nDASHBOARD_INSTALLED_CADDY=true\\n",
+        "RECORD_VERSION=2\\nSND_UID=999\\nSND_GID=998\\nDASHBOARD_INSTALLED_CADDY=yes\\n",
+        "RECORD_VERSION=3\\nSND_UID=999\\nSND_GID=998\\nDASHBOARD_INSTALLED_CADDY=true\\n",
+    ],
+)
+def test_read_install_state_rejects_malformed_versioned_record(
+    script_name: str, record: str
+) -> None:
+    result = _run_shell(
+        script_name,
+        f"""
+mkdir -p "$INSTALL_STATE_DIR"
+printf '{record}' > "$INSTALL_STATE"
+if read_install_state; then exit 10; fi
+printf 'error=%s\\n' "$INSTALL_STATE_ERROR"
+""",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "error=malformed\n"
+
+
 @pytest.mark.parametrize(("user_exists", "group_exists"), [("true", "false"), ("false", "true")])
 def test_fresh_install_rejects_existing_unmanaged_identity(
     user_exists: str, group_exists: str

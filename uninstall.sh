@@ -153,6 +153,7 @@ read_install_state() {
     INSTALL_STATE_ERROR=""
     RECORDED_SND_UID=""
     RECORDED_SND_GID=""
+    RECORDED_DASHBOARD_INSTALLED_CADDY=""
 
     if [ -L "$INSTALL_STATE" ] || [ ! -f "$INSTALL_STATE" ]; then
         INSTALL_STATE_ERROR="unsafe (it must be a regular file)"
@@ -170,6 +171,20 @@ read_install_state() {
         INSTALL_STATE_ERROR="unreadable"
         return 1
     }
+    if [ "${state_lines[0]}" = "RECORD_VERSION=2" ]; then
+        if [ "${#state_lines[@]}" -ne 4 ] \
+            || [[ ! "${state_lines[1]}" =~ ^SND_UID=[0-9]+$ ]] \
+            || [[ ! "${state_lines[2]}" =~ ^SND_GID=[0-9]+$ ]] \
+            || { [ "${state_lines[3]}" != "DASHBOARD_INSTALLED_CADDY=true" ] \
+                && [ "${state_lines[3]}" != "DASHBOARD_INSTALLED_CADDY=false" ]; }; then
+            INSTALL_STATE_ERROR="malformed"
+            return 1
+        fi
+        RECORDED_SND_UID="${state_lines[1]#SND_UID=}"
+        RECORDED_SND_GID="${state_lines[2]#SND_GID=}"
+        RECORDED_DASHBOARD_INSTALLED_CADDY="${state_lines[3]#DASHBOARD_INSTALLED_CADDY=}"
+        return 0
+    fi
     if [ "${#state_lines[@]}" -ne 2 ] \
         || [[ ! "${state_lines[0]}" =~ ^SND_UID=[0-9]+$ ]] \
         || [[ ! "${state_lines[1]}" =~ ^SND_GID=[0-9]+$ ]]; then
@@ -178,6 +193,7 @@ read_install_state() {
     fi
     RECORDED_SND_UID="${state_lines[0]#SND_UID=}"
     RECORDED_SND_GID="${state_lines[1]#SND_GID=}"
+    RECORDED_DASHBOARD_INSTALLED_CADDY="unknown"
 }
 
 read_current_snd_ids() {

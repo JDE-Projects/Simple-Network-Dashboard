@@ -39,6 +39,7 @@ CADDY_ROLLBACK_CADDYFILE=""
 CADDY_ROLLBACK_APP_CONFIG=""
 CADDY_ROLLBACK_HAD_APP_CONFIG=false
 DASHBOARD_WAS_ACTIVE=false
+DASHBOARD_INSTALLED_CADDY=false
 
 usage() {
     echo "Usage: $0 [--port N] [--https-host HOST] [--https-port N]"
@@ -398,6 +399,7 @@ install_caddy_if_fresh() {
         echo "Error: could not publish the replacement Caddyfile."
         return 1
     fi
+    DASHBOARD_INSTALLED_CADDY=true
 }
 
 verify_caddy_persistent_storage() {
@@ -870,7 +872,8 @@ record_install_state() {
         chmod 700 "$INSTALL_STATE_DIR" || exit 1
         temp_state=$(mktemp "${INSTALL_STATE_DIR}/.install-state.XXXXXX") || exit 1
         trap 'if [ -n "$temp_state" ]; then rm -f -- "$temp_state"; fi' EXIT
-        printf 'SND_UID=%s\nSND_GID=%s\n' "$CURRENT_SND_UID" "$CURRENT_SND_GROUP_GID" > "$temp_state" || exit 1
+        printf 'RECORD_VERSION=2\nSND_UID=%s\nSND_GID=%s\nDASHBOARD_INSTALLED_CADDY=%s\n' \
+            "$CURRENT_SND_UID" "$CURRENT_SND_GROUP_GID" "$DASHBOARD_INSTALLED_CADDY" > "$temp_state" || exit 1
         chown root:root "$temp_state" || exit 1
         chmod 600 "$temp_state" || exit 1
         mv -f "$temp_state" "$INSTALL_STATE" || exit 1
@@ -885,6 +888,7 @@ read_install_state() {
     INSTALL_STATE_ERROR=""
     RECORDED_SND_UID=""
     RECORDED_SND_GID=""
+    RECORDED_DASHBOARD_INSTALLED_CADDY=""
 
     if [ -L "$INSTALL_STATE" ] || [ ! -f "$INSTALL_STATE" ]; then
         INSTALL_STATE_ERROR="unsafe (it must be a regular file)"
@@ -904,6 +908,21 @@ read_install_state() {
         INSTALL_STATE_ERROR="unreadable"
         return 1
     }
+    if [ "${state_lines[0]}" = "RECORD_VERSION=2" ]; then
+        if [ "${#state_lines[@]}" -ne 4 ] \
+            || [[ ! "${state_lines[1]}" =~ ^SND_UID=[0-9]+$ ]] \
+            || [[ ! "${state_lines[2]}" =~ ^SND_GID=[0-9]+$ ]] \
+            || { [ "${state_lines[3]}" != "DASHBOARD_INSTALLED_CADDY=true" ] \
+                && [ "${state_lines[3]}" != "DASHBOARD_INSTALLED_CADDY=false" ]; }; then
+            INSTALL_STATE_ERROR="malformed"
+            return 1
+        fi
+        RECORDED_SND_UID="${state_lines[1]#SND_UID=}"
+        RECORDED_SND_GID="${state_lines[2]#SND_GID=}"
+        RECORDED_DASHBOARD_INSTALLED_CADDY="${state_lines[3]#DASHBOARD_INSTALLED_CADDY=}"
+        return 0
+    fi
+
     if [ "${#state_lines[@]}" -ne 2 ] \
         || [[ ! "${state_lines[0]}" =~ ^SND_UID=[0-9]+$ ]] \
         || [[ ! "${state_lines[1]}" =~ ^SND_GID=[0-9]+$ ]]; then
@@ -913,6 +932,7 @@ read_install_state() {
 
     RECORDED_SND_UID="${state_lines[0]#SND_UID=}"
     RECORDED_SND_GID="${state_lines[1]#SND_GID=}"
+    RECORDED_DASHBOARD_INSTALLED_CADDY="unknown"
 }
 
 read_current_snd_ids() {
@@ -1260,6 +1280,13 @@ fi
 # Classify account ownership before any installation mutation.
 if ! classify_account_state; then
     exit 1
+fi
+
+if [ "$ACCOUNT_STATE" = "managed-update" ] && [ "$DASHBOARD_INSTALLED_CADDY" = true ]; then
+    if ! record_install_state; then
+        echo "Error: could not record that this dashboard installation installed Caddy."
+        exit 1
+    fi
 fi
 
 if [ "$ACCOUNT_STATE" = "fresh" ]; then
