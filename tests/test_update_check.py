@@ -75,7 +75,7 @@ def test_check_update_returns_reason_and_logs_failure(monkeypatch):
     failure = urllib.error.URLError(socket.timeout("timed out"))
     messages = []
 
-    def raise_failure():
+    def raise_failure(app_version):
         raise failure
 
     monkeypatch.setattr(main, "_fetch_latest_version", raise_failure)
@@ -90,7 +90,7 @@ def test_check_update_returns_reason_and_logs_failure(monkeypatch):
 def test_check_update_returns_reason_when_debug_logging_fails(monkeypatch):
     failure = urllib.error.URLError(socket.timeout("timed out"))
 
-    def raise_failure():
+    def raise_failure(app_version):
         raise failure
 
     def raise_logging_error(_message):

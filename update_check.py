@@ -5,7 +5,7 @@ import errno
 import urllib.error
 import urllib.request
 
-from config import APP_NAME, APP_VERSION
+from config import APP_NAME
 
 
 GITHUB_RELEASES_URL = (
@@ -94,12 +94,15 @@ def _version_tuple(v: str) -> tuple:
     return tuple(parts)
 
 
-def _fetch_latest_version() -> str:
-    """Blocking call — must be run in an executor.  Returns the latest release version (no leading 'v')."""
+def _fetch_latest_version(app_version: str) -> str:
+    """Blocking call — must be run in an executor.  Returns the latest release version (no leading 'v').
+
+    The running app's version is passed in (main owns APP_VERSION) rather than
+    imported, so this module never imports main and stays free of a cycle."""
     req = urllib.request.Request(
         GITHUB_RELEASES_URL,
         headers={
-            "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+            "User-Agent": f"{APP_NAME}/{app_version}",
             "Accept": "application/vnd.github+json",
         },
     )

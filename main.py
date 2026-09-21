@@ -37,7 +37,6 @@ from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageErr
 from update_check import _update_error_reason, _version_tuple, _fetch_latest_version
 from config import (
     APP_NAME,
-    APP_VERSION,
     AUTH_FILE,
     BASE_DIR,
     CSRF_COOKIE_NAME,
@@ -69,6 +68,12 @@ from config import (
     _UNSAFE_METHODS,
 )
 from ws_manager import _WSManager
+
+
+# The release tooling reads the shipped version from a plain string assignment
+# in the entry script, so APP_VERSION lives here rather than in config. Modules
+# that need it (update_check) receive it by argument to avoid importing main.
+APP_VERSION = "1.7.1"
 
 
 # ---------------------------------------------------------------------------
@@ -890,7 +895,7 @@ async def toggle_debug(body: DebugIn):
 async def check_update():
     try:
         loop = asyncio.get_running_loop()
-        latest = await loop.run_in_executor(None, _fetch_latest_version)
+        latest = await loop.run_in_executor(None, _fetch_latest_version, APP_VERSION)
         return {
             "ok": True,
             "current": APP_VERSION,
