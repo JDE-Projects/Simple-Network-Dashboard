@@ -12,6 +12,7 @@ import asyncio
 import os
 import stat
 
+import debug_log
 import main
 import pytest
 
@@ -20,17 +21,17 @@ import pytest
 def _clean_debug_logger():
     """Guarantee no handler or state leaks between tests, pass or fail."""
     yield
-    for handler in list(main._debug_logger.handlers):
-        main._debug_logger.removeHandler(handler)
+    for handler in list(debug_log._debug_logger.handlers):
+        debug_log._debug_logger.removeHandler(handler)
         handler.close()
-    main._debug_handler = None
+    debug_log._debug_handler = None
 
 
 def _enable(tmp_path, monkeypatch, *, max_bytes: int = 200, backup_count: int = 3) -> str:
     monkeypatch.setattr(main, "LOG_DIR", str(tmp_path))
-    monkeypatch.setattr(main, "_DEBUG_LOG_MAX_BYTES", max_bytes)
-    monkeypatch.setattr(main, "_DEBUG_LOG_BACKUP_COUNT", backup_count)
-    monkeypatch.setattr(main, "_debug_handler", None)
+    monkeypatch.setattr(debug_log, "_DEBUG_LOG_MAX_BYTES", max_bytes)
+    monkeypatch.setattr(debug_log, "_DEBUG_LOG_BACKUP_COUNT", backup_count)
+    monkeypatch.setattr(debug_log, "_debug_handler", None)
     response = asyncio.run(main.toggle_debug(main.DebugIn(enabled=True)))
     return response["path"]
 
@@ -40,10 +41,10 @@ def _disable() -> None:
 
 
 def test_debug_write_is_a_noop_when_logging_is_off(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(main, "_debug_handler", None)
-    assert not main._debug_enabled()
+    monkeypatch.setattr(debug_log, "_debug_handler", None)
+    assert not debug_log._debug_enabled()
 
-    main._debug_write("should not raise or write anything")
+    debug_log._debug_write("should not raise or write anything")
 
     assert list(tmp_path.iterdir()) == []
 
@@ -61,7 +62,7 @@ def test_writing_past_the_size_threshold_triggers_a_rollover(tmp_path, monkeypat
     path = _enable(tmp_path, monkeypatch, max_bytes=200, backup_count=3)
 
     for i in range(30):
-        main._debug_write(f"line {i} padded out with filler text to add bulk")
+        debug_log._debug_write(f"line {i} padded out with filler text to add bulk")
 
     _disable()
 
@@ -72,7 +73,7 @@ def test_no_more_than_three_rotated_copies_are_retained(tmp_path, monkeypatch) -
     path = _enable(tmp_path, monkeypatch, max_bytes=200, backup_count=3)
 
     for i in range(200):
-        main._debug_write(f"line {i} padded out with filler text to add bulk")
+        debug_log._debug_write(f"line {i} padded out with filler text to add bulk")
 
     _disable()
 
@@ -87,7 +88,7 @@ def test_active_and_rotated_files_are_private(tmp_path, monkeypatch) -> None:
     path = _enable(tmp_path, monkeypatch, max_bytes=200, backup_count=3)
 
     for i in range(60):
-        main._debug_write(f"line {i} padded out with filler text to add bulk")
+        debug_log._debug_write(f"line {i} padded out with filler text to add bulk")
 
     _disable()
 

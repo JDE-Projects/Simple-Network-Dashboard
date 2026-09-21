@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 
 import auth
 import main
+import persistence
+import runtime_state
 from session_manager import LoginThrottle, SessionStore
 
 
@@ -42,13 +44,13 @@ def _authenticated_client(tmp_path: Path, monkeypatch) -> TestClient:
 
 
 def _stub_storage(monkeypatch, seed_devices: list) -> None:
-    monkeypatch.setattr(main, "_devices_cache", copy.deepcopy(seed_devices))
+    monkeypatch.setattr(runtime_state, "_devices_cache", copy.deepcopy(seed_devices))
 
     def _fake_save(devices: list) -> bool:
-        main._devices_cache = list(devices)
+        runtime_state._devices_cache = list(devices)
         return True
 
-    monkeypatch.setattr(main, "_save", _fake_save)
+    monkeypatch.setattr(persistence, "_save", _fake_save)
 
     async def _noop_broadcast(_message):
         return None

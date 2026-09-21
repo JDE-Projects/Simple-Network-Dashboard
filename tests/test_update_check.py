@@ -9,6 +9,7 @@ import urllib.error
 
 import pytest
 
+import debug_log
 import main
 
 
@@ -78,7 +79,7 @@ def test_check_update_returns_reason_and_logs_failure(monkeypatch):
         raise failure
 
     monkeypatch.setattr(main, "_fetch_latest_version", raise_failure)
-    monkeypatch.setattr(main, "_debug_write", messages.append)
+    monkeypatch.setattr(debug_log, "_debug_write", messages.append)
 
     result = asyncio.run(main.check_update())
 
@@ -96,7 +97,7 @@ def test_check_update_returns_reason_when_debug_logging_fails(monkeypatch):
         raise OSError("debug log unavailable")
 
     monkeypatch.setattr(main, "_fetch_latest_version", raise_failure)
-    monkeypatch.setattr(main, "_debug_write", raise_logging_error)
+    monkeypatch.setattr(debug_log, "_debug_write", raise_logging_error)
 
     result = asyncio.run(main.check_update())
 

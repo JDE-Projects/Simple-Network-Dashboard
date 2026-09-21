@@ -7,25 +7,17 @@ and pushes real-time metrics + SSH events over a WebSocket.
 
 import asyncio
 import copy
-import errno
 import hmac
 import json
-import logging
 import os
 import secrets
-import socket
-import ssl
 import stat
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.request
 import uuid
+
 from contextlib import asynccontextmanager
-from datetime import datetime
 from ipaddress import ip_address
-from logging.handlers import RotatingFileHandler
 from typing import Annotated, Optional
 
 from argon2.exceptions import Argon2Error
@@ -35,145 +27,53 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+import debug_log
+import persistence
+import runtime_state
 from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
 from auth import load_auth_state, verify_password
 from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageError, SessionStore
-
-def _ws_revalidate_seconds() -> float:
-    """Return the live WebSocket session revalidation interval."""
-    try:
-        seconds = float(os.environ.get("SND_WS_REVALIDATE_SECONDS", ""))
-    except ValueError:
-        return 10
-    return seconds if seconds > 0 else 10
-
-
-METRICS_INTERVAL = 2  # seconds between polls for the selected device
-WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
-WS_REVALIDATE_SECONDS = _ws_revalidate_seconds()  # how often a live WebSocket re-checks that the session token it connected with is still valid
-MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MB cap on incoming HTTP request bodies
-MAX_DEVICES = 250  # cap on total saved devices
-MAX_COMMANDS_PER_DEVICE = 250  # cap on saved commands per device, per request
-MAX_NAME_LEN = 80  # device name / saved command name character cap
-MAX_HOST_LEN = 253  # hostname character cap (RFC 1035 full name length)
-MAX_USERNAME_LEN = 64  # SSH username character cap
-MAX_COMMAND_LEN = 4096  # saved command text / run command character cap
-MAX_CONFIRM_LEN = 500  # saved command confirmation prompt character cap
-MIN_METRICS_PORT = 1
-MAX_METRICS_PORT = 65535
-
-APP_NAME    = "Simple Network Dashboard"
-APP_VERSION = "1.7.0"
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-# Runtime storage roots. Default to the installed Linux locations; override with
-# SND_DATA_DIR / SND_LOG_DIR to run the app off Linux (local development, tests).
-DATA_DIR = os.environ.get("SND_DATA_DIR", "/var/lib/simple-network-dashboard")
-LOG_DIR = os.environ.get("SND_LOG_DIR", "/var/log/simple-network-dashboard")
-DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
-DASHBOARD_ROOT_CERT = os.path.join(DATA_DIR, "caddy-root-ca.crt")
-AUTH_FILE = os.path.join(DATA_DIR, "auth.json")
-SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
-SESSION_COOKIE_NAME = "__Host-snd-session"
-CSRF_COOKIE_NAME = "__Host-snd-csrf"
-CSRF_HEADER_NAME = "x-csrf-token"
-PUBLIC_ORIGIN_ENV = "SND_PUBLIC_ORIGIN"
-WS_POLICY_VIOLATION_CODE = 1008
-_PUBLIC_PATHS = {
-    "/login",
-    "/api/auth/login",
-    "/api/auth/session",
-    "/certificate-setup",
-    "/certificate-setup/caddy-root-ca.crt",
-}
-_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; "
-    "font-src 'self'; "
-    "connect-src 'self'{wss_source}; "
-    "frame-ancestors 'none'; "
-    "object-src 'none'; "
-    "base-uri 'self'; "
-    "form-action 'self'"
+from update_check import GITHUB_RELEASES_URL, _update_error_reason, _version_tuple, _fetch_latest_version
+from config import (
+    APP_NAME,
+    APP_VERSION,
+    AUTH_FILE,
+    BASE_DIR,
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    DASHBOARD_ROOT_CERT,
+    DATA_DIR,
+    DEVICES_FILE,
+    LOG_DIR,
+    MAX_COMMAND_LEN,
+    MAX_COMMANDS_PER_DEVICE,
+    MAX_CONFIRM_LEN,
+    MAX_DEVICES,
+    MAX_HOST_LEN,
+    MAX_METRICS_PORT,
+    MAX_NAME_LEN,
+    MAX_REQUEST_BODY_BYTES,
+    MAX_USERNAME_LEN,
+    METRICS_INTERVAL,
+    MIN_METRICS_PORT,
+    PUBLIC_ORIGIN_ENV,
+    SESSION_COOKIE_NAME,
+    SESSIONS_FILE,
+    WS_POLICY_VIOLATION_CODE,
+    WS_RELEASE_GRACE_SECONDS,
+    WS_REVALIDATE_SECONDS,
+    _ws_revalidate_seconds,
+    _CONTENT_SECURITY_POLICY,
+    _PUBLIC_PATHS,
+    _UNSAFE_METHODS,
 )
+from ws_manager import _WSManager
 
 
 # ---------------------------------------------------------------------------
 # WebSocket connection manager
 # ---------------------------------------------------------------------------
-
-class _WSManager:
-    def __init__(self):
-        self._connections: list[WebSocket] = []
-        self._owners: dict[WebSocket, str] = {}  # ws -> owner (browser id)
-        self._selections: dict[WebSocket, str] = {}  # ws -> selected device id
-
-    async def connect(self, ws: WebSocket, owner_id: str = None):
-        await ws.accept()
-        self._connections.append(ws)
-        if owner_id:
-            self._owners[ws] = owner_id
-
-    def drop(self, ws: WebSocket):
-        self._connections = [c for c in self._connections if c is not ws]
-        self._owners.pop(ws, None)
-        self._selections.pop(ws, None)
-
-    def set_selected_device(self, ws: WebSocket, device_id: Optional[str]):
-        """Record (or clear) the device this socket has selected. An empty
-        or missing id removes the socket's entry rather than storing None."""
-        if device_id:
-            self._selections[ws] = device_id
-        else:
-            self._selections.pop(ws, None)
-
-    def selected_device_ids(self) -> set[str]:
-        """The union of device ids currently selected by any connected socket."""
-        return set(self._selections.values())
-
-    def unselect_device_everywhere(self, device_id: str):
-        """Remove a device id from every socket's selection, e.g. after it
-        has been deleted."""
-        for ws, did in list(self._selections.items()):
-            if did == device_id:
-                self._selections.pop(ws, None)
-
-    def owner_of(self, ws: WebSocket) -> str:
-        return self._owners.get(ws)
-
-    def owner_count(self, owner_id: str) -> int:
-        return sum(1 for o in self._owners.values() if o == owner_id)
-
-    async def broadcast(self, msg: dict):
-        if not self._connections:
-            return
-        data = json.dumps(msg)
-        dead = []
-        for ws in self._connections:
-            try:
-                await ws.send_text(data)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.drop(ws)
-
-    async def send_to_owner(self, owner_id: str, msg: dict):
-        if not self._connections or not owner_id:
-            return
-        data = json.dumps(msg)
-        dead = []
-        for ws in self._connections:
-            if self._owners.get(ws) != owner_id:
-                continue
-            try:
-                await ws.send_text(data)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.drop(ws)
 
 
 ws_mgr = _WSManager()
@@ -188,21 +88,6 @@ _metrics_cache: dict[str, dict] = {}
 # window, and the monotonic time that window started.
 _metrics_error_state: dict[str, dict] = {}
 
-# In-memory device list — seeded from disk at startup, kept in sync by _save()
-_devices_cache: list = []
-
-# True if configuration changes cannot be persisted (checked once at startup)
-_storage_warning = False
-
-# True only when startup recovered the cached configuration from devices.json.bak.
-# It deliberately remains latched until the service is restarted.
-_recovery_mode = False
-
-# True only for a startup that repaired the primary configuration from its backup.
-_recovered_notice = False
-
-# Exact already-validated backup payload retained only while fallback recovery is read-only.
-_recovery_backup_contents: str | None = None
 _recovery_retry_lock = asyncio.Lock()
 
 # Pending SSH-release tasks per owner, scheduled when their last socket drops
@@ -225,125 +110,22 @@ async def _release_after_grace(owner: str):
     if ws_mgr.owner_count(owner) == 0:
         ssh_mgr.release_owner(owner)
 
-# Debug log rotation: one active file plus this many rotated copies, each
-# capped at this size (roughly 20 MB retained in total at the defaults).
-_DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
-_DEBUG_LOG_BACKUP_COUNT = 3
-
 # How long a persistently-failing device's identical error is suppressed
 # before one summary line is logged for that window.
 _METRICS_ERROR_SUMMARY_SECONDS = 5 * 60
-
-
-def _debug_log_opener(path: str, _flags: int) -> int:
-    """Force-create every debug log file (active or freshly rotated) as a
-    private mode-0600 file, regardless of the flags logging would otherwise
-    use."""
-    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-
-
-class _PrivateRotatingFileHandler(RotatingFileHandler):
-    """RotatingFileHandler that guarantees mode 0600 on the active file and
-    on every rotated copy. Renames preserve permissions on their own, but we
-    re-apply 0600 explicitly after each rollover so that guarantee can't be
-    silently lost by a future change."""
-
-    def _open(self):
-        return open(self.baseFilename, self.mode, encoding=self.encoding, opener=_debug_log_opener)
-
-    def doRollover(self):
-        super().doRollover()
-        for i in range(1, self.backupCount + 1):
-            rotated = f"{self.baseFilename}.{i}"
-            if os.path.exists(rotated):
-                os.chmod(rotated, 0o600)
-        if os.path.exists(self.baseFilename):
-            os.chmod(self.baseFilename, 0o600)
-
-    def handleError(self, record):
-        # The logging framework routes both write failures and doRollover
-        # failures here instead of letting them propagate. Default behavior
-        # is a silent stderr traceback; turn it into a hard, visible disable
-        # instead so a broken log file never keeps silently failing.
-        _disable_debug_on_failure("debug log write or rotation failed")
-
-
-# Debug log handler — None when disabled
-_debug_handler: Optional[RotatingFileHandler] = None
-_debug_logger = logging.getLogger("simple_network_dashboard.debug")
-_debug_logger.setLevel(logging.DEBUG)
-_debug_logger.propagate = False
-
-# Event loop the debug-failure path can use to reach browser tabs from an
-# SSH worker thread. Set in lifespan(), alongside ssh_mgr.set_loop().
-_debug_loop: Optional[asyncio.AbstractEventLoop] = None
-
-# Reason the debug log was last disabled by a failure, shown to any tab that
-# connects afterward. Cleared once debug logging is successfully re-enabled.
-_debug_failed_notice: Optional[str] = None
-
-
-def _debug_enabled() -> bool:
-    return _debug_handler is not None
-
-
-def _debug_write(text: str):
-    if _debug_handler is not None:
-        _debug_logger.debug(text)
-
-
-def _disable_debug_on_failure(reason: str):
-    """Shared failure path for debug-log open/write/rotation errors.
-
-    Safe to call from any thread (including SSH worker threads) and must
-    never raise. Tears down the broken handler, warns the journal, and
-    pushes a visible warning to every connected browser tab. Idempotent:
-    once _debug_handler is None, later calls are a no-op so several writes
-    failing in a row don't spam the journal or the tabs repeatedly."""
-    global _debug_handler, _debug_failed_notice
-
-    if _debug_handler is None:
-        return
-
-    handler = _debug_handler
-    _debug_handler = None
-    _debug_failed_notice = reason
-
-    try:
-        _debug_logger.removeHandler(handler)
-    except Exception:
-        pass
-    try:
-        handler.close()
-    except Exception:
-        pass
-
-    try:
-        print(f"WARNING: debug logging disabled ({reason}). See the server log directory.", file=sys.stderr, flush=True)
-    except Exception:
-        pass
-
-    try:
-        loop = _debug_loop
-        if loop is not None and not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(
-                ws_mgr.broadcast({"type": "debug_failed", "reason": reason}), loop
-            )
-    except Exception:
-        pass
 
 
 async def _broadcast(msg: dict):
     """Broadcast wrapper that also writes SSH events to the debug log.
     If msg contains a private '_owner' key, route to that owner only;
     otherwise broadcast to everyone.  The key is popped before sending."""
-    if _debug_enabled():
+    if debug_log._debug_enabled():
         t   = msg.get("type", "")
         did = msg.get("device_id", "")
         if t == "ssh_log":
-            _debug_write(f"SSH [{did}] {msg.get('level', 'out').upper()}: {msg.get('text', '')}")
+            debug_log._debug_write(f"SSH [{did}] {msg.get('level', 'out').upper()}: {msg.get('text', '')}")
         elif t == "ssh_status":
-            _debug_write(f"SSH [{did}] → {msg.get('state', '')}")
+            debug_log._debug_write(f"SSH [{did}] → {msg.get('state', '')}")
     owner = msg.pop("_owner", None)
     if owner:
         await ws_mgr.send_to_owner(owner, msg)
@@ -351,81 +133,7 @@ async def _broadcast(msg: dict):
         await ws_mgr.broadcast(msg)
 
 
-ssh_mgr = SSHManager(_broadcast, _debug_write)
-
-
-# ---------------------------------------------------------------------------
-# Device persistence
-# ---------------------------------------------------------------------------
-
-def _parse_devices(contents: str) -> list:
-    """Parse and normalize a devices.json payload."""
-    data = json.loads(contents)
-    devices = data.get("devices", data) if isinstance(data, dict) else data
-    return [_norm(d) for d in devices if isinstance(d, dict)]
-
-
-def _load_startup_devices() -> tuple[list, bool, bool]:
-    """Load the primary once, repairing it from a valid backup when possible.
-
-    Returns devices, whether a repair succeeded, and whether failed repair left
-    the process in restart-latched read-only mode.
-    """
-    global _recovery_backup_contents
-    _recovery_backup_contents = None
-    try:
-        with open(DEVICES_FILE, "r", encoding="utf-8") as f:
-            return _parse_devices(f.read()), False, False
-    except Exception as primary_error:
-        try:
-            with open(f"{DEVICES_FILE}.bak", "r", encoding="utf-8") as f:
-                backup_contents = f.read()
-            devices = _parse_devices(backup_contents)
-        except Exception as backup_error:
-            if isinstance(primary_error, FileNotFoundError) and isinstance(
-                backup_error, FileNotFoundError
-            ):
-                return [], False, False
-            print(
-                "WARNING: Configuration recovery mode is active. "
-                "Neither configuration copy could be loaded; "
-                "configuration changes are disabled to protect the existing files.",
-                flush=True,
-            )
-            return [], False, True
-        try:
-            _replace_primary_from_backup(backup_contents)
-            with open(DEVICES_FILE, "r", encoding="utf-8") as f:
-                _parse_devices(f.read())
-        except Exception as repair_error:
-            _recovery_backup_contents = backup_contents
-            print(
-                "WARNING: Configuration recovery mode is active. "
-                "Automatic restoration from the validated backup did not complete "
-                f"({type(repair_error).__name__}); "
-                "configuration changes are disabled until recovery succeeds.",
-                flush=True,
-            )
-            return devices, False, True
-        print(
-            "NOTICE: Configuration was restored automatically from its validated backup because "
-            f"{_configuration_failure_reason(primary_error)}.",
-            flush=True,
-        )
-        return devices, True, False
-
-
-def _configuration_failure_reason(error: Exception) -> str:
-    """Describe a primary-load failure without including file contents or raw errors."""
-    if isinstance(error, FileNotFoundError):
-        return "the primary configuration is missing"
-    if isinstance(error, json.JSONDecodeError):
-        return "the primary configuration contains invalid JSON"
-    if isinstance(error, UnicodeError):
-        return "the primary configuration is not valid UTF-8"
-    if isinstance(error, OSError):
-        return f"the primary configuration could not be read ({type(error).__name__})"
-    return f"the primary configuration could not be normalized ({type(error).__name__})"
+ssh_mgr = SSHManager(_broadcast, debug_log._debug_write)
 
 
 # Shared error message for endpoints that fail to persist a device change
@@ -436,146 +144,6 @@ _RECOVERY_READ_ONLY_ERROR = (
 _DEVICE_LIMIT_ERROR = "The device limit of 250 has been reached."
 _UNKNOWN_DEVICE_ERROR = "That device does not exist."
 _REQUEST_BODY_TOO_LARGE_ERROR = "Request body is too large."
-
-
-def _open_private_file(path: str, *, buffering: int = -1):
-    fd = None
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.fchmod(fd, 0o600)
-        file = os.fdopen(fd, "w", encoding="utf-8", buffering=buffering)
-        fd = None
-        return file
-    except Exception:
-        if fd is not None:
-            os.close(fd)
-        raise
-
-
-def _open_private_temp_file() -> tuple[str, object]:
-    """Create a private, same-directory file for an atomic device save."""
-    fd = None
-    path = None
-    try:
-        fd, path = tempfile.mkstemp(prefix=".devices-", suffix=".tmp", dir=DATA_DIR)
-        os.fchmod(fd, 0o600)
-        file = os.fdopen(fd, "w", encoding="utf-8")
-        fd = None
-        return path, file
-    except Exception:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if path is not None:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-        raise
-
-
-def _fsync_data_directory() -> None:
-    """Persist the replacement entry after the temporary file is replaced."""
-    # Windows does not force-flush this directory entry, so a crash or power loss
-    # can lose the just-replaced file's directory update during local development.
-    if os.name == "nt":
-        return
-    fd = None
-    try:
-        fd = os.open(DATA_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        os.fsync(fd)
-    finally:
-        if fd is not None:
-            os.close(fd)
-
-
-def _write_private_payload(path: str, contents: str, on_replaced=None) -> None:
-    """Durably replace one private configuration file with an exact payload."""
-    temp_path = None
-    try:
-        temp_path, f = _open_private_temp_file()
-        with f:
-            f.write(contents)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, path)
-        temp_path = None
-        if on_replaced is not None:
-            on_replaced()
-        _fsync_data_directory()
-    finally:
-        if temp_path is not None:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-
-
-def _replace_primary_from_backup(contents: str) -> None:
-    """Atomically restore the exact validated backup payload to the primary."""
-    _write_private_payload(DEVICES_FILE, contents)
-
-
-def _restore_and_verify_primary(contents: str) -> None:
-    """Restore an already-validated payload and prove the replacement can load."""
-    _replace_primary_from_backup(contents)
-    with open(DEVICES_FILE, "r", encoding="utf-8") as f:
-        _parse_devices(f.read())
-
-
-def _save(devices: list) -> bool:
-    global _devices_cache
-    if _recovery_mode:
-        msg = "SAVE REJECTED: configuration recovery mode is read-only until recovery succeeds."
-        _debug_write(msg)
-        print(msg, flush=True)
-        return False
-    replaced = False
-
-    def primary_replaced() -> None:
-        global _devices_cache
-        nonlocal replaced
-        replaced = True
-        _devices_cache = list(devices)
-
-    try:
-        contents = json.dumps({"_app": APP_NAME, "devices": devices}, indent=2)
-        _parse_devices(contents)
-        _write_private_payload(DEVICES_FILE, contents, primary_replaced)
-        _write_private_payload(f"{DEVICES_FILE}.bak", contents)
-        return True
-    except Exception:
-        if replaced:
-            msg = "SAVE UNCONFIRMED: primary configuration was replaced but the durable mirrored save did not complete."
-        else:
-            msg = "SAVE FAILED: could not persist device configuration."
-        _debug_write(msg)
-        print(msg, flush=True)  # always visible in the systemd journal, even with debug logging off
-        return False
-
-
-def _norm(d: dict) -> dict:
-    cmds = d.get("commands", [])
-    if not isinstance(cmds, list):
-        cmds = []
-    clean = []
-    for c in cmds:
-        if not isinstance(c, dict):
-            continue
-        cmd = (c.get("command") or "").strip()
-        if not cmd:
-            continue
-        clean.append({
-            "name":    (c.get("name") or cmd[:24]).strip(),
-            "command": cmd,
-            "sudo":    bool(c.get("sudo", False)),
-            "confirm": (c.get("confirm") or "").strip(),
-        })
-    d["commands"]     = clean
-    d["metrics_port"] = int(d.get("metrics_port") or 9100)
-    return d
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +159,7 @@ def _log_metrics_result(did: str, host: str, port: int, metrics: dict):
 
     if not error:
         if state is not None:
-            _debug_write(
+            debug_log._debug_write(
                 f"METRICS [{did}] {host}:{port} → recovered after "
                 f"{state['total_count']} failed polls"
             )
@@ -606,13 +174,13 @@ def _log_metrics_result(did: str, host: str, port: int, metrics: dict):
             "total_count": 1,
             "window_start": now,
         }
-        _debug_write(f"METRICS [{did}] {host}:{port} → {error}")
+        debug_log._debug_write(f"METRICS [{did}] {host}:{port} → {error}")
         return
 
     state["window_count"] += 1
     state["total_count"] += 1
     if now - state["window_start"] >= _METRICS_ERROR_SUMMARY_SECONDS:
-        _debug_write(
+        debug_log._debug_write(
             f"METRICS [{did}] {host}:{port} → still failing: {error} "
             f"(repeated {state['window_count']} times in the last 5 minutes)"
         )
@@ -636,7 +204,7 @@ async def _poll_once():
 
     if selected_ids:
         devices = [
-            d for d in _devices_cache if d.get("id") in selected_ids
+            d for d in runtime_state._devices_cache if d.get("id") in selected_ids
         ]
         fetches = [
             fetch_metrics(
@@ -679,24 +247,20 @@ async def _idle_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _devices_cache, _storage_warning, _recovery_mode, _recovered_notice, _debug_loop
-    _devices_cache, _recovered_notice, _recovery_mode = _load_startup_devices()
-    _storage_warning = _recovery_mode
+    runtime_state._devices_cache, runtime_state._recovered_notice, runtime_state._recovery_mode = persistence._load_startup_devices()
+    runtime_state._storage_warning = runtime_state._recovery_mode
     if os.path.exists(DEVICES_FILE) and not os.access(DEVICES_FILE, os.W_OK):
-        _storage_warning = True
+        runtime_state._storage_warning = True
         print(f"WARNING: {DEVICES_FILE} is not writable. Device and command changes will NOT be saved.", flush=True)
     ssh_mgr.set_loop(asyncio.get_running_loop())
-    _debug_loop = asyncio.get_running_loop()
+    debug_log.configure(broadcaster=ws_mgr.broadcast, loop=asyncio.get_running_loop())
     metrics_task = asyncio.create_task(_metrics_loop())
     idle_task    = asyncio.create_task(_idle_loop())
     yield
     metrics_task.cancel()
     idle_task.cancel()
     ssh_mgr.disconnect_all()
-    if _debug_handler is not None:
-        _debug_write("=== Debug log closed (server shutdown) ===")
-        _debug_logger.removeHandler(_debug_handler)
-        _debug_handler.close()
+    debug_log.close_on_shutdown()
 
 
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
@@ -1033,15 +597,15 @@ async def ws_endpoint(ws: WebSocket):
         # ssh_connected = devices this owner currently owns
         own_connected = ssh_mgr.owner_connected_ids(owner)
         await ws.send_text(json.dumps({
-            "type": "init", "devices": _devices_cache, "version": APP_VERSION,
+            "type": "init", "devices": runtime_state._devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
             "ssh_locked": ssh_mgr.locked_device_ids(),
-            "debug": _debug_enabled(),
-            "debug_failed": _debug_failed_notice,
-            "storage_warning": _storage_warning,
-            "recovery_mode": _recovery_mode,
-            "recovery_retry_available": _recovery_backup_contents is not None,
-            "recovered_notice": _recovered_notice,
+            "debug": debug_log._debug_enabled(),
+            "debug_failed": debug_log._debug_failed_notice,
+            "storage_warning": runtime_state._storage_warning,
+            "recovery_mode": runtime_state._recovery_mode,
+            "recovery_retry_available": runtime_state._recovery_backup_contents is not None,
+            "recovered_notice": runtime_state._recovered_notice,
         }))
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
@@ -1100,32 +664,31 @@ class DeviceIn(BaseModel):
 
 @app.get("/api/devices")
 async def get_devices():
-    return _devices_cache
+    return runtime_state._devices_cache
 
 
 @app.post("/api/retry-recovery")
 async def retry_recovery():
     """Retry a failed startup repair using only the retained validated payload."""
-    global _recovery_mode, _storage_warning, _recovery_backup_contents
     async with _recovery_retry_lock:
-        if not _recovery_mode:
+        if not runtime_state._recovery_mode:
             return {"ok": True, "recovered": False}
-        contents = _recovery_backup_contents
+        contents = runtime_state._recovery_backup_contents
         if contents is None:
             msg = "RECOVERY RETRY FAILED: retained payload unavailable."
-            _debug_write(msg)
+            debug_log._debug_write(msg)
             print(msg, flush=True)
             return {"ok": False, "error": "No validated backup is available for automatic recovery."}
         try:
-            _restore_and_verify_primary(contents)
+            persistence._restore_and_verify_primary(contents)
         except Exception as error:
             msg = f"RECOVERY RETRY FAILED: {type(error).__name__}"
-            _debug_write(msg)
+            debug_log._debug_write(msg)
             print(msg, flush=True)
             return {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
-        _recovery_mode = False
-        _storage_warning = False
-        _recovery_backup_contents = None
+        runtime_state._recovery_mode = False
+        runtime_state._storage_warning = False
+        runtime_state._recovery_backup_contents = None
         await ws_mgr.broadcast({"type": "recovery_restored"})
         return {"ok": True, "recovered": True}
 
@@ -1145,15 +708,15 @@ def _resolve_saved_commands(incoming: Optional[list], existing: Optional[dict]) 
 
 @app.post("/api/devices")
 async def upsert_device(body: DeviceIn):
-    if _recovery_mode:
+    if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
     d       = body.model_dump()
-    devices = copy.deepcopy(_devices_cache)
+    devices = copy.deepcopy(runtime_state._devices_cache)
     if d.get("id"):
         for i, existing in enumerate(devices):
             if existing["id"] == d["id"]:
                 d["commands"] = _resolve_saved_commands(d["commands"], existing)
-                devices[i] = _norm(d)
+                devices[i] = persistence._norm(d)
                 break
         else:
             return {"ok": False, "error": _UNKNOWN_DEVICE_ERROR}
@@ -1162,8 +725,8 @@ async def upsert_device(body: DeviceIn):
             return {"ok": False, "error": _DEVICE_LIMIT_ERROR}
         d["id"]       = "dev_" + uuid.uuid4().hex[:12]
         d["commands"] = _resolve_saved_commands(d["commands"], None)
-        devices.append(_norm(d))
-    if not _save(devices):
+        devices.append(persistence._norm(d))
+    if not persistence._save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
@@ -1171,10 +734,10 @@ async def upsert_device(body: DeviceIn):
 
 @app.delete("/api/devices/{device_id}")
 async def delete_device(device_id: str):
-    if _recovery_mode:
+    if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
-    devices = [d for d in _devices_cache if d["id"] != device_id]
-    if not _save(devices):
+    devices = [d for d in runtime_state._devices_cache if d["id"] != device_id]
+    if not persistence._save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     ws_mgr.unselect_device_everywhere(device_id)
     ssh_mgr.disconnect(device_id)
@@ -1190,15 +753,15 @@ class CommandsIn(BaseModel):
 
 @app.put("/api/devices/{device_id}/commands")
 async def update_commands(device_id: str, body: CommandsIn):
-    if _recovery_mode:
+    if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
-    devices = copy.deepcopy(_devices_cache)
+    devices = copy.deepcopy(runtime_state._devices_cache)
     for i, d in enumerate(devices):
         if d["id"] == device_id:
             d["commands"] = body.model_dump()["commands"]
-            devices[i] = _norm(d)
+            devices[i] = persistence._norm(d)
             break
-    if not _save(devices):
+    if not persistence._save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
@@ -1219,7 +782,7 @@ class ConnectIn(BaseModel):
 async def ssh_connect(body: ConnectIn, x_browser_id: str = Header(None)):
     if not x_browser_id:
         return {"ok": False, "error": "Missing browser id."}
-    devices = _devices_cache
+    devices = runtime_state._devices_cache
     device  = next((d for d in devices if d["id"] == body.device_id), None)
     if not device:
         return {"ok": False, "error": "Device not found."}
@@ -1316,143 +879,11 @@ class DebugIn(BaseModel):
 
 @app.post("/api/debug")
 async def toggle_debug(body: DebugIn):
-    global _debug_handler, _debug_failed_notice
-    if body.enabled and _debug_handler is None:
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        path  = os.path.join(LOG_DIR, f"Debug_Log_{stamp}.txt")
-        handler = None
-        try:
-            handler = _PrivateRotatingFileHandler(
-                path,
-                mode="w",
-                maxBytes=_DEBUG_LOG_MAX_BYTES,
-                backupCount=_DEBUG_LOG_BACKUP_COUNT,
-                encoding="utf-8",
-            )
-            handler.setFormatter(logging.Formatter(fmt="[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
-            _debug_logger.addHandler(handler)
-        except Exception as e:
-            if handler is not None:
-                try:
-                    _debug_logger.removeHandler(handler)
-                except Exception:
-                    pass
-            print(f"WARNING: could not enable debug logging ({e}). See the server log directory.", file=sys.stderr, flush=True)
-            return {"ok": False, "error": f"Could not open the debug log file ({type(e).__name__})."}
-        _debug_handler = handler
-        _debug_failed_notice = None
-        _debug_write("=== Debug log started ===")
-        return {"ok": True, "enabled": True, "path": path}
-    if not body.enabled and _debug_handler is not None:
-        _debug_write("=== Debug log stopped ===")
-        _debug_logger.removeHandler(_debug_handler)
-        _debug_handler.close()
-        _debug_handler = None
+    if body.enabled and not debug_log._debug_enabled():
+        return debug_log.enable(LOG_DIR)
+    if not body.enabled and debug_log._debug_enabled():
+        debug_log.disable()
     return {"ok": True, "enabled": False}
-
-
-# ---------------------------------------------------------------------------
-# Update check
-# ---------------------------------------------------------------------------
-
-GITHUB_RELEASES_URL = (
-    "https://api.github.com/repos/JDE-Projects/Simple-Network-Dashboard/releases/latest"
-)
-
-
-def _update_error_reason(exc: BaseException) -> str:
-    """Turn a check_update exception into a short, plain-language reason to
-    show in the UI. Pure and network-free: takes the already-raised exception,
-    never touches the network itself.
-
-    Each branch is specific to a failure that can actually cause it, and
-    names a next step where there is a sensible one. Subclasses are checked
-    before their parents: SSLCertVerificationError and SSLEOFError/
-    SSLZeroReturnError before the generic ssl.SSLError, and the specific
-    ConnectionError subclasses and socket.gaierror before the generic OSError
-    branch (socket.timeout is an alias of TimeoutError, and both are OSError
-    subclasses)."""
-    # HTTPError is a URLError subclass but carries its own .code, so classify
-    # it before unwrapping anything.
-    if isinstance(exc, urllib.error.HTTPError):
-        if exc.code == 403:
-            return (
-                "GitHub is rate-limiting update checks from this network. "
-                "Try again later."
-            )
-        if exc.code == 404:
-            return "No published release was found."
-        if 500 <= exc.code < 600:
-            return f"GitHub is having trouble on its end (HTTP {exc.code})."
-        return f"GitHub returned an error (HTTP {exc.code})."
-
-    if isinstance(exc, json.JSONDecodeError):
-        return (
-            "GitHub returned something unexpected. This often means a proxy "
-            "or a guest wifi sign-in page answered instead."
-        )
-
-    # A plain URLError wraps the underlying cause (ssl.SSLError, socket.timeout,
-    # a DNS/socket OSError, ...) in its .reason; unwrap it to classify the
-    # actual cause, but remember it came from a URLError for the fallback below.
-    is_url_error = isinstance(exc, urllib.error.URLError)
-    cause = exc.reason if is_url_error and exc.reason is not None else exc
-
-    if isinstance(cause, ssl.SSLCertVerificationError):
-        return (
-            "GitHub's certificate could not be verified. This usually means "
-            "antivirus or a network filter is inspecting HTTPS traffic."
-        )
-    if isinstance(cause, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
-        return "The secure connection was cut off during the handshake with GitHub."
-    if isinstance(cause, ssl.SSLError):
-        return "The secure connection to GitHub failed."
-    if isinstance(cause, socket.gaierror):
-        return (
-            "The address for api.github.com could not be looked up. Check "
-            "DNS or the internet connection."
-        )
-    if isinstance(cause, (socket.timeout, TimeoutError)):
-        return "GitHub didn't respond in time."
-    if isinstance(cause, (ConnectionRefusedError, ConnectionResetError)):
-        return (
-            "The connection was refused or reset. A firewall or proxy may "
-            "be blocking it."
-        )
-    if isinstance(cause, OSError) and getattr(cause, "errno", None) == errno.ENETUNREACH:
-        return "No network connection."
-    if is_url_error:
-        return "Couldn't reach GitHub. Check the internet connection."
-
-    text = f"{type(exc).__name__}: {exc}"
-    if len(text) > 120:
-        text = text[:117] + "..."
-    return text
-
-
-def _version_tuple(v: str) -> tuple:
-    """Turn '1.2.3' into (1, 2, 3).  Non-numeric parts default to 0."""
-    parts = []
-    for p in v.split("."):
-        try:
-            parts.append(int(p))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
-
-
-def _fetch_latest_version() -> str:
-    """Blocking call — must be run in an executor.  Returns the latest release version (no leading 'v')."""
-    req = urllib.request.Request(
-        GITHUB_RELEASES_URL,
-        headers={
-            "User-Agent": f"{APP_NAME}/{APP_VERSION}",
-            "Accept": "application/vnd.github+json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return (data.get("tag_name") or "").lstrip("vV")
 
 
 @app.get("/api/check-update")
@@ -1469,7 +900,7 @@ async def check_update():
     except Exception as e:
         reason = _update_error_reason(e)
         try:
-            _debug_write(f"check_update failed: {type(e).__name__}: {e}")
+            debug_log._debug_write(f"check_update failed: {type(e).__name__}: {e}")
         except Exception:
             pass
         return {"ok": False, "reason": reason}

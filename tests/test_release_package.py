@@ -18,6 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRED_FILES = [
     "main.py",
+    "config.py",
+    "ws_manager.py",
+    "update_check.py",
+    "runtime_state.py",
+    "debug_log.py",
+    "persistence.py",
     "metrics_poller.py",
     "ssh_manager.py",
     "auth.py",
