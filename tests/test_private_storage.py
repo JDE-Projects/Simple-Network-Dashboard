@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 
+import debug_log
 import main
 import runtime_state
 import pytest
@@ -875,7 +876,7 @@ def test_recovery_ui_shows_only_simple_warning_and_restored_notice() -> None:
 
 def test_debug_log_is_created_in_private_log_directory(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main, "LOG_DIR", str(tmp_path))
-    monkeypatch.setattr(main, "_debug_handler", None)
+    monkeypatch.setattr(debug_log, "_debug_handler", None)
 
     response = asyncio.run(main.toggle_debug(main.DebugIn(enabled=True)))
     assert response["path"].startswith(str(tmp_path))

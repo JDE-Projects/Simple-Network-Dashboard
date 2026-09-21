@@ -2,7 +2,7 @@
 
 A persistently-failing device would otherwise log an identical error line
 every ~2 seconds. These tests drive main._poll_once directly (as
-test_metrics_loop.py does), monkeypatch main._debug_write to capture the
+test_metrics_loop.py does), monkeypatch debug_log._debug_write to capture the
 lines that would have been written, and monkeypatch time.monotonic so the
 five-minute summary window can be advanced without a real wait.
 
@@ -14,6 +14,7 @@ that window.
 
 import asyncio
 
+import debug_log
 import main
 import runtime_state
 
@@ -29,7 +30,7 @@ def _select(monkeypatch, device_ids):
 
 def _debug_recorder(monkeypatch):
     lines = []
-    monkeypatch.setattr(main, "_debug_write", lambda msg: lines.append(msg))
+    monkeypatch.setattr(debug_log, "_debug_write", lambda msg: lines.append(msg))
     return lines
 
 

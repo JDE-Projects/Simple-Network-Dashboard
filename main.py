@@ -9,7 +9,6 @@ import asyncio
 import copy
 import hmac
 import json
-import logging
 import os
 import secrets
 import stat
@@ -19,9 +18,7 @@ import time
 import uuid
 
 from contextlib import asynccontextmanager
-from datetime import datetime
 from ipaddress import ip_address
-from logging.handlers import RotatingFileHandler
 from typing import Annotated, Optional
 
 from argon2.exceptions import Argon2Error
@@ -31,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+import debug_log
 import runtime_state
 from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
@@ -112,125 +110,22 @@ async def _release_after_grace(owner: str):
     if ws_mgr.owner_count(owner) == 0:
         ssh_mgr.release_owner(owner)
 
-# Debug log rotation: one active file plus this many rotated copies, each
-# capped at this size (roughly 20 MB retained in total at the defaults).
-_DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
-_DEBUG_LOG_BACKUP_COUNT = 3
-
 # How long a persistently-failing device's identical error is suppressed
 # before one summary line is logged for that window.
 _METRICS_ERROR_SUMMARY_SECONDS = 5 * 60
-
-
-def _debug_log_opener(path: str, _flags: int) -> int:
-    """Force-create every debug log file (active or freshly rotated) as a
-    private mode-0600 file, regardless of the flags logging would otherwise
-    use."""
-    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-
-
-class _PrivateRotatingFileHandler(RotatingFileHandler):
-    """RotatingFileHandler that guarantees mode 0600 on the active file and
-    on every rotated copy. Renames preserve permissions on their own, but we
-    re-apply 0600 explicitly after each rollover so that guarantee can't be
-    silently lost by a future change."""
-
-    def _open(self):
-        return open(self.baseFilename, self.mode, encoding=self.encoding, opener=_debug_log_opener)
-
-    def doRollover(self):
-        super().doRollover()
-        for i in range(1, self.backupCount + 1):
-            rotated = f"{self.baseFilename}.{i}"
-            if os.path.exists(rotated):
-                os.chmod(rotated, 0o600)
-        if os.path.exists(self.baseFilename):
-            os.chmod(self.baseFilename, 0o600)
-
-    def handleError(self, record):
-        # The logging framework routes both write failures and doRollover
-        # failures here instead of letting them propagate. Default behavior
-        # is a silent stderr traceback; turn it into a hard, visible disable
-        # instead so a broken log file never keeps silently failing.
-        _disable_debug_on_failure("debug log write or rotation failed")
-
-
-# Debug log handler — None when disabled
-_debug_handler: Optional[RotatingFileHandler] = None
-_debug_logger = logging.getLogger("simple_network_dashboard.debug")
-_debug_logger.setLevel(logging.DEBUG)
-_debug_logger.propagate = False
-
-# Event loop the debug-failure path can use to reach browser tabs from an
-# SSH worker thread. Set in lifespan(), alongside ssh_mgr.set_loop().
-_debug_loop: Optional[asyncio.AbstractEventLoop] = None
-
-# Reason the debug log was last disabled by a failure, shown to any tab that
-# connects afterward. Cleared once debug logging is successfully re-enabled.
-_debug_failed_notice: Optional[str] = None
-
-
-def _debug_enabled() -> bool:
-    return _debug_handler is not None
-
-
-def _debug_write(text: str):
-    if _debug_handler is not None:
-        _debug_logger.debug(text)
-
-
-def _disable_debug_on_failure(reason: str):
-    """Shared failure path for debug-log open/write/rotation errors.
-
-    Safe to call from any thread (including SSH worker threads) and must
-    never raise. Tears down the broken handler, warns the journal, and
-    pushes a visible warning to every connected browser tab. Idempotent:
-    once _debug_handler is None, later calls are a no-op so several writes
-    failing in a row don't spam the journal or the tabs repeatedly."""
-    global _debug_handler, _debug_failed_notice
-
-    if _debug_handler is None:
-        return
-
-    handler = _debug_handler
-    _debug_handler = None
-    _debug_failed_notice = reason
-
-    try:
-        _debug_logger.removeHandler(handler)
-    except Exception:
-        pass
-    try:
-        handler.close()
-    except Exception:
-        pass
-
-    try:
-        print(f"WARNING: debug logging disabled ({reason}). See the server log directory.", file=sys.stderr, flush=True)
-    except Exception:
-        pass
-
-    try:
-        loop = _debug_loop
-        if loop is not None and not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(
-                ws_mgr.broadcast({"type": "debug_failed", "reason": reason}), loop
-            )
-    except Exception:
-        pass
 
 
 async def _broadcast(msg: dict):
     """Broadcast wrapper that also writes SSH events to the debug log.
     If msg contains a private '_owner' key, route to that owner only;
     otherwise broadcast to everyone.  The key is popped before sending."""
-    if _debug_enabled():
+    if debug_log._debug_enabled():
         t   = msg.get("type", "")
         did = msg.get("device_id", "")
         if t == "ssh_log":
-            _debug_write(f"SSH [{did}] {msg.get('level', 'out').upper()}: {msg.get('text', '')}")
+            debug_log._debug_write(f"SSH [{did}] {msg.get('level', 'out').upper()}: {msg.get('text', '')}")
         elif t == "ssh_status":
-            _debug_write(f"SSH [{did}] → {msg.get('state', '')}")
+            debug_log._debug_write(f"SSH [{did}] → {msg.get('state', '')}")
     owner = msg.pop("_owner", None)
     if owner:
         await ws_mgr.send_to_owner(owner, msg)
@@ -238,7 +133,7 @@ async def _broadcast(msg: dict):
         await ws_mgr.broadcast(msg)
 
 
-ssh_mgr = SSHManager(_broadcast, _debug_write)
+ssh_mgr = SSHManager(_broadcast, debug_log._debug_write)
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +309,7 @@ def _restore_and_verify_primary(contents: str) -> None:
 def _save(devices: list) -> bool:
     if runtime_state._recovery_mode:
         msg = "SAVE REJECTED: configuration recovery mode is read-only until recovery succeeds."
-        _debug_write(msg)
+        debug_log._debug_write(msg)
         print(msg, flush=True)
         return False
     replaced = False
@@ -435,7 +330,7 @@ def _save(devices: list) -> bool:
             msg = "SAVE UNCONFIRMED: primary configuration was replaced but the durable mirrored save did not complete."
         else:
             msg = "SAVE FAILED: could not persist device configuration."
-        _debug_write(msg)
+        debug_log._debug_write(msg)
         print(msg, flush=True)  # always visible in the systemd journal, even with debug logging off
         return False
 
@@ -475,7 +370,7 @@ def _log_metrics_result(did: str, host: str, port: int, metrics: dict):
 
     if not error:
         if state is not None:
-            _debug_write(
+            debug_log._debug_write(
                 f"METRICS [{did}] {host}:{port} → recovered after "
                 f"{state['total_count']} failed polls"
             )
@@ -490,13 +385,13 @@ def _log_metrics_result(did: str, host: str, port: int, metrics: dict):
             "total_count": 1,
             "window_start": now,
         }
-        _debug_write(f"METRICS [{did}] {host}:{port} → {error}")
+        debug_log._debug_write(f"METRICS [{did}] {host}:{port} → {error}")
         return
 
     state["window_count"] += 1
     state["total_count"] += 1
     if now - state["window_start"] >= _METRICS_ERROR_SUMMARY_SECONDS:
-        _debug_write(
+        debug_log._debug_write(
             f"METRICS [{did}] {host}:{port} → still failing: {error} "
             f"(repeated {state['window_count']} times in the last 5 minutes)"
         )
@@ -563,24 +458,20 @@ async def _idle_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _debug_loop
     runtime_state._devices_cache, runtime_state._recovered_notice, runtime_state._recovery_mode = _load_startup_devices()
     runtime_state._storage_warning = runtime_state._recovery_mode
     if os.path.exists(DEVICES_FILE) and not os.access(DEVICES_FILE, os.W_OK):
         runtime_state._storage_warning = True
         print(f"WARNING: {DEVICES_FILE} is not writable. Device and command changes will NOT be saved.", flush=True)
     ssh_mgr.set_loop(asyncio.get_running_loop())
-    _debug_loop = asyncio.get_running_loop()
+    debug_log.configure(broadcaster=ws_mgr.broadcast, loop=asyncio.get_running_loop())
     metrics_task = asyncio.create_task(_metrics_loop())
     idle_task    = asyncio.create_task(_idle_loop())
     yield
     metrics_task.cancel()
     idle_task.cancel()
     ssh_mgr.disconnect_all()
-    if _debug_handler is not None:
-        _debug_write("=== Debug log closed (server shutdown) ===")
-        _debug_logger.removeHandler(_debug_handler)
-        _debug_handler.close()
+    debug_log.close_on_shutdown()
 
 
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
@@ -920,8 +811,8 @@ async def ws_endpoint(ws: WebSocket):
             "type": "init", "devices": runtime_state._devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
             "ssh_locked": ssh_mgr.locked_device_ids(),
-            "debug": _debug_enabled(),
-            "debug_failed": _debug_failed_notice,
+            "debug": debug_log._debug_enabled(),
+            "debug_failed": debug_log._debug_failed_notice,
             "storage_warning": runtime_state._storage_warning,
             "recovery_mode": runtime_state._recovery_mode,
             "recovery_retry_available": runtime_state._recovery_backup_contents is not None,
@@ -996,14 +887,14 @@ async def retry_recovery():
         contents = runtime_state._recovery_backup_contents
         if contents is None:
             msg = "RECOVERY RETRY FAILED: retained payload unavailable."
-            _debug_write(msg)
+            debug_log._debug_write(msg)
             print(msg, flush=True)
             return {"ok": False, "error": "No validated backup is available for automatic recovery."}
         try:
             _restore_and_verify_primary(contents)
         except Exception as error:
             msg = f"RECOVERY RETRY FAILED: {type(error).__name__}"
-            _debug_write(msg)
+            debug_log._debug_write(msg)
             print(msg, flush=True)
             return {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
         runtime_state._recovery_mode = False
@@ -1199,38 +1090,10 @@ class DebugIn(BaseModel):
 
 @app.post("/api/debug")
 async def toggle_debug(body: DebugIn):
-    global _debug_handler, _debug_failed_notice
-    if body.enabled and _debug_handler is None:
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        path  = os.path.join(LOG_DIR, f"Debug_Log_{stamp}.txt")
-        handler = None
-        try:
-            handler = _PrivateRotatingFileHandler(
-                path,
-                mode="w",
-                maxBytes=_DEBUG_LOG_MAX_BYTES,
-                backupCount=_DEBUG_LOG_BACKUP_COUNT,
-                encoding="utf-8",
-            )
-            handler.setFormatter(logging.Formatter(fmt="[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
-            _debug_logger.addHandler(handler)
-        except Exception as e:
-            if handler is not None:
-                try:
-                    _debug_logger.removeHandler(handler)
-                except Exception:
-                    pass
-            print(f"WARNING: could not enable debug logging ({e}). See the server log directory.", file=sys.stderr, flush=True)
-            return {"ok": False, "error": f"Could not open the debug log file ({type(e).__name__})."}
-        _debug_handler = handler
-        _debug_failed_notice = None
-        _debug_write("=== Debug log started ===")
-        return {"ok": True, "enabled": True, "path": path}
-    if not body.enabled and _debug_handler is not None:
-        _debug_write("=== Debug log stopped ===")
-        _debug_logger.removeHandler(_debug_handler)
-        _debug_handler.close()
-        _debug_handler = None
+    if body.enabled and not debug_log._debug_enabled():
+        return debug_log.enable(LOG_DIR)
+    if not body.enabled and debug_log._debug_enabled():
+        debug_log.disable()
     return {"ok": True, "enabled": False}
 
 
@@ -1248,7 +1111,7 @@ async def check_update():
     except Exception as e:
         reason = _update_error_reason(e)
         try:
-            _debug_write(f"check_update failed: {type(e).__name__}: {e}")
+            debug_log._debug_write(f"check_update failed: {type(e).__name__}: {e}")
         except Exception:
             pass
         return {"ok": False, "reason": reason}

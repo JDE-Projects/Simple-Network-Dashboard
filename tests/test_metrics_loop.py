@@ -14,6 +14,7 @@ inspect exactly what was sent without a real WebSocket.
 
 import asyncio
 
+import debug_log
 import main
 import runtime_state
 
@@ -83,7 +84,7 @@ def test_poll_once_isolates_a_single_failed_fetch(monkeypatch):
     broadcasts, broadcast = _recorder()
     monkeypatch.setattr(main.ws_mgr, "broadcast", broadcast)
 
-    monkeypatch.setattr(main, "_debug_write", lambda *a, **k: None)
+    monkeypatch.setattr(debug_log, "_debug_write", lambda *a, **k: None)
 
     asyncio.run(main._poll_once())  # must not raise
 

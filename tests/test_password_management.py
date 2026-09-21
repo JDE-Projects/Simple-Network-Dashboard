@@ -310,7 +310,7 @@ def test_installer_and_uninstaller_contracts_include_only_the_approved_auth_file
     assert 'AUTH_FILE="${DATA_DIR}/auth.json"' in installer
     assert 'SESSIONS_FILE="${DATA_DIR}/sessions.json"' in installer
     assert 'install -o root -g root -m 0755 "$APP_DIR/snd-reset-password" "$RESET_COMMAND"' in installer
-    assert 'cp main.py config.py ws_manager.py update_check.py runtime_state.py metrics_poller.py ssh_manager.py auth.py session_manager.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"' in installer
+    assert 'cp main.py config.py ws_manager.py update_check.py runtime_state.py debug_log.py metrics_poller.py ssh_manager.py auth.py session_manager.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"' in installer
     assert 'RESET_COMMAND="/usr/local/sbin/snd-reset-password"' in uninstaller
     assert 'remove_owned_reset_command()' in uninstaller
     assert 'auth.json' not in uninstaller.split("backup_private_config()", 1)[1].split("finalize_private_backup_dir", 1)[0]
