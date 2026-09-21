@@ -23,6 +23,7 @@ REQUIRED_FILES = [
     "update_check.py",
     "runtime_state.py",
     "debug_log.py",
+    "persistence.py",
     "metrics_poller.py",
     "ssh_manager.py",
     "auth.py",
