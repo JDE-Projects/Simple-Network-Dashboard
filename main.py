@@ -34,7 +34,7 @@ from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
 from auth import load_auth_state, verify_password
 from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageError, SessionStore
-from update_check import GITHUB_RELEASES_URL, _update_error_reason, _version_tuple, _fetch_latest_version
+from update_check import _update_error_reason, _version_tuple, _fetch_latest_version
 from config import (
     APP_NAME,
     APP_VERSION,
@@ -43,7 +43,7 @@ from config import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
     DASHBOARD_ROOT_CERT,
-    DATA_DIR,
+    DATA_DIR,  # noqa: F401 - re-exported so tests can read main.DATA_DIR
     DEVICES_FILE,
     LOG_DIR,
     MAX_COMMAND_LEN,
@@ -63,7 +63,7 @@ from config import (
     WS_POLICY_VIOLATION_CODE,
     WS_RELEASE_GRACE_SECONDS,
     WS_REVALIDATE_SECONDS,
-    _ws_revalidate_seconds,
+    _ws_revalidate_seconds,  # noqa: F401 - re-exported so tests can call main._ws_revalidate_seconds
     _CONTENT_SECURITY_POLICY,
     _PUBLIC_PATHS,
     _UNSAFE_METHODS,
