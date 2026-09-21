@@ -15,6 +15,7 @@ that window.
 import asyncio
 
 import main
+import runtime_state
 
 
 def _one_device():
@@ -56,7 +57,7 @@ async def _poll(monkeypatch, error_or_none):
 
 
 def _setup(monkeypatch):
-    monkeypatch.setattr(main, "_devices_cache", _one_device())
+    monkeypatch.setattr(runtime_state, "_devices_cache", _one_device())
     monkeypatch.setattr(main, "_metrics_cache", {})
     monkeypatch.setattr(main, "_metrics_error_state", {})
     _select(monkeypatch, {"dev_a"})

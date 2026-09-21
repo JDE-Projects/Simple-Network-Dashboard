@@ -12,6 +12,7 @@ import stat
 import subprocess
 
 import main
+import runtime_state
 import pytest
 import ssh_manager
 
@@ -187,7 +188,7 @@ def test_devices_save_uses_private_temp_file_and_atomic_replace(monkeypatch) -> 
     monkeypatch.setattr(main.os, "open", lambda path, flags: events.append(("open", path, flags)) or 12)
     monkeypatch.setattr(main.os, "close", lambda fd: events.append(("close", fd)))
     monkeypatch.setattr(main.os.path, "exists", lambda _path: False)
-    monkeypatch.setattr(main, "_devices_cache", ["old"])
+    monkeypatch.setattr(runtime_state, "_devices_cache", ["old"])
 
     devices = [{"id": "new"}]
     assert main._save(devices)
@@ -216,7 +217,7 @@ def test_devices_save_uses_private_temp_file_and_atomic_replace(monkeypatch) -> 
         ("replace", temp_path, f"{main.DEVICES_FILE}.bak"),
         *directory_sync_events,
     ]
-    assert main._devices_cache == devices
+    assert runtime_state._devices_cache == devices
 
 
 def test_fsync_data_directory_skips_windows_and_syncs_other_platforms(monkeypatch) -> None:
@@ -293,7 +294,7 @@ def test_backup_staging_failure_keeps_new_primary_and_previous_confirmed_backup(
 
     assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == new_devices
     assert (data_dir / "devices.json.bak").read_text(encoding="utf-8") == confirmed_backup
-    assert main._devices_cache == new_devices
+    assert runtime_state._devices_cache == new_devices
     output = capsys.readouterr().out
     assert "durable mirrored save did not complete" in output
     assert "secret backup failure" not in output
@@ -301,7 +302,7 @@ def test_backup_staging_failure_keeps_new_primary_and_previous_confirmed_backup(
 
 def test_primary_pre_replacement_failure_preserves_confirmed_cache(monkeypatch) -> None:
     calls = []
-    monkeypatch.setattr(main, "_devices_cache", [{"id": "confirmed"}])
+    monkeypatch.setattr(runtime_state, "_devices_cache", [{"id": "confirmed"}])
 
     def fail_primary(path, contents, on_replaced=None):
         calls.append((path, contents))
@@ -312,11 +313,11 @@ def test_primary_pre_replacement_failure_preserves_confirmed_cache(monkeypatch) 
 
     assert not main._save([{"id": "new"}])
     assert [path for path, _contents in calls] == [main.DEVICES_FILE]
-    assert main._devices_cache == [{"id": "confirmed"}]
+    assert runtime_state._devices_cache == [{"id": "confirmed"}]
 
 
 def test_primary_directory_fsync_failure_keeps_visible_replacement_in_cache(monkeypatch) -> None:
-    monkeypatch.setattr(main, "_devices_cache", [{"id": "confirmed"}])
+    monkeypatch.setattr(runtime_state, "_devices_cache", [{"id": "confirmed"}])
 
     def write_then_fail(path, _contents, on_replaced=None):
         if path == main.DEVICES_FILE:
@@ -327,7 +328,7 @@ def test_primary_directory_fsync_failure_keeps_visible_replacement_in_cache(monk
     devices = [{"id": "new"}]
 
     assert not main._save(devices)
-    assert main._devices_cache == devices
+    assert runtime_state._devices_cache == devices
 
 
 @pytest.mark.parametrize("failure", ["write", "flush", "file-fsync", "replace"])
@@ -348,7 +349,7 @@ def test_payload_write_failures_preserve_the_last_durable_configuration(
     monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
     monkeypatch.setattr(main, "_fsync_data_directory", lambda: None)
-    monkeypatch.setattr(main, "_devices_cache", confirmed_devices)
+    monkeypatch.setattr(runtime_state, "_devices_cache", confirmed_devices)
 
     real_open_temp = main._open_private_temp_file
     real_fsync = main.os.fsync
@@ -388,12 +389,12 @@ def test_payload_write_failures_preserve_the_last_durable_configuration(
     if payload == "primary":
         assert devices_file.read_text(encoding="utf-8") == confirmed_contents
         assert backup_file.read_text(encoding="utf-8") == confirmed_contents
-        assert main._devices_cache == confirmed_devices
+        assert runtime_state._devices_cache == confirmed_devices
         assert "SAVE FAILED" in output
     else:
         assert json.loads(devices_file.read_text(encoding="utf-8"))["devices"] == new_devices
         assert backup_file.read_text(encoding="utf-8") == confirmed_contents
-        assert main._devices_cache == new_devices
+        assert runtime_state._devices_cache == new_devices
         assert "durable mirrored save did not complete" in output
     assert list(data_dir.glob(".devices-*.tmp")) == []
     assert "private payload failure" not in output
@@ -412,7 +413,7 @@ def test_payload_directory_fsync_failures_keep_visible_replacements(monkeypatch,
     backup_file.write_text(confirmed_contents, encoding="utf-8")
     monkeypatch.setattr(main, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(main, "DEVICES_FILE", str(devices_file))
-    monkeypatch.setattr(main, "_devices_cache", confirmed_devices)
+    monkeypatch.setattr(runtime_state, "_devices_cache", confirmed_devices)
     directory_syncs = 0
 
     def fail_selected_directory_sync():
@@ -430,7 +431,7 @@ def test_payload_directory_fsync_failures_keep_visible_replacements(monkeypatch,
         assert backup_file.read_text(encoding="utf-8") == confirmed_contents
     else:
         assert json.loads(backup_file.read_text(encoding="utf-8"))["devices"] == new_devices
-    assert main._devices_cache == new_devices
+    assert runtime_state._devices_cache == new_devices
     assert list(data_dir.glob(".devices-*.tmp")) == []
     output = capsys.readouterr().out
     assert "durable mirrored save did not complete" in output
@@ -579,7 +580,7 @@ def test_startup_recovers_valid_backup(
     assert devices == [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
     assert recovered is True
     assert read_only is False
-    assert main._recovery_backup_contents is None
+    assert runtime_state._recovery_backup_contents is None
     assert devices_file.read_text(encoding="utf-8") == backup_file.read_text(encoding="utf-8")
     assert "from-backup" not in capsys.readouterr().out
 
@@ -593,7 +594,7 @@ def test_fresh_startup_without_configuration_is_empty_and_writable(monkeypatch, 
     assert devices == []
     assert recovered is False
     assert read_only is False
-    assert main._recovery_backup_contents is None
+    assert runtime_state._recovery_backup_contents is None
 
 
 @pytest.mark.parametrize(
@@ -621,7 +622,7 @@ def test_startup_without_any_valid_configuration_is_empty_and_read_only(
     assert devices == []
     assert recovered is False
     assert read_only is True
-    assert main._recovery_backup_contents is None
+    assert runtime_state._recovery_backup_contents is None
     output = capsys.readouterr().out
     assert "Configuration recovery mode" in output
     for private_contents in (primary_contents, backup_contents):
@@ -631,34 +632,34 @@ def test_startup_without_any_valid_configuration_is_empty_and_read_only(
 
 def test_lifespan_latches_recovery_mode_until_restart(monkeypatch) -> None:
     cached = [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
-    monkeypatch.setattr(main, "_recovery_mode", False)
-    monkeypatch.setattr(main, "_storage_warning", False)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", False)
+    monkeypatch.setattr(runtime_state, "_storage_warning", False)
     monkeypatch.setattr(main, "_load_startup_devices", lambda: (cached, False, True))
     monkeypatch.setattr(main.os.path, "exists", lambda _path: False)
 
     async def check_latched_state() -> None:
         async with main.lifespan(main.app):
-            assert main._devices_cache == cached
-            assert main._recovery_mode is True
-            assert main._storage_warning is True
+            assert runtime_state._devices_cache == cached
+            assert runtime_state._recovery_mode is True
+            assert runtime_state._storage_warning is True
 
     asyncio.run(check_latched_state())
 
 
 def test_lifespan_sets_recovered_notice_without_read_only_mode(monkeypatch) -> None:
     cached = [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
-    monkeypatch.setattr(main, "_recovery_mode", False)
-    monkeypatch.setattr(main, "_storage_warning", False)
-    monkeypatch.setattr(main, "_recovered_notice", False)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", False)
+    monkeypatch.setattr(runtime_state, "_storage_warning", False)
+    monkeypatch.setattr(runtime_state, "_recovered_notice", False)
     monkeypatch.setattr(main, "_load_startup_devices", lambda: (cached, True, False))
     monkeypatch.setattr(main.os.path, "exists", lambda _path: False)
 
     async def check_notice_state() -> None:
         async with main.lifespan(main.app):
-            assert main._devices_cache == cached
-            assert main._recovered_notice is True
-            assert main._recovery_mode is False
-            assert main._storage_warning is False
+            assert runtime_state._devices_cache == cached
+            assert runtime_state._recovered_notice is True
+            assert runtime_state._recovery_mode is False
+            assert runtime_state._storage_warning is False
 
     asyncio.run(check_notice_state())
 
@@ -687,7 +688,7 @@ def test_startup_recovery_hides_primary_read_error(monkeypatch, tmp_path, capsys
     assert devices[0]["id"] == "from-backup"
     assert recovered is False
     assert read_only is True
-    assert main._recovery_backup_contents == backup_file.read_text(encoding="utf-8")
+    assert runtime_state._recovery_backup_contents == backup_file.read_text(encoding="utf-8")
     output = capsys.readouterr().out
     assert "Configuration recovery mode" in output
     assert "private primary detail" not in output
@@ -716,7 +717,7 @@ def test_startup_recovery_replacement_failure_latches_read_only_mode(monkeypatch
     assert devices == [{"id": "from-backup", "commands": [], "metrics_port": 9100}]
     assert recovered is False
     assert read_only is True
-    assert main._recovery_backup_contents == backup_contents
+    assert runtime_state._recovery_backup_contents == backup_contents
     assert devices_file.read_text(encoding="utf-8") == corrupt_primary
     assert backup_file.read_text(encoding="utf-8") == backup_contents
     assert list(data_dir.glob(".devices-*.tmp")) == []
@@ -728,9 +729,9 @@ def test_startup_recovery_replacement_failure_latches_read_only_mode(monkeypatch
 
 def test_recovery_mode_uses_cached_devices_and_rejects_all_configuration_mutations(monkeypatch) -> None:
     cached = [{"id": "saved", "name": "Saved", "commands": [], "metrics_port": 9100}]
-    monkeypatch.setattr(main, "_devices_cache", cached)
-    monkeypatch.setattr(main, "_storage_warning", True)
-    monkeypatch.setattr(main, "_recovery_mode", True)
+    monkeypatch.setattr(runtime_state, "_devices_cache", cached)
+    monkeypatch.setattr(runtime_state, "_storage_warning", True)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", True)
     monkeypatch.setattr(main, "_save", lambda _devices: pytest.fail("attempted save in recovery mode"))
     monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda _device_id: pytest.fail("disconnected during rejected mutation"))
     monkeypatch.setattr(main.ws_mgr, "broadcast", lambda _message: pytest.fail("broadcast rejected mutation"))
@@ -749,9 +750,9 @@ def test_retry_recovery_restores_retained_validated_payload_and_broadcasts(monke
     payload = '{"devices": [{"id": "from-backup"}]}'
     restored = []
     broadcasts = []
-    monkeypatch.setattr(main, "_recovery_mode", True)
-    monkeypatch.setattr(main, "_storage_warning", True)
-    monkeypatch.setattr(main, "_recovery_backup_contents", payload)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", True)
+    monkeypatch.setattr(runtime_state, "_storage_warning", True)
+    monkeypatch.setattr(runtime_state, "_recovery_backup_contents", payload)
     monkeypatch.setattr(main, "_restore_and_verify_primary", lambda contents: restored.append(contents))
 
     async def record_broadcast(message):
@@ -763,16 +764,16 @@ def test_retry_recovery_restores_retained_validated_payload_and_broadcasts(monke
 
     assert result == {"ok": True, "recovered": True}
     assert restored == [payload]
-    assert main._recovery_mode is False
-    assert main._storage_warning is False
-    assert main._recovery_backup_contents is None
+    assert runtime_state._recovery_mode is False
+    assert runtime_state._storage_warning is False
+    assert runtime_state._recovery_backup_contents is None
     assert broadcasts == [{"type": "recovery_restored"}]
 
 
 def test_retry_recovery_failure_keeps_payload_and_hides_raw_error(monkeypatch, capsys) -> None:
     payload = '{"devices": [{"id": "from-backup"}]}'
-    monkeypatch.setattr(main, "_recovery_mode", True)
-    monkeypatch.setattr(main, "_recovery_backup_contents", payload)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", True)
+    monkeypatch.setattr(runtime_state, "_recovery_backup_contents", payload)
     monkeypatch.setattr(
         main,
         "_restore_and_verify_primary",
@@ -782,8 +783,8 @@ def test_retry_recovery_failure_keeps_payload_and_hides_raw_error(monkeypatch, c
     result = asyncio.run(main.retry_recovery())
 
     assert result == {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
-    assert main._recovery_mode is True
-    assert main._recovery_backup_contents == payload
+    assert runtime_state._recovery_mode is True
+    assert runtime_state._recovery_backup_contents == payload
     output = capsys.readouterr().out
     assert "OSError" in output
     assert "private failure detail" not in output
@@ -794,8 +795,8 @@ def test_retry_recovery_is_serialized_and_idempotent_after_success(monkeypatch) 
     payload = '{"devices": [{"id": "from-backup"}]}'
     calls = []
     broadcasts = []
-    monkeypatch.setattr(main, "_recovery_mode", True)
-    monkeypatch.setattr(main, "_recovery_backup_contents", payload)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", True)
+    monkeypatch.setattr(runtime_state, "_recovery_backup_contents", payload)
     monkeypatch.setattr(main, "_restore_and_verify_primary", lambda contents: calls.append(contents))
 
     async def record_broadcast(message):
@@ -815,13 +816,13 @@ def test_retry_recovery_is_serialized_and_idempotent_after_success(monkeypatch) 
 
 
 def test_retry_recovery_is_safe_when_no_recovery_is_active(monkeypatch) -> None:
-    monkeypatch.setattr(main, "_recovery_mode", False)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", False)
 
     assert asyncio.run(main.retry_recovery()) == {"ok": True, "recovered": False}
 
 
 def test_save_defensively_rejects_recovery_mode_without_touching_storage(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(main, "_recovery_mode", True)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", True)
     monkeypatch.setattr(main, "_open_private_temp_file", lambda: pytest.fail("opened storage in recovery mode"))
 
     assert not main._save([{"id": "replacement"}])
@@ -830,8 +831,8 @@ def test_save_defensively_rejects_recovery_mode_without_touching_storage(monkeyp
 
 def test_failed_command_save_does_not_mutate_cached_configuration(monkeypatch) -> None:
     cached = [{"id": "saved", "commands": [{"name": "Original", "command": "uptime"}]}]
-    monkeypatch.setattr(main, "_devices_cache", cached)
-    monkeypatch.setattr(main, "_recovery_mode", False)
+    monkeypatch.setattr(runtime_state, "_devices_cache", cached)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", False)
     monkeypatch.setattr(main, "_save", lambda _devices: False)
 
     result = asyncio.run(
@@ -842,8 +843,8 @@ def test_failed_command_save_does_not_mutate_cached_configuration(monkeypatch) -
     )
 
     assert result == {"ok": False, "error": main._SAVE_ERROR}
-    assert main._devices_cache == cached
-    assert main._devices_cache[0]["commands"][0]["name"] == "Original"
+    assert runtime_state._devices_cache == cached
+    assert runtime_state._devices_cache[0]["commands"][0]["name"] == "Original"
 
 
 def test_recovery_ui_shows_only_simple_warning_and_restored_notice() -> None:
@@ -944,10 +945,10 @@ def test_devices_save_serialization_failure_does_not_touch_storage(monkeypatch, 
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("secret configuration")),
     )
     monkeypatch.setattr(main, "_open_private_temp_file", lambda: pytest.fail("opened storage"))
-    monkeypatch.setattr(main, "_devices_cache", ["old"])
+    monkeypatch.setattr(runtime_state, "_devices_cache", ["old"])
 
     assert not main._save([{"id": "new"}])
-    assert main._devices_cache == ["old"]
+    assert runtime_state._devices_cache == ["old"]
     assert "secret configuration" not in capsys.readouterr().out
 
 
@@ -958,7 +959,7 @@ def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys
     file = _AtomicTextFile(events, 11)
     monkeypatch.setattr(main, "_open_private_temp_file", lambda: (temp_path, file))
     monkeypatch.setattr(main.os, "unlink", lambda path: events.append(("unlink", path)))
-    monkeypatch.setattr(main, "_devices_cache", ["old"])
+    monkeypatch.setattr(runtime_state, "_devices_cache", ["old"])
     if failure == "file-fsync":
         monkeypatch.setattr(
             main.os,
@@ -974,7 +975,7 @@ def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys
 
     assert not main._save([{"id": "new"}])
     assert events[-1] == ("unlink", temp_path)
-    assert main._devices_cache == ["old"]
+    assert runtime_state._devices_cache == ["old"]
     assert "secret configuration" not in capsys.readouterr().out
 
 

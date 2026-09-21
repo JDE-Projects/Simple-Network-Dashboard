@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 import auth
 import main
+import runtime_state
 from session_manager import LoginThrottle, SessionStore
 
 
@@ -43,10 +44,10 @@ def _authenticated_client(tmp_path: Path, monkeypatch) -> TestClient:
 
 
 def _stub_storage(monkeypatch, seed_devices: list) -> None:
-    monkeypatch.setattr(main, "_devices_cache", copy.deepcopy(seed_devices))
+    monkeypatch.setattr(runtime_state, "_devices_cache", copy.deepcopy(seed_devices))
 
     def _fake_save(devices: list) -> bool:
-        main._devices_cache = list(devices)
+        runtime_state._devices_cache = list(devices)
         return True
 
     monkeypatch.setattr(main, "_save", _fake_save)
@@ -87,7 +88,7 @@ def test_unknown_id_is_rejected_and_creates_nothing(tmp_path: Path, monkeypatch)
     assert response.status_code == 200
     assert response.json() == {"ok": False, "error": main._UNKNOWN_DEVICE_ERROR}
     # Store still holds only the original device; nothing with the chosen ID.
-    ids = [d["id"] for d in main._devices_cache]
+    ids = [d["id"] for d in runtime_state._devices_cache]
     assert ids == ["dev_existing0001"]
 
 

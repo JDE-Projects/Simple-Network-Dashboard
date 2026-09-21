@@ -15,6 +15,7 @@ inspect exactly what was sent without a real WebSocket.
 import asyncio
 
 import main
+import runtime_state
 
 
 def _fake_devices():
@@ -41,7 +42,7 @@ def _recorder():
 
 
 def test_poll_once_fetches_both_selected_devices_concurrently(monkeypatch):
-    monkeypatch.setattr(main, "_devices_cache", _fake_devices())
+    monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
     monkeypatch.setattr(main, "_metrics_cache", {})
     _select(monkeypatch, {"dev_a", "dev_b"})
 
@@ -68,7 +69,7 @@ def test_poll_once_fetches_both_selected_devices_concurrently(monkeypatch):
 
 
 def test_poll_once_isolates_a_single_failed_fetch(monkeypatch):
-    monkeypatch.setattr(main, "_devices_cache", _fake_devices())
+    monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
     metrics_cache = {}
     monkeypatch.setattr(main, "_metrics_cache", metrics_cache)
     _select(monkeypatch, {"dev_a", "dev_b"})
@@ -94,7 +95,7 @@ def test_poll_once_isolates_a_single_failed_fetch(monkeypatch):
 
 
 def test_poll_once_does_nothing_when_no_devices_selected(monkeypatch):
-    monkeypatch.setattr(main, "_devices_cache", _fake_devices())
+    monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
     monkeypatch.setattr(main, "_metrics_cache", {})
     _select(monkeypatch, set())
 
@@ -111,7 +112,7 @@ def test_poll_once_does_nothing_when_no_devices_selected(monkeypatch):
 
 
 def test_poll_once_skips_selected_id_missing_from_devices_cache(monkeypatch):
-    monkeypatch.setattr(main, "_devices_cache", _fake_devices())
+    monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
     monkeypatch.setattr(main, "_metrics_cache", {})
     _select(monkeypatch, {"dev_a", "dev_missing"})
 

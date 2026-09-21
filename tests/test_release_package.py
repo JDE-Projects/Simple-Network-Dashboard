@@ -21,6 +21,7 @@ REQUIRED_FILES = [
     "config.py",
     "ws_manager.py",
     "update_check.py",
+    "runtime_state.py",
     "metrics_poller.py",
     "ssh_manager.py",
     "auth.py",

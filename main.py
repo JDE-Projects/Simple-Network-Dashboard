@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import uuid
+
 from contextlib import asynccontextmanager
 from datetime import datetime
 from ipaddress import ip_address
@@ -30,6 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+import runtime_state
 from metrics_poller import fetch_metrics
 from ssh_manager import SSHManager
 from auth import load_auth_state, verify_password
@@ -88,21 +90,6 @@ _metrics_cache: dict[str, dict] = {}
 # window, and the monotonic time that window started.
 _metrics_error_state: dict[str, dict] = {}
 
-# In-memory device list — seeded from disk at startup, kept in sync by _save()
-_devices_cache: list = []
-
-# True if configuration changes cannot be persisted (checked once at startup)
-_storage_warning = False
-
-# True only when startup recovered the cached configuration from devices.json.bak.
-# It deliberately remains latched until the service is restarted.
-_recovery_mode = False
-
-# True only for a startup that repaired the primary configuration from its backup.
-_recovered_notice = False
-
-# Exact already-validated backup payload retained only while fallback recovery is read-only.
-_recovery_backup_contents: str | None = None
 _recovery_retry_lock = asyncio.Lock()
 
 # Pending SSH-release tasks per owner, scheduled when their last socket drops
@@ -271,8 +258,7 @@ def _load_startup_devices() -> tuple[list, bool, bool]:
     Returns devices, whether a repair succeeded, and whether failed repair left
     the process in restart-latched read-only mode.
     """
-    global _recovery_backup_contents
-    _recovery_backup_contents = None
+    runtime_state._recovery_backup_contents = None
     try:
         with open(DEVICES_FILE, "r", encoding="utf-8") as f:
             return _parse_devices(f.read()), False, False
@@ -298,7 +284,7 @@ def _load_startup_devices() -> tuple[list, bool, bool]:
             with open(DEVICES_FILE, "r", encoding="utf-8") as f:
                 _parse_devices(f.read())
         except Exception as repair_error:
-            _recovery_backup_contents = backup_contents
+            runtime_state._recovery_backup_contents = backup_contents
             print(
                 "WARNING: Configuration recovery mode is active. "
                 "Automatic restoration from the validated backup did not complete "
@@ -426,8 +412,7 @@ def _restore_and_verify_primary(contents: str) -> None:
 
 
 def _save(devices: list) -> bool:
-    global _devices_cache
-    if _recovery_mode:
+    if runtime_state._recovery_mode:
         msg = "SAVE REJECTED: configuration recovery mode is read-only until recovery succeeds."
         _debug_write(msg)
         print(msg, flush=True)
@@ -435,10 +420,9 @@ def _save(devices: list) -> bool:
     replaced = False
 
     def primary_replaced() -> None:
-        global _devices_cache
         nonlocal replaced
         replaced = True
-        _devices_cache = list(devices)
+        runtime_state._devices_cache = list(devices)
 
     try:
         contents = json.dumps({"_app": APP_NAME, "devices": devices}, indent=2)
@@ -536,7 +520,7 @@ async def _poll_once():
 
     if selected_ids:
         devices = [
-            d for d in _devices_cache if d.get("id") in selected_ids
+            d for d in runtime_state._devices_cache if d.get("id") in selected_ids
         ]
         fetches = [
             fetch_metrics(
@@ -579,11 +563,11 @@ async def _idle_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _devices_cache, _storage_warning, _recovery_mode, _recovered_notice, _debug_loop
-    _devices_cache, _recovered_notice, _recovery_mode = _load_startup_devices()
-    _storage_warning = _recovery_mode
+    global _debug_loop
+    runtime_state._devices_cache, runtime_state._recovered_notice, runtime_state._recovery_mode = _load_startup_devices()
+    runtime_state._storage_warning = runtime_state._recovery_mode
     if os.path.exists(DEVICES_FILE) and not os.access(DEVICES_FILE, os.W_OK):
-        _storage_warning = True
+        runtime_state._storage_warning = True
         print(f"WARNING: {DEVICES_FILE} is not writable. Device and command changes will NOT be saved.", flush=True)
     ssh_mgr.set_loop(asyncio.get_running_loop())
     _debug_loop = asyncio.get_running_loop()
@@ -933,15 +917,15 @@ async def ws_endpoint(ws: WebSocket):
         # ssh_connected = devices this owner currently owns
         own_connected = ssh_mgr.owner_connected_ids(owner)
         await ws.send_text(json.dumps({
-            "type": "init", "devices": _devices_cache, "version": APP_VERSION,
+            "type": "init", "devices": runtime_state._devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
             "ssh_locked": ssh_mgr.locked_device_ids(),
             "debug": _debug_enabled(),
             "debug_failed": _debug_failed_notice,
-            "storage_warning": _storage_warning,
-            "recovery_mode": _recovery_mode,
-            "recovery_retry_available": _recovery_backup_contents is not None,
-            "recovered_notice": _recovered_notice,
+            "storage_warning": runtime_state._storage_warning,
+            "recovery_mode": runtime_state._recovery_mode,
+            "recovery_retry_available": runtime_state._recovery_backup_contents is not None,
+            "recovered_notice": runtime_state._recovered_notice,
         }))
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
@@ -1000,17 +984,16 @@ class DeviceIn(BaseModel):
 
 @app.get("/api/devices")
 async def get_devices():
-    return _devices_cache
+    return runtime_state._devices_cache
 
 
 @app.post("/api/retry-recovery")
 async def retry_recovery():
     """Retry a failed startup repair using only the retained validated payload."""
-    global _recovery_mode, _storage_warning, _recovery_backup_contents
     async with _recovery_retry_lock:
-        if not _recovery_mode:
+        if not runtime_state._recovery_mode:
             return {"ok": True, "recovered": False}
-        contents = _recovery_backup_contents
+        contents = runtime_state._recovery_backup_contents
         if contents is None:
             msg = "RECOVERY RETRY FAILED: retained payload unavailable."
             _debug_write(msg)
@@ -1023,9 +1006,9 @@ async def retry_recovery():
             _debug_write(msg)
             print(msg, flush=True)
             return {"ok": False, "error": "Recovery could not finish. Your saved data remains protected."}
-        _recovery_mode = False
-        _storage_warning = False
-        _recovery_backup_contents = None
+        runtime_state._recovery_mode = False
+        runtime_state._storage_warning = False
+        runtime_state._recovery_backup_contents = None
         await ws_mgr.broadcast({"type": "recovery_restored"})
         return {"ok": True, "recovered": True}
 
@@ -1045,10 +1028,10 @@ def _resolve_saved_commands(incoming: Optional[list], existing: Optional[dict]) 
 
 @app.post("/api/devices")
 async def upsert_device(body: DeviceIn):
-    if _recovery_mode:
+    if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
     d       = body.model_dump()
-    devices = copy.deepcopy(_devices_cache)
+    devices = copy.deepcopy(runtime_state._devices_cache)
     if d.get("id"):
         for i, existing in enumerate(devices):
             if existing["id"] == d["id"]:
@@ -1071,9 +1054,9 @@ async def upsert_device(body: DeviceIn):
 
 @app.delete("/api/devices/{device_id}")
 async def delete_device(device_id: str):
-    if _recovery_mode:
+    if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
-    devices = [d for d in _devices_cache if d["id"] != device_id]
+    devices = [d for d in runtime_state._devices_cache if d["id"] != device_id]
     if not _save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     ws_mgr.unselect_device_everywhere(device_id)
@@ -1090,9 +1073,9 @@ class CommandsIn(BaseModel):
 
 @app.put("/api/devices/{device_id}/commands")
 async def update_commands(device_id: str, body: CommandsIn):
-    if _recovery_mode:
+    if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
-    devices = copy.deepcopy(_devices_cache)
+    devices = copy.deepcopy(runtime_state._devices_cache)
     for i, d in enumerate(devices):
         if d["id"] == device_id:
             d["commands"] = body.model_dump()["commands"]
@@ -1119,7 +1102,7 @@ class ConnectIn(BaseModel):
 async def ssh_connect(body: ConnectIn, x_browser_id: str = Header(None)):
     if not x_browser_id:
         return {"ok": False, "error": "Missing browser id."}
-    devices = _devices_cache
+    devices = runtime_state._devices_cache
     device  = next((d for d in devices if d["id"] == body.device_id), None)
     if not device:
         return {"ok": False, "error": "Device not found."}
