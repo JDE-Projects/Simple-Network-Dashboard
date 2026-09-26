@@ -1,4 +1,4 @@
-"""Tests for the Task 8 Phase 2 current-session enforcement in
+"""Tests for current-session enforcement in
 ssh_manager.SSHManager: the per-line identity gate in `_exec`, and the
 generation stamp-and-drop-at-delivery mechanism in `_deliver`.
 

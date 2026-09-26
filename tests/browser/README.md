@@ -19,8 +19,7 @@ into a system cache outside this repository (about 115 MB). Neither is committed
 
 The `pytest-playwright` version is installed locally and is not pinned in
 `requirements-dev.txt`, whose development-tool versions are managed centrally in
-Build-Tools. Folding this pin into that shared set is left to the Build-Tools
-work (Task 11).
+Build-Tools. Folding this pin into that shared set is left to Build-Tools.
 
 ## Running
 

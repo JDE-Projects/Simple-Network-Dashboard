@@ -1,4 +1,4 @@
-"""Task 10 coverage: the Connect button on a device card recovers from every
+"""The Connect button on a device card recovers from every
 kind of API failure instead of getting stuck disabled or on 'Connecting…'.
 
 See static/index.html's tryConnect() (~line 1450), which resets the button in

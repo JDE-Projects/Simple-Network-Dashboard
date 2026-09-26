@@ -1,8 +1,8 @@
 """Field-level character and range limits on saved devices, saved commands,
 and run requests.
 
-Phase 3 of request validation hardening adds maximum lengths (and a port
-range) to the fields the browser sends, so an over-limit value is rejected
+main.py sets maximum lengths (and a port range) on the fields the browser
+sends, so an over-limit value is rejected
 by Pydantic validation instead of being silently truncated.
 """
 

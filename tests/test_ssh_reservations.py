@@ -1,4 +1,4 @@
-"""Tests for the Task 8 Phase 1 session-reservation and locking model in
+"""Tests for the session-reservation and locking model in
 ssh_manager.SSHManager: per-device locks, reserve-before-connect, the
 "superseded" result for a same-owner reconnect race, busy-before-thread-start
 command reservation, identity-checked closes, and the early-cancel flag.

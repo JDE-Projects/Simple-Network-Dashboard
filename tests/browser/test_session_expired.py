@@ -1,4 +1,4 @@
-"""Task 10 coverage: a session-expired (401/403) response shows exactly one
+"""A session-expired (401/403) response shows exactly one
 modal (never stacks), offers a Sign In button, and never auto-redirects, so
 anything the user was typing is still there.
 

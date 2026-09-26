@@ -1,6 +1,5 @@
-"""Tests for Task 9 Phase 3: debug-log open/write/rotation failures must
-
-disable debug logging, warn the journal, and never propagate into a caller
+"""Debug-log open/write/rotation failures must disable debug logging, warn
+the journal, and never propagate into a caller
 (device save, metrics poll, or SSH broadcast). Follows the fixture style of
 test_debug_log_rotation.py.
 """

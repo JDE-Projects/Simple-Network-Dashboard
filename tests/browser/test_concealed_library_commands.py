@@ -1,4 +1,4 @@
-"""Task 12 coverage: concealed library and custom command console lines."""
+"""Concealed library and custom command console lines."""
 
 from __future__ import annotations
 

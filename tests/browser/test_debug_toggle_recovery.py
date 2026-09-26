@@ -1,4 +1,4 @@
-"""Task 10 coverage: the server debug-log toggle reverts on API failures.
+"""The server debug-log toggle reverts on API failures.
 
 See static/index.html's #debugChk change handler (~line 1920): on a failed
 POST /api/debug it flips the checkbox back to its prior state and raises a

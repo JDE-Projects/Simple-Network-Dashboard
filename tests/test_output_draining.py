@@ -1,4 +1,4 @@
-"""Tests for the Task 8 Phase 4 output-draining rewrite of `_exec`: reading
+"""Tests for output draining in `_exec`: reading
 the raw channel, interleaving stdout/stderr as they arrive, incremental UTF-8
 decoding, and per-stream line splitting across chunks.
 

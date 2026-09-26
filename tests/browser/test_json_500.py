@@ -4,7 +4,7 @@ must not be forwarded verbatim to the caller. api() (static/index.html,
 ~line 886) only treats a parsed non-2xx object as the app's own error shape
 when it has a string `error` field; anything else falls through to the
 friendly "server hit an error" message, matching the plain-text 500 case
-already covered in test_task10_connect_recovery.py.
+already covered in test_connect_recovery.py.
 """
 
 from __future__ import annotations

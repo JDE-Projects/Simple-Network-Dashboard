@@ -1,4 +1,4 @@
-"""Task 10 coverage: custom-command run and host-key view recover from API
+"""Custom-command run and host-key view recover from API
 failures.
 
 Custom command: static/index.html's runCustom() (~line 1522) clears the

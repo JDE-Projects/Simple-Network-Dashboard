@@ -1,4 +1,4 @@
-"""Task 10 coverage: the 'Check for updates' button recovers from API
+"""The 'Check for updates' button recovers from API
 failures instead of getting stuck disabled or on 'Checking…'.
 
 See static/index.html's #updateBtn handler (~line 1939): it disables the

@@ -1,7 +1,7 @@
 """Request validation guardrails: unknown fields, oversized bodies, and the
 app's own error shape for validation failures.
 
-Phase 1 of request validation hardening adds three things to main.py:
+main.py provides three guardrails:
 strict request models that reject unexpected fields, a 1 MB request-body
 limit enforced at the HTTP middleware level, and a reshaped validation-error
 body that matches the app's ``{"ok": false, "error": ...}`` convention
