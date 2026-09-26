@@ -983,7 +983,20 @@ def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys
 
 def test_known_hosts_file_is_private_when_saved(monkeypatch) -> None:
     calls = []
-    monkeypatch.setattr(ssh_manager.os, "chmod", lambda *args: calls.append(args))
+    real_os_open = os.open
+    temp_path = os.path.join(ssh_manager.DATA_DIR, ".known_hosts-test.tmp")
+    monkeypatch.setattr(ssh_manager.tempfile, "mkstemp", lambda **_kwargs: (11, temp_path))
+    monkeypatch.setattr(ssh_manager.os, "close", lambda fd: calls.append(("close", fd)))
+    monkeypatch.setattr(ssh_manager.os, "fsync", lambda fd: calls.append(("fsync", fd)))
+    monkeypatch.setattr(ssh_manager.os, "replace", lambda *args: calls.append(("replace", *args)))
+    monkeypatch.setattr(ssh_manager, "open", lambda *_args: _AtomicTextFile(calls, 12), raising=False)
+    if os.name != "nt":
+        monkeypatch.setattr(ssh_manager.os, "fchmod", lambda *args: calls.append(("fchmod", *args)))
+        monkeypatch.setattr(
+            ssh_manager.os,
+            "open",
+            lambda path, *_args: 13 if path == ssh_manager.DATA_DIR else real_os_open(path, *_args),
+        )
 
     class HostKeys:
         def save(self, path: str) -> None:
@@ -991,7 +1004,18 @@ def test_known_hosts_file_is_private_when_saved(monkeypatch) -> None:
 
     ssh_manager._save_known_hosts(HostKeys())
 
-    assert calls == [("save", ssh_manager.KNOWN_HOSTS_FILE), (ssh_manager.KNOWN_HOSTS_FILE, 0o600)]
+    if os.name == "nt":
+        assert calls == [
+            ("close", 11), ("save", temp_path), ("fsync", 12), ("close-file",),
+            ("replace", temp_path, ssh_manager.KNOWN_HOSTS_FILE),
+        ]
+    else:
+        assert calls == [
+            ("fchmod", 11, 0o600), ("close", 11), ("save", temp_path),
+            ("fsync", 12), ("close-file",),
+            ("replace", temp_path, ssh_manager.KNOWN_HOSTS_FILE),
+            ("fsync", 13), ("close", 13),
+        ]
 
 
 class _TextFile:
