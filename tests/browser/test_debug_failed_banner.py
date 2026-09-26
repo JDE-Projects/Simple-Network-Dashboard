@@ -1,4 +1,4 @@
-"""Task 9 coverage: the browser warning banner when debug logging fails.
+"""The browser warning banner when debug logging fails.
 
 The server emits a ``debug_failed`` message (and an ``init`` flag for tabs that
 connect after a failure) when the debug log can no longer be written; that

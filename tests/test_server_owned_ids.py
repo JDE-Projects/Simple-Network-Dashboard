@@ -1,6 +1,6 @@
 """Server-owned device IDs.
 
-Phase 4 of request validation hardening keeps device IDs server-generated.
+main.py keeps device IDs server-generated.
 POST /api/devices with an ``id`` that matches an existing device updates it,
 but an ``id`` that matches nothing is rejected and must not create a new
 device with the caller's chosen ID. A request with no ``id`` still creates a

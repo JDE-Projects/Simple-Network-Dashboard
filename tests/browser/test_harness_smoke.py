@@ -1,4 +1,4 @@
-"""Phase 1 proof: the HTTPS harness serves the app, login works, and the
+"""Harness check: the HTTPS harness serves the app, login works, and the
 live WebSocket delivers the dashboard's initial state."""
 
 from __future__ import annotations

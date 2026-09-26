@@ -1,4 +1,4 @@
-"""Task 7 coverage: a tab resends its device selection after a reconnect.
+"""A tab resends its device selection after a reconnect.
 
 Device selection lives per WebSocket connection on the server, so a socket that
 drops and automatically reconnects starts with no selection and would silently

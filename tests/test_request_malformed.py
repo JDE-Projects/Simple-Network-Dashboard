@@ -1,8 +1,7 @@
 """Malformed and wrong-typed request bodies, and the byte-count defense path
 of the request-body size limit.
 
-Phase 5 of request validation hardening does not add new behavior to
-main.py; it fills verification gaps left by Phases 1-4's tests: a body that
+These tests cover cases the other request validation tests do not: a body that
 is not JSON at all, fields sent with the wrong type, and the running
 byte-count check in ``limit_request_body_size`` that catches an oversized
 body even when the declared ``Content-Length`` header is missing or wrong.

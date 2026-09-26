@@ -1,4 +1,4 @@
-"""Task 10 coverage: the Add/Edit Device modal recovers from API failures.
+"""The Add/Edit Device modal recovers from API failures.
 
 See static/index.html's #devSave handler (~line 1755): it disables the
 button and shows 'Saving…', shows an inline error in #devErr on failure

@@ -1,4 +1,4 @@
-"""Task 10 coverage: the Add/Edit Command modal recovers from API failures.
+"""The Add/Edit Command modal recovers from API failures.
 
 See static/index.html's persistCommands() (~line 1635) and #cmdSave handler
 (~line 1682): it disables the button and shows 'Saving…', shows an inline

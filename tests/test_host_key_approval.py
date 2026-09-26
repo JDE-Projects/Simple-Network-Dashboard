@@ -1,4 +1,4 @@
-"""Tests for the Task 8 Phase 3 host-key approval gate in
+"""Tests for the host-key approval gate in
 ssh_manager.SSHManager: the accept/reject binding on owner + one-time code +
 the reserved session's generation, one-time consumption, expiry, and pending
 cleanup on every teardown path.
