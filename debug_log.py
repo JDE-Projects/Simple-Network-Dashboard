@@ -155,10 +155,18 @@ def disable() -> None:
 
 
 def close_on_shutdown() -> None:
-    if _debug_handler is not None:
-        _debug_write("=== Debug log closed (server shutdown) ===")
-        _debug_logger.removeHandler(_debug_handler)
-        _debug_handler.close()
+    global _debug_handler
+    if _debug_handler is None:
+        return
+    _debug_write("=== Debug log closed (server shutdown) ===")
+    # A failed write above may already have disabled logging.
+    handler = _debug_handler
+    # Clear first so a later lifespan in this process can reopen the log,
+    # even if closing the old handler raises.
+    _debug_handler = None
+    if handler is not None:
+        _debug_logger.removeHandler(handler)
+        handler.close()
 
 
 def get_failed_notice():
