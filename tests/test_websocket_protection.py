@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,14 @@ from starlette.websockets import WebSocket
 import auth
 import main
 from session_manager import SessionStore
+
+
+async def _async_true() -> bool:
+    return True
+
+
+async def _async_false() -> bool:
+    return False
 
 
 def _configured_client(tmp_path: Path, monkeypatch, origin: str = "https://dashboard.lan") -> TestClient:
@@ -146,6 +156,152 @@ def test_live_websocket_closes_when_session_generation_changes(tmp_path: Path, m
             while True:
                 websocket.receive_json()
         assert closed.value.code == main.WS_POLICY_VIOLATION_CODE
+
+
+def test_live_websocket_revalidates_despite_continuous_messages(tmp_path: Path, monkeypatch) -> None:
+    """Inbound traffic cannot postpone session revalidation indefinitely."""
+    monkeypatch.setattr(main, "WS_REVALIDATE_SECONDS", 0.1)
+    client = _authenticated_client(tmp_path, monkeypatch)
+    token = client.cookies.get(main.SESSION_COOKIE_NAME)
+    assert token
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["type"] == "init"
+        main._session_store.revoke(token)
+
+        stop_sending = threading.Event()
+
+        def send_messages() -> None:
+            until = time.monotonic() + 0.35
+            while not stop_sending.is_set() and time.monotonic() < until:
+                websocket.send_json({"type": "select_device", "id": "device-1"})
+                time.sleep(0.005)
+
+        sender = threading.Thread(target=send_messages)
+        sender.start()
+        started = time.monotonic()
+        try:
+            with pytest.raises(WebSocketDisconnect) as closed:
+                websocket.receive_json()
+        finally:
+            stop_sending.set()
+            sender.join()
+        assert closed.value.code == main.WS_POLICY_VIOLATION_CODE
+        assert time.monotonic() - started < 0.2
+
+
+def test_due_revoked_message_is_not_handled_before_policy_close(monkeypatch) -> None:
+    """A message returned at the revalidation deadline is rejected first."""
+    monkeypatch.setattr(main, "WS_REVALIDATE_SECONDS", 0.1)
+
+    class Clock:
+        def __init__(self) -> None:
+            self._times = iter((0.0, 0.0, 0.1))
+
+        def time(self) -> float:
+            return next(self._times)
+
+    class Socket:
+        query_params = {}
+        cookies = {main.SESSION_COOKIE_NAME: "revoked-token"}
+
+        async def send_text(self, _message: str) -> None:
+            return None
+
+        async def receive_text(self) -> str:
+            raise AssertionError("receive_text should be wrapped by the fake wait_for")
+
+        async def close(self, *, code: int) -> None:
+            closed.append(code)
+
+    class Manager:
+        async def connect(self, _ws, _owner: str) -> None:
+            return None
+
+        def drop(self, _ws) -> None:
+            return None
+
+    closed: list[int] = []
+    handled: list[str] = []
+
+    async def fake_wait_for(_awaitable, *, timeout: float) -> str:
+        _awaitable.close()
+        assert timeout == pytest.approx(0.1)
+        return '{"type": "stay_connected"}'
+
+    monkeypatch.setattr(main.asyncio, "get_running_loop", lambda: Clock())
+    monkeypatch.setattr(main.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(main, "ws_mgr", Manager())
+    monkeypatch.setattr(main, "_websocket_request_is_valid", lambda _ws: _async_true())
+    monkeypatch.setattr(main, "_session_token_is_valid", lambda _token: _async_false())
+    monkeypatch.setattr(main.ssh_mgr, "owner_connected_ids", lambda _owner: [])
+    monkeypatch.setattr(main.ssh_mgr, "stay_connected", lambda owner: handled.append(owner))
+
+    asyncio.run(main.ws_endpoint(Socket()))
+
+    assert closed == [main.WS_POLICY_VIOLATION_CODE]
+    assert handled == []
+
+
+def test_live_websocket_handles_continuous_messages_across_valid_revalidations(tmp_path: Path, monkeypatch) -> None:
+    """A valid busy socket remains usable through multiple deadline windows."""
+    monkeypatch.setattr(main, "WS_REVALIDATE_SECONDS", 0.05)
+    client = _authenticated_client(tmp_path, monkeypatch)
+    selected: list[str | None] = []
+    revalidations: list[str] = []
+    original_set_selected_device = main.ws_mgr.set_selected_device
+    original_session_token_is_valid = main._session_token_is_valid
+
+    def record_selected_device(ws, device_id: str | None) -> None:
+        selected.append(device_id)
+        original_set_selected_device(ws, device_id)
+
+    async def record_revalidation(token: str) -> bool:
+        revalidations.append(token)
+        return await original_session_token_is_valid(token)
+
+    monkeypatch.setattr(main.ws_mgr, "set_selected_device", record_selected_device)
+    monkeypatch.setattr(main, "_session_token_is_valid", record_revalidation)
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["type"] == "init"
+        until = time.monotonic() + 0.22
+        while time.monotonic() < until:
+            websocket.send_json({"type": "select_device", "id": "device-1"})
+            time.sleep(0.01)
+
+        assert selected
+        assert len(revalidations) >= 3
+
+
+def test_policy_close_drops_socket_and_schedules_owner_release(tmp_path: Path, monkeypatch) -> None:
+    """Policy closes retain the normal owner cleanup path."""
+    monkeypatch.setattr(main, "WS_REVALIDATE_SECONDS", 0.05)
+    pending_releases = {}
+    dropped: list[object] = []
+    original_drop = main.ws_mgr.drop
+
+    def record_drop(ws) -> None:
+        dropped.append(ws)
+        original_drop(ws)
+
+    monkeypatch.setattr(main, "_pending_releases", pending_releases)
+    monkeypatch.setattr(main.ws_mgr, "drop", record_drop)
+    client = _authenticated_client(tmp_path, monkeypatch)
+    token = client.cookies.get(main.SESSION_COOKIE_NAME)
+    assert token
+
+    with client.websocket_connect("/ws?bid=browser-1", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["type"] == "init"
+        main._session_store.revoke(token)
+
+        with pytest.raises(WebSocketDisconnect) as closed:
+            while True:
+                websocket.receive_json()
+        assert closed.value.code == main.WS_POLICY_VIOLATION_CODE
+
+    assert len(dropped) == 1
+    assert "browser-1" in pending_releases
 
 
 @pytest.mark.parametrize(

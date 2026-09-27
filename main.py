@@ -616,13 +616,22 @@ async def ws_endpoint(ws: WebSocket):
         for did, m in _metrics_cache.items():
             public = {k: v for k, v in m.items() if not k.startswith("_")}
             await ws.send_text(json.dumps({"type": "metrics", "device_id": did, "data": public}))
+        loop = asyncio.get_running_loop()
+        next_check = loop.time() + WS_REVALIDATE_SECONDS
         while True:
+            # Inbound messages never postpone the deadline, and a message that
+            # arrives once a check is due is handled only after it passes
             try:
-                raw = await asyncio.wait_for(ws.receive_text(), timeout=WS_REVALIDATE_SECONDS)
+                raw = await asyncio.wait_for(ws.receive_text(),
+                                             timeout=max(0, next_check - loop.time()))
             except asyncio.TimeoutError:
+                raw = None
+            if loop.time() >= next_check:
                 if not await _session_token_is_valid(session_token):
                     await ws.close(code=WS_POLICY_VIOLATION_CODE)
                     break
+                next_check = loop.time() + WS_REVALIDATE_SECONDS
+            if raw is None:
                 continue
             try:
                 msg = json.loads(raw)

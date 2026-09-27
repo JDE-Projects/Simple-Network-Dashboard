@@ -11,6 +11,7 @@ import hmac
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 
@@ -55,17 +56,46 @@ def _fp(key) -> str:
 
 def _load_known_hosts() -> paramiko.HostKeys:
     hk = paramiko.HostKeys()
-    if os.path.exists(KNOWN_HOSTS_FILE):
-        try:
-            hk.load(KNOWN_HOSTS_FILE)
-        except Exception:
-            pass
+    try:
+        hk.load(KNOWN_HOSTS_FILE)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        raise KnownHostsUnreadable() from e
     return hk
 
 
 def _save_known_hosts(host_keys: paramiko.HostKeys) -> None:
-    host_keys.save(KNOWN_HOSTS_FILE)
-    os.chmod(KNOWN_HOSTS_FILE, 0o600)
+    folder = os.path.dirname(KNOWN_HOSTS_FILE) or "."
+    temp_path = None
+    try:
+        fd, temp_path = tempfile.mkstemp(prefix=".known_hosts-", suffix=".tmp", dir=folder)
+        try:
+            if os.name != "nt" and hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        host_keys.save(temp_path)
+        with open(temp_path, "rb+") as f:
+            os.fsync(f.fileno())
+        os.replace(temp_path, KNOWN_HOSTS_FILE)
+        temp_path = None
+        if os.name != "nt":
+            directory_fd = os.open(folder, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+class KnownHostsUnreadable(Exception):
+    """The existing approved host-key file could not be read safely."""
 
 
 class UnknownHostKey(Exception):
@@ -127,11 +157,12 @@ class _Session:
 
     def connect(self):
         c = paramiko.SSHClient()
-        if os.path.exists(KNOWN_HOSTS_FILE):
-            try:
-                c.load_host_keys(KNOWN_HOSTS_FILE)
-            except Exception:
-                pass
+        try:
+            c.load_host_keys(KNOWN_HOSTS_FILE)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            raise KnownHostsUnreadable() from e
         c.set_missing_host_key_policy(_TofuPolicy())
         c.connect(
             hostname=self.device["host"],
@@ -297,7 +328,12 @@ class SSHManager:
     # ---- host-key helpers -------------------------------------------------
 
     def get_host_key(self, host: str) -> dict:
-        sub = _load_known_hosts().lookup(host) if host else None
+        try:
+            sub = _load_known_hosts().lookup(host) if host else None
+        except KnownHostsUnreadable as e:
+            self._debug_write(f"get_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            return {"ok": False,
+                    "error": "The approved host keys file could not be read. Check the server log."}
         if not sub:
             return {"known": False, "host": host}
         return {"known": True, "host": host,
@@ -335,6 +371,7 @@ class SSHManager:
                 return {"ok": False, "expired": True, "error": _EXPIRED_ERROR}
             self._pending.pop(device_id, None)
             host, key = pending.host, pending.key
+            bound_sess = self.sessions.get(device_id)
 
         try:
             hk = _load_known_hosts()
@@ -343,9 +380,17 @@ class SSHManager:
             hk.add(host, key.get_name(), key)
             _save_known_hosts(hk)
             return {"ok": True, "host": host, "fingerprint": _fp(key)}
+        except KnownHostsUnreadable as e:
+            self._debug_write(f"trust_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            error = ("The approved host keys file could not be read, so nothing was changed. "
+                     "Check the server log.")
         except Exception as e:
             self._debug_write(f"trust_host_key failed: {type(e).__name__}: {e}")
-            return {"ok": False, "error": "Could not save the host key."}
+            error = "Could not save the host key."
+
+        self._log(device_id, "Host key approval failed. Password cleared from memory.", "muted", pending.owner)
+        self._close(device_id, bound_sess)
+        return {"ok": False, "error": error}
 
     def reject_host_key(self, device_id: str, code: str, owner: str) -> dict:
         with self._device_lock(device_id):
@@ -366,6 +411,11 @@ class SSHManager:
                 del hk[host]
                 _save_known_hosts(hk)
             return {"ok": True}
+        except KnownHostsUnreadable as e:
+            self._debug_write(f"forget_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            return {"ok": False,
+                    "error": ("The approved host keys file could not be read, so nothing was changed. "
+                              "Check the server log.")}
         except Exception as e:
             self._debug_write(f"forget_host_key failed: {type(e).__name__}: {e}")
             return {"ok": False, "error": "Could not forget the host key."}
@@ -438,6 +488,20 @@ class SSHManager:
                 self._status(device_id, "idle", owner)
                 self._lock(device_id, False)
             return {"ok": False, "error": "Authentication failed. Check username and password."}
+        except KnownHostsUnreadable as e:
+            with self._device_lock(device_id):
+                if self.sessions.get(device_id) is sess:
+                    del self.sessions[device_id]
+                    removed = True
+                else:
+                    removed = False
+            if removed and old_sess is not None:
+                self._status(device_id, "idle", owner)
+                self._lock(device_id, False)
+            self._debug_write(f"connect failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            return {"ok": False,
+                    "error": ("Could not connect: the approved host keys file could not be read. "
+                              "Check the server log.")}
         except Exception as e:
             with self._device_lock(device_id):
                 if self.sessions.get(device_id) is sess:
