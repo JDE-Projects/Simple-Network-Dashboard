@@ -120,7 +120,9 @@ The dashboard's bottom bar also has a **Check for updates** button that tells yo
 3. Stats appear automatically: CPU, RAM, disk, temperature, and network rates.
 4. To manage a device via SSH, enter the password for that device and click **Connect**.
 5. Use the **Command Library** to save and reuse commands per device.
-6. Use **Sign out** to end your session on that browser immediately.
+6. Use **Sign out** to end your session on that browser. The tab you sign out
+   from returns to the sign-in page at once; any other open tabs of that browser stop receiving
+   updates within about ten seconds.
 
 ## Uninstall
 
