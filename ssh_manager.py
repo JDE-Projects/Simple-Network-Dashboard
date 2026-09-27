@@ -369,6 +369,7 @@ class SSHManager:
             pending = self._valid_host_key_pending(device_id, code, owner)
             if pending is None:
                 return {"ok": False, "expired": True, "error": _EXPIRED_ERROR}
+            self._pending.pop(device_id, None)
             host, key = pending.host, pending.key
             bound_sess = self.sessions.get(device_id)
 
@@ -378,9 +379,6 @@ class SSHManager:
                 del hk[host]
             hk.add(host, key.get_name(), key)
             _save_known_hosts(hk)
-            with self._device_lock(device_id):
-                if self._pending.get(device_id) is pending:
-                    self._pending.pop(device_id, None)
             return {"ok": True, "host": host, "fingerprint": _fp(key)}
         except KnownHostsUnreadable as e:
             self._debug_write(f"trust_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
@@ -390,9 +388,6 @@ class SSHManager:
             self._debug_write(f"trust_host_key failed: {type(e).__name__}: {e}")
             error = "Could not save the host key."
 
-        with self._device_lock(device_id):
-            if self._pending.get(device_id) is pending:
-                self._pending.pop(device_id, None)
         self._log(device_id, "Host key approval failed. Password cleared from memory.", "muted", pending.owner)
         self._close(device_id, bound_sess)
         return {"ok": False, "error": error}
