@@ -127,7 +127,7 @@ def test_progressive_login_throttle_and_recovery() -> None:
     assert throttle.retry_after("client") == 0
 
 
-def test_login_cookies_session_status_and_browser_id_non_authority(tmp_path: Path, monkeypatch) -> None:
+def test_login_cookies_and_session_status(tmp_path: Path, monkeypatch) -> None:
     auth_file = tmp_path / "auth.json"
     auth.publish_auth_state(auth_file, auth.create_auth_state("a" * 15))
     store = SessionStore(tmp_path / "sessions.json")
@@ -149,7 +149,7 @@ def test_login_cookies_session_status_and_browser_id_non_authority(tmp_path: Pat
     remembered = client.post("/api/auth/login", json={"password": "a" * 15, "remembered": True}, headers=_csrf_headers(client))
     assert f"Max-Age={REMEMBERED_SECONDS}" in remembered.headers["set-cookie"]
     client.cookies.clear()
-    assert client.get("/api/auth/session", headers={"X-Browser-Id": "attacker"}).json() == {"authenticated": False}
+    assert client.get("/api/auth/session").json() == {"authenticated": False}
 
 
 def test_logout_revokes_server_session_and_preserves_cookie_on_storage_failure(tmp_path: Path, monkeypatch) -> None:
@@ -174,6 +174,105 @@ def test_logout_revokes_server_session_and_preserves_cookie_on_storage_failure(t
     assert "set-cookie" not in failed.headers
     assert client.cookies.get(main.SESSION_COOKIE_NAME) == token
     assert store.validate(token, auth.load_auth_state(auth_file)["session_generation"])
+
+
+def test_logout_releases_only_its_session_owner_immediately(tmp_path: Path, monkeypatch) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth.publish_auth_state(auth_file, auth.create_auth_state("a" * 15))
+    store = SessionStore(tmp_path / "sessions.json")
+    monkeypatch.setattr(main, "AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(main, "_session_store", store)
+    monkeypatch.setattr(main, "_pending_releases", {})
+    client = TestClient(main.app, base_url="https://testserver")
+    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
+    signed_out_token = client.cookies.get(main.SESSION_COOKIE_NAME)
+    assert signed_out_token
+    other_token, _expiry = store.create(auth.load_auth_state(auth_file)["session_generation"], remembered=False)
+    owners_with_sessions = {
+        main.SessionStore.token_digest(signed_out_token),
+        main.SessionStore.token_digest(other_token),
+    }
+    released: list[str] = []
+
+    def release_owner(owner: str) -> None:
+        released.append(owner)
+        owners_with_sessions.remove(owner)
+
+    monkeypatch.setattr(main.ssh_mgr, "release_owner", release_owner)
+
+    response = client.post("/api/auth/logout", headers=_csrf_headers(client))
+
+    signed_out_owner = main.SessionStore.token_digest(signed_out_token)
+    assert response.status_code == 200
+    assert released == [signed_out_owner]
+    assert owners_with_sessions == {main.SessionStore.token_digest(other_token)}
+
+
+def test_logout_logs_ssh_release_failure_but_still_completes(tmp_path: Path, monkeypatch, capsys) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth.publish_auth_state(auth_file, auth.create_auth_state("a" * 15))
+    store = SessionStore(tmp_path / "sessions.json")
+    monkeypatch.setattr(main, "AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(main, "_session_store", store)
+    client = TestClient(main.app, base_url="https://testserver")
+    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
+    debug_lines: list[str] = []
+    monkeypatch.setattr(main.ssh_mgr, "release_owner", lambda _owner: (_ for _ in ()).throw(RuntimeError("close failed")))
+    monkeypatch.setattr(main.debug_log, "_debug_write", debug_lines.append)
+
+    response = client.post("/api/auth/logout", headers=_csrf_headers(client))
+
+    assert response.status_code == 200
+    expected = "SIGN-OUT SSH RELEASE FAILED: RuntimeError: close failed"
+    assert debug_lines == [expected]
+    assert expected in capsys.readouterr().out
+
+
+def test_ssh_routes_use_the_signed_in_session_owner_and_ignore_legacy_header(tmp_path: Path, monkeypatch) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth.publish_auth_state(auth_file, auth.create_auth_state("a" * 15))
+    store = SessionStore(tmp_path / "sessions.json")
+    monkeypatch.setattr(main, "AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(main, "_session_store", store)
+    monkeypatch.setattr(main.runtime_state, "_devices_cache", [{"id": "device-1", "host": "host"}])
+    first = TestClient(main.app, base_url="https://testserver")
+    second = TestClient(main.app, base_url="https://testserver")
+    generation = auth.load_auth_state(auth_file)["session_generation"]
+    first_token, _expiry = store.create(generation, remembered=False)
+    second_token, _expiry = store.create(generation, remembered=False)
+    first.cookies.set(main.SESSION_COOKIE_NAME, first_token)
+    second.cookies.set(main.SESSION_COOKIE_NAME, second_token)
+    first_owner = main.SessionStore.token_digest(first_token)
+    second_owner = main.SessionStore.token_digest(second_token)
+    session_owner = {"device-1": first_owner}
+    observed: list[str] = []
+
+    def protect(owner: str) -> dict[str, object]:
+        observed.append(owner)
+        if owner != session_owner["device-1"]:
+            return {"ok": False, "not_owner": True}
+        return {"ok": True}
+
+    monkeypatch.setattr(main.ssh_mgr, "connect", lambda _id, _password, _device, owner: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda _id, owner: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "run_command", lambda _id, _cmd, _sudo, _label, owner, cmd_id: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "cancel", lambda _id, owner: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "trust_host_key", lambda _id, _code, owner: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "reject_host_key", lambda _id, _code, owner: protect(owner))
+
+    legacy_headers = {"X-Browser-Id": "attacker-chosen-owner", **_csrf_headers(second)}
+    responses = [
+        second.post("/api/ssh/connect", json={"device_id": "device-1", "password": "pw"}, headers=legacy_headers),
+        second.post("/api/ssh/disconnect", json={"device_id": "device-1"}, headers=legacy_headers),
+        second.post("/api/ssh/run", json={"device_id": "device-1", "command": "id"}, headers=legacy_headers),
+        second.post("/api/ssh/cancel", json={"device_id": "device-1"}, headers=legacy_headers),
+        second.post("/api/ssh/trust_key", json={"device_id": "device-1", "code": "code"}, headers=legacy_headers),
+        second.post("/api/ssh/reject_key", json={"device_id": "device-1", "code": "code"}, headers=legacy_headers),
+    ]
+
+    assert all(response.json() == {"ok": False, "not_owner": True} for response in responses)
+    assert observed == [second_owner] * len(responses)
+    assert first_owner not in observed
 
 
 def test_login_failures_are_throttled_without_permanent_lockout(tmp_path: Path, monkeypatch) -> None:

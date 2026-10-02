@@ -7,7 +7,7 @@ from fastapi import WebSocket
 class _WSManager:
     def __init__(self):
         self._connections: list[WebSocket] = []
-        self._owners: dict[WebSocket, str] = {}  # ws -> owner (browser id)
+        self._owners: dict[WebSocket, str] = {}  # ws -> signed-in session owner
         self._selections: dict[WebSocket, str] = {}  # ws -> selected device id
 
     async def connect(self, ws: WebSocket, owner_id: str = None):

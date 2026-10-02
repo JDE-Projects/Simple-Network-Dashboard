@@ -21,7 +21,7 @@ from ipaddress import ip_address
 from typing import Annotated, Optional
 
 from argon2.exceptions import Argon2Error
-from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -482,6 +482,20 @@ async def _current_session_is_valid(request: Request) -> bool:
     return await _session_token_is_valid(request.cookies.get(SESSION_COOKIE_NAME))
 
 
+def _session_owner(token: str) -> str:
+    """Return the opaque, stable SSH owner for a signed-in session token."""
+    return SessionStore.token_digest(token)
+
+
+def _request_session_owner(request: Request) -> str:
+    """Return the authenticated request's SSH owner.
+
+    The HTTP authentication middleware has already required this cookie before
+    any protected route handler runs.
+    """
+    return _session_owner(request.cookies[SESSION_COOKIE_NAME])
+
+
 async def _websocket_request_is_valid(ws: WebSocket) -> bool:
     """Validate the authenticated browser and Caddy-provided public origin."""
     trusted_origin = os.environ.get(PUBLIC_ORIGIN_ENV)
@@ -546,10 +560,20 @@ async def session_status(request: Request):
 
 @app.post("/api/auth/logout")
 async def logout(request: Request):
+    token = request.cookies.get(SESSION_COOKIE_NAME)
     try:
-        await asyncio.to_thread(_session_store.revoke, request.cookies.get(SESSION_COOKIE_NAME))
+        await asyncio.to_thread(_session_store.revoke, token)
     except (OSError, ValueError, SessionStorageError):
         raise HTTPException(status_code=503, detail="Dashboard sign-out is unavailable. Please try again.") from None
+    if token:
+        owner = _session_owner(token)
+        _cancel_pending_release(owner)
+        try:
+            await asyncio.to_thread(ssh_mgr.release_owner, owner)
+        except Exception as error:  # noqa: BLE001 - release failure must not block sign-out
+            msg = f"SIGN-OUT SSH RELEASE FAILED: {type(error).__name__}: {error}"
+            debug_log._debug_write(msg)
+            print(msg, flush=True)
     response = JSONResponse({"ok": True})
     _expire_session_cookie(response)
     _expire_csrf_cookie(response)
@@ -591,12 +615,11 @@ async def ws_endpoint(ws: WebSocket):
     if not await _websocket_request_is_valid(ws):
         await ws.close(code=WS_POLICY_VIOLATION_CODE)
         return
-    owner = ws.query_params.get("bid") or ""
+    owner = _session_owner(ws.cookies[SESSION_COOKIE_NAME])
     await ws_mgr.connect(ws, owner)
     session_token = ws.cookies.get(SESSION_COOKIE_NAME)
-    if owner:
-        # Reconnecting within the grace window keeps the owner's SSH sessions
-        _cancel_pending_release(owner)
+    # Reconnecting within the grace window keeps the owner's SSH sessions.
+    _cancel_pending_release(owner)
     try:
         # Push current state so a fresh page load (or reconnect) is in sync
         # ssh_connected = devices this owner currently owns
@@ -645,7 +668,7 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         ws_mgr.drop(ws)
-        if owner and ws_mgr.owner_count(owner) == 0:
+        if ws_mgr.owner_count(owner) == 0:
             # Don't release immediately: a page refresh reconnects moments
             # later and should keep its SSH sessions
             _cancel_pending_release(owner)
@@ -793,9 +816,8 @@ class ConnectIn(BaseModel):
 
 
 @app.post("/api/ssh/connect")
-async def ssh_connect(body: ConnectIn, x_browser_id: str = Header(None)):
-    if not x_browser_id:
-        return {"ok": False, "error": "Missing browser id."}
+async def ssh_connect(body: ConnectIn, request: Request):
+    owner = _request_session_owner(request)
     devices = runtime_state._devices_cache
     device  = next((d for d in devices if d["id"] == body.device_id), None)
     if not device:
@@ -804,7 +826,7 @@ async def ssh_connect(body: ConnectIn, x_browser_id: str = Header(None)):
         return {"ok": False, "error": "Password is required."}
     loop   = asyncio.get_running_loop()
     result = await loop.run_in_executor(
-        None, ssh_mgr.connect, body.device_id, body.password, device, x_browser_id)
+        None, ssh_mgr.connect, body.device_id, body.password, device, owner)
     return result
 
 
@@ -815,15 +837,14 @@ class DeviceIdIn(BaseModel):
 
 
 @app.post("/api/ssh/disconnect")
-async def ssh_disconnect(body: DeviceIdIn, x_browser_id: str = Header(None)):
-    if not x_browser_id:
-        return {"ok": False, "error": "Missing browser id."}
-    return ssh_mgr.disconnect(body.device_id, x_browser_id)
+async def ssh_disconnect(body: DeviceIdIn, request: Request):
+    return ssh_mgr.disconnect(body.device_id, _request_session_owner(request))
 
 
 @app.post("/api/ssh/disconnect_all")
-async def ssh_disconnect_all():
-    return ssh_mgr.disconnect_all()
+async def ssh_disconnect_all(request: Request):
+    ssh_mgr.release_owner(_request_session_owner(request))
+    return {"ok": True}
 
 
 class RunIn(BaseModel):
@@ -837,17 +858,16 @@ class RunIn(BaseModel):
 
 
 @app.post("/api/ssh/run")
-async def ssh_run(body: RunIn, x_browser_id: str = Header(None)):
-    if not x_browser_id:
-        return {"ok": False, "error": "Missing browser id."}
-    return ssh_mgr.run_command(body.device_id, body.command, body.use_sudo, body.label, x_browser_id, cmd_id=body.cmd_id)
+async def ssh_run(body: RunIn, request: Request):
+    return ssh_mgr.run_command(
+        body.device_id, body.command, body.use_sudo, body.label,
+        _request_session_owner(request), cmd_id=body.cmd_id,
+    )
 
 
 @app.post("/api/ssh/cancel")
-async def ssh_cancel(body: DeviceIdIn, x_browser_id: str = Header(None)):
-    if not x_browser_id:
-        return {"ok": False, "error": "Missing browser id."}
-    return ssh_mgr.cancel(body.device_id, x_browser_id)
+async def ssh_cancel(body: DeviceIdIn, request: Request):
+    return ssh_mgr.cancel(body.device_id, _request_session_owner(request))
 
 
 class TrustIn(BaseModel):
@@ -858,17 +878,13 @@ class TrustIn(BaseModel):
 
 
 @app.post("/api/ssh/trust_key")
-async def ssh_trust_key(body: TrustIn, x_browser_id: str = Header(None)):
-    if not x_browser_id:
-        return {"ok": False, "error": "Missing browser id."}
-    return ssh_mgr.trust_host_key(body.device_id, body.code, x_browser_id)
+async def ssh_trust_key(body: TrustIn, request: Request):
+    return ssh_mgr.trust_host_key(body.device_id, body.code, _request_session_owner(request))
 
 
 @app.post("/api/ssh/reject_key")
-async def ssh_reject_key(body: TrustIn, x_browser_id: str = Header(None)):
-    if not x_browser_id:
-        return {"ok": False, "error": "Missing browser id."}
-    return ssh_mgr.reject_host_key(body.device_id, body.code, x_browser_id)
+async def ssh_reject_key(body: TrustIn, request: Request):
+    return ssh_mgr.reject_host_key(body.device_id, body.code, _request_session_owner(request))
 
 
 @app.get("/api/ssh/host_key/{host}")
