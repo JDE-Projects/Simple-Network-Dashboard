@@ -114,7 +114,7 @@ class _TofuPolicy(paramiko.MissingHostKeyPolicy):
 class _PendingHostKey:
     """One device's outstanding host-key prompt: the offered key, a one-time
     code the browser that raised the prompt must echo back, the owner
-    (browser id) that raised it, and the reserved session's generation the
+    (signed-in session) that raised it, and the reserved session's generation the
     prompt is bound to, so a later connect/disconnect on the same device can
     never be resolved by an accept/reject aimed at a stale prompt."""
 
@@ -910,15 +910,18 @@ class SSHManager:
                         info2["warned"] = True
 
     def stay_connected(self, owner: str) -> dict:
-        """Reset idle clock for a browser that clicked 'Stay connected'."""
+        """Reset idle clock for the signed-in session that clicked Stay connected."""
         self._owner_reset(owner)
         return {"ok": True}
 
     def release_owner(self, owner: str):
-        """Close all sessions owned by a browser (used when its last WS tab closes)."""
+        """Close all sessions and host-key prompts owned by a signed-in session."""
         for did, s in list(self.sessions.items()):
             if s.owner == owner:
                 self._close(did, s)
+        for did, pending in list(self._pending.items()):
+            if pending.owner == owner:
+                self._clear_pending(did)
         self._owner_pop(owner)
 
     def locked_device_ids(self) -> list:

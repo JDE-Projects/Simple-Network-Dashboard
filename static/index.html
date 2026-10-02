@@ -714,30 +714,6 @@ function toggleTheme(){
 applyTheme(localStorage.getItem("snd-theme") || "dark");
 
 /* ============================================================
-   Browser identity
-   ============================================================ */
-let BROWSER_ID = '';
-function _genBrowserId() {
-  // crypto.randomUUID exists only in secure contexts (HTTPS or localhost).
-  // Over plain HTTP on a LAN IP it is undefined, so fall back to getRandomValues
-  // (available everywhere), then to a non-crypto id as a last resort.
-  try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch(e) {}
-  try {
-    if (crypto && crypto.getRandomValues) {
-      const b = crypto.getRandomValues(new Uint8Array(16));
-      b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
-      const h = [...b].map(x => x.toString(16).padStart(2, '0'));
-      return `${h[0]}${h[1]}${h[2]}${h[3]}-${h[4]}${h[5]}-${h[6]}${h[7]}-${h[8]}${h[9]}-${h[10]}${h[11]}${h[12]}${h[13]}${h[14]}${h[15]}`;
-    }
-  } catch(e) {}
-  return 'id-' + Date.now().toString(16) + '-' + Math.random().toString(16).slice(2);
-}
-try {
-  BROWSER_ID = localStorage.getItem('snd_browser_id') || '';
-  if (!BROWSER_ID) { BROWSER_ID = _genBrowserId(); localStorage.setItem('snd_browser_id', BROWSER_ID); }
-} catch(e) { BROWSER_ID = _genBrowserId(); }
-
-/* ============================================================
    State
    ============================================================ */
 let DEVICES   = [];
@@ -771,7 +747,7 @@ let ws = null;
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?bid=${encodeURIComponent(BROWSER_ID)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => {
     $('wsChip').className = 'ws-dot ok';
@@ -963,9 +939,8 @@ $('signOutBtn').addEventListener('click', async () => {
   }
 });
 
-// SSH endpoints include the browser id header
 function sshPost(path, body) {
-  return api('POST', path, body, {'X-Browser-Id': BROWSER_ID});
+  return api('POST', path, body);
 }
 
 /* ============================================================
@@ -1893,7 +1868,7 @@ function updateDisconnectAllBtn() {
 }
 
 $('endAllBtn').onclick = () => {
-  askConfirm('Disconnect all?', 'Disconnect every device and clear all passwords from memory.', () => {
+  askConfirm('Disconnect all?', 'Disconnect all of your devices and clear their passwords from memory.', () => {
     POST('/api/ssh/disconnect_all', {});
   });
 };

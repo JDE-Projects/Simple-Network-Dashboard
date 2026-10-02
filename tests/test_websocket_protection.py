@@ -71,7 +71,7 @@ def test_ws_revalidate_seconds_falls_back_to_ten_for_invalid_values(monkeypatch,
 def test_websocket_accepts_only_an_authenticated_browser_at_the_configured_origin(tmp_path: Path, monkeypatch) -> None:
     client = _authenticated_client(tmp_path, monkeypatch)
 
-    with client.websocket_connect("/ws?bid=browser-1", headers={"Origin": "https://dashboard.lan"}) as websocket:
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
         assert websocket.receive_json()["type"] == "init"
 
 
@@ -107,7 +107,7 @@ def test_websocket_rejection_has_no_connection_or_owner_side_effects(tmp_path: P
     _assert_policy_rejection(
         client,
         {"Origin": "https://other.lan"},
-        path="/ws?bid=rejected-browser",
+        path="/ws?bid=ignored-legacy-value",
     )
     assert pending_releases == {}
 
@@ -221,6 +221,9 @@ def test_due_revoked_message_is_not_handled_before_policy_close(monkeypatch) -> 
         def drop(self, _ws) -> None:
             return None
 
+        def owner_count(self, _owner: str) -> int:
+            return 0
+
     closed: list[int] = []
     handled: list[str] = []
 
@@ -291,7 +294,7 @@ def test_policy_close_drops_socket_and_schedules_owner_release(tmp_path: Path, m
     token = client.cookies.get(main.SESSION_COOKIE_NAME)
     assert token
 
-    with client.websocket_connect("/ws?bid=browser-1", headers={"Origin": "https://dashboard.lan"}) as websocket:
+    with client.websocket_connect("/ws?bid=ignored-legacy-value", headers={"Origin": "https://dashboard.lan"}) as websocket:
         assert websocket.receive_json()["type"] == "init"
         main._session_store.revoke(token)
 
@@ -301,7 +304,75 @@ def test_policy_close_drops_socket_and_schedules_owner_release(tmp_path: Path, m
         assert closed.value.code == main.WS_POLICY_VIOLATION_CODE
 
     assert len(dropped) == 1
-    assert "browser-1" in pending_releases
+    assert main.SessionStore.token_digest(token) in pending_releases
+
+
+def test_second_session_cannot_see_or_keep_alive_first_session_ssh(tmp_path: Path, monkeypatch) -> None:
+    first = _authenticated_client(tmp_path, monkeypatch)
+    second = _authenticated_client(tmp_path, monkeypatch)
+    first_token = first.cookies.get(main.SESSION_COOKIE_NAME)
+    second_token = second.cookies.get(main.SESSION_COOKIE_NAME)
+    assert first_token and second_token
+    first_owner = main.SessionStore.token_digest(first_token)
+    second_owner = main.SessionStore.token_digest(second_token)
+    stay_connected: list[str] = []
+    pending_releases = {}
+    monkeypatch.setattr(main, "_pending_releases", pending_releases)
+    monkeypatch.setattr(
+        main.ssh_mgr,
+        "owner_connected_ids",
+        lambda owner: ["device-1"] if owner == first_owner else [],
+    )
+    monkeypatch.setattr(main.ssh_mgr, "stay_connected", lambda owner: stay_connected.append(owner))
+
+    with second.websocket_connect("/ws?bid=attacker-chosen-owner", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["ssh_connected"] == []
+        websocket.send_json({"type": "stay_connected"})
+        time.sleep(0.02)
+
+    assert stay_connected == [second_owner]
+    assert first_owner not in pending_releases
+    task = pending_releases.pop(second_owner)
+    task.cancel()
+
+
+def test_tabs_sharing_a_session_owner_keep_ssh_when_one_socket_closes(tmp_path: Path, monkeypatch) -> None:
+    client = _authenticated_client(tmp_path, monkeypatch)
+    token = client.cookies.get(main.SESSION_COOKIE_NAME)
+    assert token
+    owner = main.SessionStore.token_digest(token)
+    pending_releases = {}
+    monkeypatch.setattr(main, "_pending_releases", pending_releases)
+    monkeypatch.setattr(main.ssh_mgr, "owner_connected_ids", lambda _owner: ["device-1"])
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as first_tab:
+        assert first_tab.receive_json()["ssh_connected"] == ["device-1"]
+        with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as second_tab:
+            assert second_tab.receive_json()["ssh_connected"] == ["device-1"]
+        assert main.ws_mgr.owner_count(owner) == 1
+        assert pending_releases == {}
+
+    task = pending_releases.pop(owner)
+    task.cancel()
+
+
+def test_refresh_within_grace_keeps_the_session_owner_ssh(tmp_path: Path, monkeypatch) -> None:
+    client = _authenticated_client(tmp_path, monkeypatch)
+    token = client.cookies.get(main.SESSION_COOKIE_NAME)
+    assert token
+    owner = main.SessionStore.token_digest(token)
+    pending_releases = {}
+    monkeypatch.setattr(main, "_pending_releases", pending_releases)
+    monkeypatch.setattr(main.ssh_mgr, "owner_connected_ids", lambda _owner: ["device-1"])
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["ssh_connected"] == ["device-1"]
+    assert owner in pending_releases
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as refreshed:
+        assert refreshed.receive_json()["ssh_connected"] == ["device-1"]
+    task = pending_releases.pop(owner)
+    task.cancel()
 
 
 @pytest.mark.parametrize(

@@ -140,12 +140,11 @@ def test_csrf_rejection_does_not_invoke_the_endpoint(tmp_path: Path, monkeypatch
     client, _store = _configured_client(tmp_path, monkeypatch)
     calls = 0
 
-    def disconnect_all():
+    def release_owner(_owner: str):
         nonlocal calls
         calls += 1
-        return {"ok": True}
 
-    monkeypatch.setattr(main.ssh_mgr, "disconnect_all", disconnect_all)
+    monkeypatch.setattr(main.ssh_mgr, "release_owner", release_owner)
     unauthenticated = client.post("/api/ssh/disconnect_all")
     assert unauthenticated.status_code == 401
     assert calls == 0
