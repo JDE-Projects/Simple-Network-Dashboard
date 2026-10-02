@@ -27,3 +27,5 @@ JetBrains Mono
   License: SIL Open Font License 1.1 (OFL-1.1)
   https://github.com/JetBrains/JetBrainsMono
   https://openfontlicense.org
+
+Full OFL-1.1 text for both fonts: static/fonts/OFL.txt

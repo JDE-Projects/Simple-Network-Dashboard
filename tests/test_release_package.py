@@ -38,6 +38,7 @@ REQUIRED_FILES = [
     "THIRD-PARTY-LICENSES.txt",
     "static/index.html",
     "static/favicon.svg",
+    "static/fonts/OFL.txt",
 ]
 
 FORBIDDEN_FILES = [
