@@ -164,7 +164,7 @@ def test_run_command_rejects_a_second_call_while_the_first_is_busy(monkeypatch):
     entered = threading.Event()
     release = threading.Event()
 
-    def fake_exec(self, sess_arg, cmd, label, feed_sudo, cmd_id=None):
+    def fake_exec(self, sess_arg, cmd, label, feed_sudo, cmd_id=None, sudo_prompt=None):
         entered.set()
         release.wait(5)
 
