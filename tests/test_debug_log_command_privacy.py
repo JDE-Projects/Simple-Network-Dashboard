@@ -86,24 +86,21 @@ def test_sudo_acceptance_and_rejection_have_private_terminal_lines(tmp_path, mon
 
     accepted = _manager()
     accepted_sess = _session(accepted)
-    accepted_sess.client = _FakeClient(_FakeChannel([
-        ("out", b"__SND_SUDO_prompt__\n"),
-        ("out", f"{MARKER}\n".encode()),
-    ]))
+    phrase, mark = "SNDsudopromptA", "SNDtermmarkB"
+    accepted_sess.run_id = "accepted"
+    accepted_sess.client = _FakeClient(_FakeChannel([("out", phrase.encode() + mark.encode() + f"{MARKER}\n".encode())]))
     accepted._exec(
-        accepted_sess, f"sudo -S -p __SND_SUDO_prompt__ {raw}", f"label {MARKER}", True,
-        sudo_prompt="__SND_SUDO_prompt__", raw_command_length=len(raw),
+        accepted_sess, raw, f"label {MARKER}", True, sudo_phrase=phrase, sudo_mark=mark,
+        raw_command_length=len(raw), run_id="accepted",
     )
 
     rejected = _manager()
     rejected_sess = _session(rejected)
-    rejected_sess.client = _FakeClient(_FakeChannel([
-        ("out", b"__SND_SUDO_prompt__\n"),
-        ("out", b"__SND_SUDO_prompt__\n"),
-    ]))
+    rejected_sess.run_id = "rejected"
+    rejected_sess.client = _FakeClient(_FakeChannel([("out", phrase.encode()), ("out", phrase.encode())]))
     rejected._exec(
-        rejected_sess, f"sudo -S -p __SND_SUDO_prompt__ {raw}", f"label {MARKER}", True,
-        sudo_prompt="__SND_SUDO_prompt__", raw_command_length=len(raw),
+        rejected_sess, raw, f"label {MARKER}", True, sudo_phrase=phrase, sudo_mark=mark,
+        raw_command_length=len(raw), run_id="rejected",
     )
 
     content = open(path, encoding="utf-8").read()
@@ -155,7 +152,10 @@ class _ExitFailure(Exception):
 
 
 class _ExplodingClient:
-    def exec_command(self, *_args, **_kwargs):
+    def get_transport(self):
+        return self
+
+    def open_session(self):
         raise _ExecFailure(MARKER)
 
 
@@ -249,9 +249,9 @@ def test_run_command_passes_the_submitted_length_not_the_sudo_wrapped_one(monkey
 
     monkeypatch.setattr(ssh_manager.threading, "Thread", _CapturedThread)
 
-    assert manager.run_command("device-7", raw, True, owner="owner-1") == {"ok": True}
+    assert manager.run_command("device-7", raw, True, owner="owner-1")["ok"] is True
 
-    wrapped_cmd, raw_length = started[0][1], started[0][-1]
+    wrapped_cmd, raw_length = started[0][1], started[0][-2]
     assert raw_length == len(raw.strip())
     assert len(wrapped_cmd) > raw_length
 

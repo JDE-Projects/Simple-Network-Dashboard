@@ -871,13 +871,15 @@ class RunIn(BaseModel):
     use_sudo:  bool = False
     label:     Optional[Annotated[str, Field(max_length=MAX_NAME_LEN)]] = None
     cmd_id:    Optional[str] = None
+    cols:      Optional[int] = None
+    rows:      Optional[int] = None
 
 
 @app.post("/api/ssh/run")
 async def ssh_run(body: RunIn, request: Request):
     return ssh_mgr.run_command(
         body.device_id, body.command, body.use_sudo, body.label,
-        _request_session_owner(request), cmd_id=body.cmd_id,
+        _request_session_owner(request), cmd_id=body.cmd_id, cols=body.cols, rows=body.rows,
     )
 
 

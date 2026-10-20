@@ -21,6 +21,7 @@ REQUIRED_FILES = [
     "config.py",
     "ws_manager.py",
     "delivery_queue.py",
+    "terminal_run.py",
     "update_check.py",
     "runtime_state.py",
     "debug_log.py",

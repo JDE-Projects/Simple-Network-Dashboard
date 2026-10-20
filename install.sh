@@ -1157,7 +1157,7 @@ repair_runtime_storage() {
 }
 
 copy_application_files() {
-    cp main.py config.py ws_manager.py delivery_queue.py update_check.py runtime_state.py debug_log.py persistence.py metrics_poller.py ssh_manager.py auth.py session_manager.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
+    cp main.py config.py ws_manager.py delivery_queue.py terminal_run.py update_check.py runtime_state.py debug_log.py persistence.py metrics_poller.py ssh_manager.py auth.py session_manager.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
     cp -R --no-preserve=ownership static/. "$APP_DIR/static/"
 }
 

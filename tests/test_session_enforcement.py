@@ -34,6 +34,8 @@ class _FakeChannel:
         self._closed    = False
         self._on_event  = on_event
         self.stdin_writes = []
+        self.pty_calls = []
+        self.commands = []
 
     def _advance_exit_markers(self):
         while self._events and self._events[0][0] == "exit":
@@ -88,36 +90,27 @@ class _FakeChannel:
         self._closed = True
         self._events = []
 
+    def get_pty(self, **kwargs):
+        self.pty_calls.append(kwargs)
 
-class _FakeStdoutStream:
-    """Stands in for paramiko's stdout ChannelFile: `_exec` only reads
-    `.channel` off of it."""
+    def exec_command(self, command):
+        self.commands.append(command)
 
-    def __init__(self, channel):
-        self.channel = channel
-
-
-class _FakeStdin:
-    def __init__(self, channel):
-        self._channel = channel
-
-    def write(self, text):
-        self._channel.stdin_writes.append(text)
-
-    def flush(self):
-        pass
+    def sendall(self, text):
+        self.stdin_writes.append(text)
 
 
 class _FakeClient:
-    """Stands in for paramiko.SSHClient. `exec_command` hands back the same
-    fake channel wrapped as stdout, plus an unused stderr placeholder (the
-    stderr ChannelFile object itself is never touched by `_exec` anymore)."""
+    """Paramiko client/transport stand-in that opens the scripted channel."""
 
     def __init__(self, channel):
         self._channel = channel
 
-    def exec_command(self, cmd, get_pty=False):
-        return _FakeStdin(self._channel), _FakeStdoutStream(self._channel), object()
+    def get_transport(self):
+        return self
+
+    def open_session(self):
+        return self._channel
 
     def close(self):
         pass
@@ -162,16 +155,20 @@ def test_worker_stops_emitting_once_its_session_is_replaced(monkeypatch):
     sess.client = _FakeClient(channel)
 
     emitted = []
+    terminal = []
     monkeypatch.setattr(mgr, "_log", lambda did, text, level="out", **k: emitted.append(text))
     monkeypatch.setattr(mgr, "_status", lambda *a, **k: None)
+    monkeypatch.setattr(mgr, "_push", terminal.append)
+    monkeypatch.setattr(mgr, "_push_terminal", lambda message, should_continue: terminal.append(message) or should_continue())
 
-    mgr._exec(sess, "echo hi", "Custom command", False)
+    sess.run_id = "run-1"
+    mgr._exec(sess, "echo hi", "Custom command", False, run_id="run-1")
 
-    # Only the initial "$ label" line and the first output line were emitted
-    # while this session was still current; nothing after the swap was.
-    assert "first line" in emitted
-    assert "second line" not in emitted
-    assert "third line" not in emitted
+    # Only the initial header and first terminal data batch were emitted while
+    # this session was current; nothing after the swap was.
+    assert "$ Custom command" in emitted
+    data = [message["data"] for message in terminal if message["type"] == "term_data"]
+    assert data == []
     assert not any("finished" in t or "exited" in t for t in emitted)
 
 
