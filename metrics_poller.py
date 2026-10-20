@@ -373,9 +373,8 @@ async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None
                 return extract_metrics(_parse(text), prev)
 
     try:
-        # wait_for rather than asyncio.timeout, which needs Python 3.11; the
-        # app supports 3.10. The deadline covers the whole fetch, so a reply
-        # that trickles in never outlasts it.
+        # The deadline covers the whole fetch, so a reply that trickles in
+        # never outlasts it.
         return await asyncio.wait_for(_fetch(), METRICS_FETCH_DEADLINE)
     except httpx.ConnectError:
         return {"error": "unreachable"}
