@@ -725,18 +725,28 @@ class SSHManager:
             err_buf = ""
             sudo_password_sent = False
             sudo_rejected = False
+            sudo_prompt_line_pending = {"out": False, "err": False}
 
-            def _remove_sudo_prompts(buf: str) -> str:
-                """Hide sudo's private prompt and supply the password only when asked."""
+            def _remove_sudo_prompts(buf: str, level: str) -> str:
+                """Hide complete sudo prompt lines and supply the password when asked."""
                 nonlocal sudo_password_sent, sudo_rejected
-                if not sudo_prompt or sudo_prompt not in buf:
+                if sudo_rejected:
+                    return ""
+                if not sudo_prompt:
                     return buf
 
-                prompt_count = buf.count(sudo_prompt)
-                buf = buf.replace(sudo_prompt, "")
-                for _ in range(prompt_count):
-                    if sudo_password_sent:
-                        if not sudo_rejected:
+                if sudo_prompt_line_pending[level]:
+                    newline = buf.find("\n")
+                    if newline == -1:
+                        return ""
+                    buf = buf[newline + 1:]
+                    sudo_prompt_line_pending[level] = False
+
+                while sudo_prompt in buf:
+                    prompt_index = buf.index(sudo_prompt)
+                    prompt_count = buf.count(sudo_prompt)
+                    for _ in range(prompt_count):
+                        if sudo_password_sent:
                             sudo_rejected = True
                             try:
                                 chan.close()
@@ -744,14 +754,21 @@ class SSHManager:
                                 pass
                             if self._is_current(device_id, sess):
                                 self._log(device_id, "sudo did not accept the password.", "err", gen=gen)
-                        break
-                    sudo_password_sent = True
-                    if password:
-                        try:
-                            stdin.write(password + "\n")
-                            stdin.flush()
-                        except Exception:
-                            pass
+                            return ""
+                        sudo_password_sent = True
+                        if password:
+                            try:
+                                stdin.write(password + "\n")
+                                stdin.flush()
+                            except Exception:
+                                pass
+
+                    line_start = buf.rfind("\n", 0, prompt_index) + 1
+                    newline = buf.find("\n", prompt_index)
+                    if newline == -1:
+                        sudo_prompt_line_pending[level] = True
+                        return buf[:line_start]
+                    buf = buf[:line_start] + buf[newline + 1:]
                 return buf
 
             def _split_and_emit(buf: str, level: str) -> str:
@@ -759,6 +776,8 @@ class SSHManager:
                 partial line (kept for the next chunk). Stops emitting, but
                 still returns the remainder, once this worker is no longer
                 current."""
+                if sudo_rejected:
+                    return ""
                 if "\n" not in buf:
                     return buf
                 *complete, remainder = buf.split("\n")
@@ -782,14 +801,14 @@ class SSHManager:
                     if raw:
                         got_data = True
                         out_buf += out_decoder.decode(raw, False)
-                        out_buf = _remove_sudo_prompts(out_buf)
+                        out_buf = _remove_sudo_prompts(out_buf, "out")
                         out_buf = _split_and_emit(out_buf, "out")
                 if chan.recv_stderr_ready():
                     raw = chan.recv_stderr(32768)
                     if raw:
                         got_data = True
                         err_buf += err_decoder.decode(raw, False)
-                        err_buf = _remove_sudo_prompts(err_buf)
+                        err_buf = _remove_sudo_prompts(err_buf, "err")
                         err_buf = _split_and_emit(err_buf, "err")
 
                 if not got_data:
@@ -806,14 +825,14 @@ class SSHManager:
                     if not raw:
                         break
                     out_buf += out_decoder.decode(raw, False)
-                    out_buf = _remove_sudo_prompts(out_buf)
+                    out_buf = _remove_sudo_prompts(out_buf, "out")
                     out_buf = _split_and_emit(out_buf, "out")
                 while chan.recv_stderr_ready():
                     raw = chan.recv_stderr(32768)
                     if not raw:
                         break
                     err_buf += err_decoder.decode(raw, False)
-                    err_buf = _remove_sudo_prompts(err_buf)
+                    err_buf = _remove_sudo_prompts(err_buf, "err")
                     err_buf = _split_and_emit(err_buf, "err")
 
             if not self._is_current(device_id, sess):
@@ -822,8 +841,8 @@ class SSHManager:
             # Flush each decoder and emit any trailing line with no newline.
             out_buf += out_decoder.decode(b"", True)
             err_buf += err_decoder.decode(b"", True)
-            out_buf = _remove_sudo_prompts(out_buf)
-            err_buf = _remove_sudo_prompts(err_buf)
+            out_buf = _remove_sudo_prompts(out_buf, "out")
+            err_buf = _remove_sudo_prompts(err_buf, "err")
             if out_buf:
                 cleaned = _clean(out_buf)
                 if cleaned.strip() and _safe(cleaned):

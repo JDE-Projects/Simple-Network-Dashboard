@@ -45,6 +45,19 @@ def _run(mgr, sess, channel, cmd="echo hi", label="Custom command", feed_sudo=Fa
     return emitted
 
 
+class _BufferedAfterCloseChannel(_FakeChannel):
+    """Keeps scripted bytes readable after close, like a channel's buffer."""
+
+    def close(self):
+        self._closed_by_exec = True
+
+
+def _assert_no_sudo_prompt_text(emitted, prompt):
+    lines = [text for _, text in emitted]
+    assert not any(prompt in line for line in lines)
+    assert not any("Password:" in line or "*" in line for line in lines)
+
+
 def test_interleaved_stdout_and_stderr_both_emitted_at_correct_levels():
     mgr = _mgr()
     device = _device()
@@ -190,7 +203,7 @@ def test_sudo_password_is_written_only_after_its_prompt_arrives():
 
     channel = _FakeChannel([
         ("out", b"before prompt\n"),
-        ("out", prompt.encode() + b"after prompt\n"),
+        ("out", prompt.encode() + b"\nroot\n"),
     ], on_event=on_event)
 
     emitted = _run(mgr, sess, channel, feed_sudo=True,
@@ -198,24 +211,44 @@ def test_sudo_password_is_written_only_after_its_prompt_arrives():
 
     assert channel.stdin_writes == ["pw\n"]
     assert ("out", "before prompt") in emitted
-    assert ("out", "after prompt") in emitted
+    assert ("out", "root") in emitted
+    _assert_no_sudo_prompt_text(emitted, prompt)
+
+
+def test_sudo_rs_prompt_line_with_asterisks_is_removed_with_or_without_carriage_return():
+    prompt = "__SND_SUDO_1234abcd__"
+
+    for line_ending in ("\n", "\r\n"):
+        mgr = _mgr()
+        sess = _connected_session(mgr, _device())
+        wrapper = f"[sudo: {prompt}] Password: ********            {line_ending}"
+        channel = _FakeChannel([("out", (wrapper + "root\n").encode())])
+
+        emitted = _run(mgr, sess, channel, feed_sudo=True,
+                       cmd="sudo command", sudo_prompt=prompt)
+
+        assert channel.stdin_writes == ["pw\n"]
+        assert ("out", "root") in emitted
+        _assert_no_sudo_prompt_text(emitted, prompt)
 
 
 def test_sudo_prompt_split_across_chunks_sends_password_once():
     mgr = _mgr()
     sess = _connected_session(mgr, _device())
     prompt = "__SND_SUDO_1234abcd__"
-    split_at = len(prompt) // 2
     channel = _FakeChannel([
-        ("out", prompt[:split_at].encode()),
-        ("out", prompt[split_at:].encode() + b"done\n"),
+        ("out", f"[sudo: {prompt[:12]}".encode()),
+        ("out", prompt[12:].encode()),
+        ("out", b"] Password: ********   \r"),
+        ("out", b"\nroot\n"),
     ])
 
     emitted = _run(mgr, sess, channel, feed_sudo=True,
                    cmd="sudo command", sudo_prompt=prompt)
 
     assert channel.stdin_writes == ["pw\n"]
-    assert ("out", "done") in emitted
+    assert ("out", "root") in emitted
+    _assert_no_sudo_prompt_text(emitted, prompt)
 
 
 def test_password_free_sudo_never_receives_a_password():
@@ -245,11 +278,15 @@ def test_sudo_prompt_and_echoed_password_are_removed_from_output():
     assert not any(prompt in text or "s3cret" in text for _, text in emitted)
 
 
-def test_second_sudo_prompt_closes_the_channel_and_reports_rejection():
+def test_wrong_sudo_password_hides_authentication_failure_in_the_same_read():
     mgr = _mgr()
     sess = _connected_session(mgr, _device())
     prompt = "__SND_SUDO_1234abcd__"
-    channel = _FakeChannel([("out", (prompt * 2).encode())])
+    channel = _FakeChannel([
+        ("out", (prompt + "\n").encode()),
+        ("out", ("sudo: Authentication failed, try again.\n"
+                 f"[sudo: {prompt}] Password: ********\n").encode()),
+    ])
 
     emitted = _run(mgr, sess, channel, feed_sudo=True,
                    cmd="sudo command", sudo_prompt=prompt)
@@ -257,7 +294,32 @@ def test_second_sudo_prompt_closes_the_channel_and_reports_rejection():
     assert channel.stdin_writes == ["pw\n"]
     assert channel._closed is True
     assert emitted.count(("err", "sudo did not accept the password.")) == 1
+    assert not any("Authentication failed" in text for _, text in emitted)
+    _assert_no_sudo_prompt_text(emitted, prompt)
     assert not any("cancelled" in text for _, text in emitted)
+    assert emitted[-1] == ("err", "✗ Custom command exited with code 1.")
+
+
+def test_wrong_sudo_password_hides_output_arriving_after_rejection():
+    mgr = _mgr()
+    sess = _connected_session(mgr, _device())
+    prompt = "__SND_SUDO_1234abcd__"
+    channel = _BufferedAfterCloseChannel([
+        ("out", (prompt + "\n").encode()),
+        ("out", (f"[sudo: {prompt}] Password: ********\n").encode()),
+        ("err", b"sudo: Authentication failed, try again.\n"),
+        ("out", b"unexpected output\n"),
+    ])
+
+    emitted = _run(mgr, sess, channel, feed_sudo=True,
+                   cmd="sudo command", sudo_prompt=prompt)
+
+    assert channel.stdin_writes == ["pw\n"]
+    assert channel._closed_by_exec is True
+    assert emitted.count(("err", "sudo did not accept the password.")) == 1
+    assert not any("Authentication failed" in text for _, text in emitted)
+    assert not any("unexpected output" in text for _, text in emitted)
+    _assert_no_sudo_prompt_text(emitted, prompt)
     assert emitted[-1] == ("err", "✗ Custom command exited with code 1.")
 
 
