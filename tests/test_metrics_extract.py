@@ -1,9 +1,11 @@
-"""Tests for metrics_poller's extract_metrics computed fields.
+"""Tests for metrics_poller's parser and extract_metrics computed fields.
 
 Covers the single-sample computed values (system info, load, memory, swap,
 cpu count, temperatures, uptime formatting) and the two-sample delta paths
 (cpu_percent and network rx/tx rates) that depend on a previous sample.
 """
+
+import math
 
 from metrics_poller import _parse, extract_metrics
 
@@ -37,6 +39,76 @@ node_thermal_zone_temp{{type="zone-cold"}} 0
 node_hwmon_temp_celsius{{sensor="temp1_input",chip="cpu"}} 50.0
 node_hwmon_temp_celsius{{sensor="temp1_max",chip="cpu"}} 90.0
 """
+
+
+def test_parse_plain_labelled_and_timestamp_metrics():
+    parsed = _parse("""
+plain_metric 1.5
+labelled_metric{label="value"} 2
+timestamped_metric 3 1710000000000
+""")
+
+    assert parsed == {
+        "plain_metric": [{"labels": {}, "value": 1.5}],
+        "labelled_metric": [{"labels": {"label": "value"}, "value": 2.0}],
+        "timestamped_metric": [{"labels": {}, "value": 3.0}],
+    }
+
+
+def test_parse_space_in_label_value_and_extract_disk():
+    parsed = _parse("""
+node_filesystem_size_bytes{device="/dev/sdb1",fstype="ext4",mountpoint="/media/My Drive"} 1.2e+11
+node_filesystem_avail_bytes{device="/dev/sdb1",fstype="ext4",mountpoint="/media/My Drive"} 6e+10
+""")
+
+    assert parsed["node_filesystem_size_bytes"][0]["labels"]["mountpoint"] == "/media/My Drive"
+    disks = extract_metrics(parsed, None)["disks"]
+    assert [(disk["device"], disk["mount"]) for disk in disks] == [("/dev/sdb1", "/media/My Drive")]
+
+
+def test_parse_unescapes_label_values():
+    parsed = _parse(r'example{quote="a\"b",slash="a\\b",newline="a\nb"} 1')
+
+    assert parsed["example"][0]["labels"] == {
+        "quote": 'a"b',
+        "slash": "a\\b",
+        "newline": "a\nb",
+    }
+
+
+def test_parse_delimiters_inside_quoted_label_value():
+    parsed = _parse(r'example{value="one,two{three}=four"} 1')
+
+    assert parsed["example"][0]["labels"]["value"] == "one,two{three}=four"
+
+
+def test_parse_accepts_nan_and_infinities():
+    parsed = _parse("""
+nan_metric NaN
+positive_infinity +Inf
+negative_infinity -Inf
+""")
+
+    assert math.isnan(parsed["nan_metric"][0]["value"])
+    assert parsed["positive_infinity"][0]["value"] == math.inf
+    assert parsed["negative_infinity"][0]["value"] == -math.inf
+
+
+def test_parse_skips_malformed_lines_and_keeps_valid_neighbors():
+    parsed = _parse("""
+before 1
+unterminated_quote{label="value} 2
+unterminated_block{label="value" 3
+missing_value{label="value"}
+non_numeric{label="value"} nope
+too_many_fields{label="value"} 1 2 3
+after 4
+""")
+
+    assert parsed == {
+        "before": [{"labels": {}, "value": 1.0}],
+        "after": [{"labels": {}, "value": 4.0}],
+    }
 
 
 def test_system_info_from_uname_labels():

@@ -79,30 +79,76 @@ def is_allowed_metrics_target(address: str) -> bool:
 # Prometheus text format parser
 # ---------------------------------------------------------------------------
 
+# One `name="value"` pair plus the comma or closing brace after it. The quoted
+# value may hold any character except an unescaped quote, so spaces, commas,
+# braces and `=` inside it stay part of the value. Regex matching runs in C,
+# which matters because this parses every label on every poll.
+_LABEL_PAIR_RE = re.compile(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"\s*([,}])')
+_LABEL_BLOCK_END_RE = re.compile(r"\s*\}")
+_METRIC_NAME_RE = re.compile(r"[^\s{]+")
+_LABEL_ESCAPE_RE = re.compile(r"\\(.)")
+_LABEL_ESCAPES = {"\\": "\\", '"': '"', "n": "\n"}
+
+
+def _unescape_label(raw: str) -> str:
+    """Undo the format's three escapes; any other backslash pair is kept as written."""
+    return _LABEL_ESCAPE_RE.sub(lambda m: _LABEL_ESCAPES.get(m.group(1), m.group(0)), raw)
+
+
+def _parse_label_block(line: str, start: int) -> Optional[tuple[dict, int]]:
+    """Read the `{...}` block at `start`. Returns (labels, index after `}`),
+    or None if the block is malformed or unterminated."""
+    labels: dict = {}
+    pos = start + 1
+    while True:
+        # Closes an empty block, or one with a trailing comma.
+        end = _LABEL_BLOCK_END_RE.match(line, pos)
+        if end:
+            return labels, end.end()
+        pair = _LABEL_PAIR_RE.match(line, pos)
+        if not pair:
+            return None
+        name, raw, sep = pair.groups()
+        labels[name] = _unescape_label(raw) if "\\" in raw else raw
+        pos = pair.end()
+        if sep == "}":
+            return labels, pos
+
+
 def _parse(text: str) -> dict:
-    """Minimal Prometheus exposition format parser.
-    Returns {metric_name: [{'labels': {}, 'value': float}, ...]}
-    """
+    """Parse Prometheus text lines into metric entries, skipping malformed lines.
+    Returns {metric_name: [{'labels': {}, 'value': float}, ...]}."""
     result: dict = {}
-    label_re = re.compile(r'(\w+)="([^"]*)"')
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split()
-        if len(parts) < 2:
+
+        name_match = _METRIC_NAME_RE.match(line)
+        if not name_match:
             continue
-        metric_part = parts[0]
+        name = name_match.group(0)
+
+        labels = {}
+        value_start = name_match.end()
+        if value_start < len(line) and line[value_start] == "{":
+            label_block = _parse_label_block(line, value_start)
+            if label_block is None:
+                continue
+            labels, value_start = label_block
+
+        if value_start >= len(line) or not line[value_start].isspace():
+            continue
+        fields = line[value_start:].split()
+        if len(fields) not in (1, 2):
+            continue
         try:
-            value = float(parts[1])
-        except (ValueError, IndexError):
+            value = float(fields[0])
+            if len(fields) == 2:
+                int(fields[1])
+        except ValueError:
             continue
-        if "{" in metric_part:
-            name, rest = metric_part.split("{", 1)
-            labels = dict(label_re.findall(rest))
-        else:
-            name = metric_part
-            labels = {}
+
         result.setdefault(name, []).append({"labels": labels, "value": value})
     return result
 
