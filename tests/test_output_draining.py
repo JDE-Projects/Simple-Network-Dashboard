@@ -27,7 +27,8 @@ def _connected_session(mgr, device, owner="owner-1", device_id="d1", generation=
     return sess
 
 
-def _run(mgr, sess, channel, cmd="echo hi", label="Custom command", feed_sudo=False):
+def _run(mgr, sess, channel, cmd="echo hi", label="Custom command", feed_sudo=False,
+         sudo_prompt=None):
     sess.client = _FakeClient(channel)
     emitted = []
     events = []
@@ -40,7 +41,7 @@ def _run(mgr, sess, channel, cmd="echo hi", label="Custom command", feed_sudo=Fa
 
     mgr._log = fake_log
     mgr._status = fake_status
-    mgr._exec(sess, cmd, label, feed_sudo)
+    mgr._exec(sess, cmd, label, feed_sudo, sudo_prompt=sudo_prompt)
     return emitted
 
 
@@ -165,13 +166,130 @@ def test_cancellation_mid_stream_stops_output_and_filters_password_lines():
         ("out", b"never gets here\n"),
     ], on_event=on_event)
 
-    emitted = _run(mgr, sess, channel, feed_sudo=True, cmd="sudo -S -p '' echo hi")
+    prompt = "__SND_SUDO_test__"
+    emitted = _run(mgr, sess, channel, feed_sudo=True,
+                   cmd=f"sudo -S -p {prompt} echo hi", sudo_prompt=prompt)
 
     texts = [t for _, t in emitted]
     assert "s3cret" not in texts
     assert not any(t.startswith("[sudo] password for") for t in texts)
     assert "never gets here" not in texts
     assert emitted[-1] == ("warn", "■ Custom command cancelled.")
+
+
+def test_sudo_password_is_written_only_after_its_prompt_arrives():
+    mgr = _mgr()
+    sess = _connected_session(mgr, _device())
+    prompt = "__SND_SUDO_1234abcd__"
+    events_seen = {"count": 0}
+
+    def on_event(_stream):
+        events_seen["count"] += 1
+        if events_seen["count"] == 1:
+            assert channel.stdin_writes == []
+
+    channel = _FakeChannel([
+        ("out", b"before prompt\n"),
+        ("out", prompt.encode() + b"after prompt\n"),
+    ], on_event=on_event)
+
+    emitted = _run(mgr, sess, channel, feed_sudo=True,
+                   cmd="sudo command", sudo_prompt=prompt)
+
+    assert channel.stdin_writes == ["pw\n"]
+    assert ("out", "before prompt") in emitted
+    assert ("out", "after prompt") in emitted
+
+
+def test_sudo_prompt_split_across_chunks_sends_password_once():
+    mgr = _mgr()
+    sess = _connected_session(mgr, _device())
+    prompt = "__SND_SUDO_1234abcd__"
+    split_at = len(prompt) // 2
+    channel = _FakeChannel([
+        ("out", prompt[:split_at].encode()),
+        ("out", prompt[split_at:].encode() + b"done\n"),
+    ])
+
+    emitted = _run(mgr, sess, channel, feed_sudo=True,
+                   cmd="sudo command", sudo_prompt=prompt)
+
+    assert channel.stdin_writes == ["pw\n"]
+    assert ("out", "done") in emitted
+
+
+def test_password_free_sudo_never_receives_a_password():
+    mgr = _mgr()
+    sess = _connected_session(mgr, _device())
+    prompt = "__SND_SUDO_1234abcd__"
+    channel = _FakeChannel([("out", b"command output\n")])
+
+    emitted = _run(mgr, sess, channel, feed_sudo=True,
+                   cmd="sudo command", sudo_prompt=prompt)
+
+    assert channel.stdin_writes == []
+    assert ("out", "command output") in emitted
+
+
+def test_sudo_prompt_and_echoed_password_are_removed_from_output():
+    mgr = _mgr()
+    sess = _connected_session(mgr, _device())
+    sess.password = "s3cret"
+    prompt = "__SND_SUDO_1234abcd__"
+    channel = _FakeChannel([("out", (prompt + "s3cret\n").encode())])
+
+    emitted = _run(mgr, sess, channel, feed_sudo=True,
+                   cmd="sudo command", sudo_prompt=prompt)
+
+    assert channel.stdin_writes == ["s3cret\n"]
+    assert not any(prompt in text or "s3cret" in text for _, text in emitted)
+
+
+def test_second_sudo_prompt_closes_the_channel_and_reports_rejection():
+    mgr = _mgr()
+    sess = _connected_session(mgr, _device())
+    prompt = "__SND_SUDO_1234abcd__"
+    channel = _FakeChannel([("out", (prompt * 2).encode())])
+
+    emitted = _run(mgr, sess, channel, feed_sudo=True,
+                   cmd="sudo command", sudo_prompt=prompt)
+
+    assert channel.stdin_writes == ["pw\n"]
+    assert channel._closed is True
+    assert emitted.count(("err", "sudo did not accept the password.")) == 1
+    assert not any("cancelled" in text for _, text in emitted)
+    assert emitted[-1] == ("err", "✗ Custom command exited with code 1.")
+
+
+def test_run_command_uses_a_distinct_prompt_for_each_sudo_wrapping_form(monkeypatch):
+    mgr = _mgr()
+    sess = _connected_session(mgr, _device())
+    captured = []
+
+    def fake_exec(*args):
+        captured.append(args)
+
+    class _FakeThread:
+        def __init__(self, *, target, args, daemon):
+            self._target = target
+            self._args = args
+
+        def start(self):
+            self._target(*self._args)
+
+    monkeypatch.setattr(mgr, "_exec", fake_exec)
+    monkeypatch.setattr(ssh_manager.threading, "Thread", _FakeThread)
+
+    assert mgr.run_command("d1", "sudo reboot", True) == {"ok": True}
+    sess.busy = False
+    assert mgr.run_command("d1", "echo root", True) == {"ok": True}
+
+    first, second = captured
+    first_prompt = first[-1]
+    second_prompt = second[-1]
+    assert first_prompt != second_prompt
+    assert first[1] == f"sudo -S -p {first_prompt} reboot"
+    assert second[1] == f"sudo -S -p {second_prompt} bash -c 'echo root'"
 
 
 def test_high_volume_interleaved_output_is_emitted_with_no_loss_or_reordering():

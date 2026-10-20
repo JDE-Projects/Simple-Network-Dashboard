@@ -33,6 +33,7 @@ class _FakeChannel:
         self._exited    = False
         self._closed    = False
         self._on_event  = on_event
+        self.stdin_writes = []
 
     def _advance_exit_markers(self):
         while self._events and self._events[0][0] == "exit":
@@ -97,8 +98,11 @@ class _FakeStdoutStream:
 
 
 class _FakeStdin:
-    def write(self, _s):
-        pass
+    def __init__(self, channel):
+        self._channel = channel
+
+    def write(self, text):
+        self._channel.stdin_writes.append(text)
 
     def flush(self):
         pass
@@ -113,7 +117,7 @@ class _FakeClient:
         self._channel = channel
 
     def exec_command(self, cmd, get_pty=False):
-        return _FakeStdin(), _FakeStdoutStream(self._channel), object()
+        return _FakeStdin(self._channel), _FakeStdoutStream(self._channel), object()
 
     def close(self):
         pass

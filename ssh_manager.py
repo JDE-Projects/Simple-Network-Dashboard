@@ -11,6 +11,7 @@ import hmac
 import os
 import re
 import secrets
+import shlex
 import tempfile
 import threading
 import time
@@ -181,8 +182,8 @@ class _Session:
             pass
 
     @staticmethod
-    def _sudo_prefix() -> str:
-        return "sudo -S -p ''"
+    def _sudo_prefix(prompt: str) -> str:
+        return f"sudo -S -p {shlex.quote(prompt)}"
 
     def close(self):
         try:
@@ -640,21 +641,28 @@ class SSHManager:
             sess.cancel_requested = False
 
         label = label or "Custom command"
+        sudo_prompt = None
         if use_sudo:
+            sudo_prompt = "__SND_SUDO_" + secrets.token_hex(8) + "__"
             if raw_cmd.startswith("sudo "):
-                cmd = raw_cmd.replace("sudo ", f"{_Session._sudo_prefix()} ", 1)
+                cmd = raw_cmd.replace("sudo ", f"{_Session._sudo_prefix(sudo_prompt)} ", 1)
             else:
                 inner = raw_cmd.replace("'", "'\\''")
-                cmd = f"{_Session._sudo_prefix()} bash -c '{inner}'"
+                cmd = f"{_Session._sudo_prefix(sudo_prompt)} bash -c '{inner}'"
             feed = True
         else:
             cmd  = raw_cmd
             feed = False
 
-        threading.Thread(target=self._exec, args=(sess, cmd, label, feed, cmd_id), daemon=True).start()
+        threading.Thread(
+            target=self._exec,
+            args=(sess, cmd, label, feed, cmd_id, sudo_prompt),
+            daemon=True,
+        ).start()
         return {"ok": True}
 
-    def _exec(self, sess: "_Session", cmd: str, label: str, feed_sudo: bool, cmd_id: str = None):
+    def _exec(self, sess: "_Session", cmd: str, label: str, feed_sudo: bool,
+              cmd_id: str = None, sudo_prompt: str = None):
         device_id = sess.device_id
         # Captured once: this worker may emit or change state only while it
         # remains current. Every emit below is stamped with this generation
@@ -695,13 +703,6 @@ class SSHManager:
                 except Exception:
                     pass
 
-            if needs_sudo and password:
-                try:
-                    stdin.write(password + "\n")
-                    stdin.flush()
-                except Exception:
-                    pass
-
             def _safe(s: str) -> bool:
                 s = s.strip()
                 if not s:
@@ -722,6 +723,36 @@ class SSHManager:
             err_decoder = codecs.getincrementaldecoder("utf-8")("replace")
             out_buf = ""
             err_buf = ""
+            sudo_password_sent = False
+            sudo_rejected = False
+
+            def _remove_sudo_prompts(buf: str) -> str:
+                """Hide sudo's private prompt and supply the password only when asked."""
+                nonlocal sudo_password_sent, sudo_rejected
+                if not sudo_prompt or sudo_prompt not in buf:
+                    return buf
+
+                prompt_count = buf.count(sudo_prompt)
+                buf = buf.replace(sudo_prompt, "")
+                for _ in range(prompt_count):
+                    if sudo_password_sent:
+                        if not sudo_rejected:
+                            sudo_rejected = True
+                            try:
+                                chan.close()
+                            except Exception:
+                                pass
+                            if self._is_current(device_id, sess):
+                                self._log(device_id, "sudo did not accept the password.", "err", gen=gen)
+                        break
+                    sudo_password_sent = True
+                    if password:
+                        try:
+                            stdin.write(password + "\n")
+                            stdin.flush()
+                        except Exception:
+                            pass
+                return buf
 
             def _split_and_emit(buf: str, level: str) -> str:
                 """Emit every complete line in `buf`, returning the trailing
@@ -751,12 +782,14 @@ class SSHManager:
                     if raw:
                         got_data = True
                         out_buf += out_decoder.decode(raw, False)
+                        out_buf = _remove_sudo_prompts(out_buf)
                         out_buf = _split_and_emit(out_buf, "out")
                 if chan.recv_stderr_ready():
                     raw = chan.recv_stderr(32768)
                     if raw:
                         got_data = True
                         err_buf += err_decoder.decode(raw, False)
+                        err_buf = _remove_sudo_prompts(err_buf)
                         err_buf = _split_and_emit(err_buf, "err")
 
                 if not got_data:
@@ -773,12 +806,14 @@ class SSHManager:
                     if not raw:
                         break
                     out_buf += out_decoder.decode(raw, False)
+                    out_buf = _remove_sudo_prompts(out_buf)
                     out_buf = _split_and_emit(out_buf, "out")
                 while chan.recv_stderr_ready():
                     raw = chan.recv_stderr(32768)
                     if not raw:
                         break
                     err_buf += err_decoder.decode(raw, False)
+                    err_buf = _remove_sudo_prompts(err_buf)
                     err_buf = _split_and_emit(err_buf, "err")
 
             if not self._is_current(device_id, sess):
@@ -787,6 +822,8 @@ class SSHManager:
             # Flush each decoder and emit any trailing line with no newline.
             out_buf += out_decoder.decode(b"", True)
             err_buf += err_decoder.decode(b"", True)
+            out_buf = _remove_sudo_prompts(out_buf)
+            err_buf = _remove_sudo_prompts(err_buf)
             if out_buf:
                 cleaned = _clean(out_buf)
                 if cleaned.strip() and _safe(cleaned):
@@ -797,6 +834,8 @@ class SSHManager:
                     self._log(device_id, cleaned, "err", gen=gen)
 
             code = chan.recv_exit_status()
+            if sudo_rejected and code == 0:
+                code = 1
 
             if sess.cancelled:
                 self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
