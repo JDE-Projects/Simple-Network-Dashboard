@@ -95,6 +95,73 @@ def test_poll_once_isolates_a_single_failed_fetch(monkeypatch):
     assert metrics_cache["dev_b"] == {"cpu_percent": 5.0}
 
 
+def test_poll_once_broadcasts_fast_result_before_slow_fetch_finishes(monkeypatch):
+    monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
+    monkeypatch.setattr(main, "_metrics_cache", {})
+    _select(monkeypatch, {"dev_a", "dev_b"})
+
+    slow_started = asyncio.Event()
+    release_slow = asyncio.Event()
+    slow_finished = False
+    fast_broadcast = asyncio.Event()
+
+    async def fake_fetch_metrics(host, port, prev=None):
+        nonlocal slow_finished
+        if host == "10.0.0.4":
+            slow_started.set()
+            await release_slow.wait()
+            slow_finished = True
+        return {"cpu_percent": 5.0}
+    monkeypatch.setattr(main, "fetch_metrics", fake_fetch_metrics)
+
+    broadcasts, broadcast = _recorder()
+
+    async def record_broadcast(message):
+        await broadcast(message)
+        if message["device_id"] == "dev_b":
+            fast_broadcast.set()
+    monkeypatch.setattr(main.ws_mgr, "broadcast", record_broadcast)
+
+    async def run_test():
+        task = asyncio.create_task(main._poll_once())
+        await slow_started.wait()
+        await fast_broadcast.wait()
+        assert not slow_finished
+        release_slow.set()
+        await task
+
+    asyncio.run(run_test())
+
+    assert [message["device_id"] for message in broadcasts] == ["dev_b", "dev_a"]
+
+
+def test_poll_once_limits_concurrent_fetches(monkeypatch):
+    monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
+    monkeypatch.setattr(main, "_metrics_cache", {})
+    _select(monkeypatch, {"dev_a", "dev_b"})
+    monkeypatch.setattr(main, "METRICS_MAX_CONCURRENT_FETCHES", 1)
+
+    active = 0
+    max_active = 0
+
+    async def fake_fetch_metrics(host, port, prev=None):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return {"cpu_percent": 5.0}
+    monkeypatch.setattr(main, "fetch_metrics", fake_fetch_metrics)
+
+    broadcasts, broadcast = _recorder()
+    monkeypatch.setattr(main.ws_mgr, "broadcast", broadcast)
+
+    asyncio.run(main._poll_once())
+
+    assert max_active == 1
+    assert len(broadcasts) == 2
+
+
 def test_poll_once_does_nothing_when_no_devices_selected(monkeypatch):
     monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
     monkeypatch.setattr(main, "_metrics_cache", {})

@@ -54,6 +54,7 @@ from config import (
     MAX_NAME_LEN,
     MAX_REQUEST_BODY_BYTES,
     MAX_USERNAME_LEN,
+    METRICS_MAX_CONCURRENT_FETCHES,
     METRICS_INTERVAL,
     MIN_METRICS_PORT,
     PUBLIC_ORIGIN_ENV,
@@ -211,23 +212,26 @@ async def _poll_once():
         devices = [
             d for d in runtime_state._devices_cache if d.get("id") in selected_ids
         ]
-        fetches = [
-            fetch_metrics(
-                d.get("host"),
-                d.get("metrics_port", 9100),
-                _metrics_cache.get(d.get("id")),
-            )
-            for d in devices
-        ]
-        results = await asyncio.gather(*fetches, return_exceptions=True)
-        for device, result in zip(devices, results, strict=True):
+        semaphore = asyncio.Semaphore(METRICS_MAX_CONCURRENT_FETCHES)
+
+        async def fetch_one(device):
+            async with semaphore:
+                try:
+                    result = await fetch_metrics(
+                        device.get("host"),
+                        device.get("metrics_port", 9100),
+                        _metrics_cache.get(device.get("id")),
+                    )
+                except Exception as exc:
+                    result = {"error": str(exc)}
+            return device, result
+
+        tasks = [asyncio.create_task(fetch_one(device)) for device in devices]
+        for task in asyncio.as_completed(tasks):
+            device, metrics = await task
             did  = device.get("id")
             host = device.get("host")
             port = device.get("metrics_port", 9100)
-            if isinstance(result, Exception):
-                metrics = {"error": str(result)}
-            else:
-                metrics = result
             _metrics_cache[did] = metrics
             _log_metrics_result(did, host, port, metrics)
             public = {k: v for k, v in metrics.items() if not k.startswith("_")}

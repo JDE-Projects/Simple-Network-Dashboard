@@ -13,6 +13,9 @@ def _ws_revalidate_seconds() -> float:
 
 
 METRICS_INTERVAL = 2  # seconds between polls for the selected device
+METRICS_FETCH_DEADLINE = 8  # seconds from connection through the last metrics response byte
+METRICS_MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # cap metrics responses to bound memory use
+METRICS_MAX_CONCURRENT_FETCHES = 8  # cap simultaneous exporter requests per polling cycle
 WS_RELEASE_GRACE_SECONDS = 15  # grace period before a disconnected browser's SSH sessions are released, lets a page refresh reconnect without losing sessions
 WS_REVALIDATE_SECONDS = _ws_revalidate_seconds()  # how often a live WebSocket re-checks that the session token it connected with is still valid
 MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MB cap on incoming HTTP request bodies
