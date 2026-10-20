@@ -11,6 +11,8 @@ import time
 import httpx
 from typing import Optional
 
+from config import METRICS_FETCH_DEADLINE, METRICS_MAX_RESPONSE_BYTES
+
 # Filesystem types that are virtual/pseudo — not worth showing on disk panel
 _EXCLUDE_FS = {
     "tmpfs", "devtmpfs", "squashfs", "overlay", "ramfs",
@@ -307,14 +309,33 @@ async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None
 
     host_part = f"[{ip}]" if ipaddress.ip_address(ip).version == 6 else ip
     url = f"http://{host_part}:{port}/metrics"
-    try:
+    async def _fetch() -> dict:
         async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return extract_metrics(_parse(resp.text), prev)
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                content_length = resp.headers.get("Content-Length")
+                if content_length is not None and int(content_length) > METRICS_MAX_RESPONSE_BYTES:
+                    return {"error": "response too large"}
+                chunks = []
+                received = 0
+                async for chunk in resp.aiter_bytes():
+                    received += len(chunk)
+                    if received > METRICS_MAX_RESPONSE_BYTES:
+                        return {"error": "response too large"}
+                    chunks.append(chunk)
+                text = b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+                return extract_metrics(_parse(text), prev)
+
+    try:
+        # wait_for rather than asyncio.timeout, which needs Python 3.11; the
+        # app supports 3.10. The deadline covers the whole fetch, so a reply
+        # that trickles in never outlasts it.
+        return await asyncio.wait_for(_fetch(), METRICS_FETCH_DEADLINE)
     except httpx.ConnectError:
         return {"error": "unreachable"}
     except httpx.TimeoutException:
+        return {"error": "timeout"}
+    except asyncio.TimeoutError:
         return {"error": "timeout"}
     except Exception as e:
         return {"error": str(e)}

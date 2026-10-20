@@ -18,10 +18,24 @@ import socket
 
 import httpx
 
+import metrics_poller
+from config import METRICS_MAX_RESPONSE_BYTES
 from metrics_poller import fetch_metrics
 
 
 NODE_EXPORTER_SAMPLE = 'node_load1 0.5\n'
+
+
+class _AsyncIteratorStream(httpx.AsyncByteStream):
+    def __init__(self, iterator):
+        self._iterator = iterator
+
+    async def __aiter__(self):
+        async for chunk in self._iterator:
+            yield chunk
+
+    async def aclose(self):
+        await self._iterator.aclose()
 
 
 def _install_mock_transport(monkeypatch, handler):
@@ -80,6 +94,87 @@ def test_allowed_ip_literal_is_fetched_and_parsed(monkeypatch):
     assert "error" not in result
     assert len(calls) == 1
     assert calls[0].url.host == "10.0.0.4"
+
+
+def test_response_exactly_at_size_cap_is_parsed(monkeypatch):
+    body = NODE_EXPORTER_SAMPLE.encode()
+    body += b"#" * (METRICS_MAX_RESPONSE_BYTES - len(body))
+
+    def handler(request):
+        return httpx.Response(200, content=body)
+
+    _install_mock_transport(monkeypatch, handler)
+
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert result["load1"] == 0.5
+
+
+def test_response_over_size_cap_is_rejected_with_content_length(monkeypatch):
+    body = b"x" * (METRICS_MAX_RESPONSE_BYTES + 1)
+
+    def handler(request):
+        return httpx.Response(200, headers={"Content-Length": str(len(body))}, content=body)
+
+    _install_mock_transport(monkeypatch, handler)
+
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert result == {"error": "response too large"}
+
+
+def test_response_over_size_cap_is_rejected_without_content_length(monkeypatch):
+    async def body():
+        yield b"x" * (METRICS_MAX_RESPONSE_BYTES + 1)
+
+    def handler(request):
+        return httpx.Response(200, stream=_AsyncIteratorStream(body()))
+
+    _install_mock_transport(monkeypatch, handler)
+
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert result == {"error": "response too large"}
+
+
+def test_content_length_over_size_cap_is_rejected_without_reading_body(monkeypatch):
+    body_read = False
+
+    async def body():
+        nonlocal body_read
+        body_read = True
+        yield b"x"
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            headers={"Content-Length": str(METRICS_MAX_RESPONSE_BYTES + 1)},
+            stream=_AsyncIteratorStream(body()),
+        )
+
+    _install_mock_transport(monkeypatch, handler)
+
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert result == {"error": "response too large"}
+    assert not body_read
+
+
+def test_slow_stream_hits_fetch_deadline(monkeypatch):
+    async def body():
+        while True:
+            await asyncio.sleep(1)
+            yield b"x"
+
+    def handler(request):
+        return httpx.Response(200, stream=_AsyncIteratorStream(body()))
+
+    _install_mock_transport(monkeypatch, handler)
+    monkeypatch.setattr(metrics_poller, "METRICS_FETCH_DEADLINE", 0.01)
+
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert result == {"error": "timeout"}
 
 
 def test_hostname_resolving_to_allowed_address_connects_to_ip_not_name(monkeypatch):
