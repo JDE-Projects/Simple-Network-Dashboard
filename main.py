@@ -778,6 +778,8 @@ async def delete_device(device_id: str):
     if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
     devices = [d for d in runtime_state._devices_cache if d["id"] != device_id]
+    if len(devices) == len(runtime_state._devices_cache):
+        return {"ok": False, "error": _UNKNOWN_DEVICE_ERROR}
     if not persistence._save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     ws_mgr.unselect_device_everywhere(device_id)
@@ -802,6 +804,8 @@ async def update_commands(device_id: str, body: CommandsIn):
             d["commands"] = body.model_dump()["commands"]
             devices[i] = persistence._norm(d)
             break
+    else:
+        return {"ok": False, "error": _UNKNOWN_DEVICE_ERROR}
     if not persistence._save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
