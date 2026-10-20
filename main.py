@@ -122,15 +122,13 @@ _METRICS_ERROR_SUMMARY_SECONDS = 5 * 60
 
 
 async def _broadcast(msg: dict):
-    """Broadcast wrapper that also writes SSH events to the debug log.
+    """Broadcast wrapper that writes SSH status events to the debug log.
     If msg contains a private '_owner' key, route to that owner only;
     otherwise broadcast to everyone.  The key is popped before sending."""
     if debug_log._debug_enabled():
         t   = msg.get("type", "")
         did = msg.get("device_id", "")
-        if t == "ssh_log":
-            debug_log._debug_write(f"SSH [{did}] {msg.get('level', 'out').upper()}: {msg.get('text', '')}")
-        elif t == "ssh_status":
+        if t == "ssh_status":
             debug_log._debug_write(f"SSH [{did}] → {msg.get('state', '')}")
     owner = msg.pop("_owner", None)
     if owner:

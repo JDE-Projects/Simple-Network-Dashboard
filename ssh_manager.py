@@ -656,13 +656,14 @@ class SSHManager:
 
         threading.Thread(
             target=self._exec,
-            args=(sess, cmd, label, feed, cmd_id, sudo_prompt),
+            args=(sess, cmd, label, feed, cmd_id, sudo_prompt, len(raw_cmd)),
             daemon=True,
         ).start()
         return {"ok": True}
 
     def _exec(self, sess: "_Session", cmd: str, label: str, feed_sudo: bool,
-              cmd_id: str = None, sudo_prompt: str = None):
+              cmd_id: str = None, sudo_prompt: str = None,
+              raw_command_length: int = 0):
         device_id = sess.device_id
         # Captured once: this worker may emit or change state only while it
         # remains current. Every emit below is stamped with this generation
@@ -671,13 +672,19 @@ class SSHManager:
         gen = sess.generation
 
         if not sess.client:
+            self._debug_write(f"SSH [{device_id}] command not started: not connected")
             if self._is_current(device_id, sess):
                 self._log(device_id, "Not connected.", "err", gen=gen)
             self._finish_exec(sess)
             return
 
+        self._debug_write(
+            f"SSH [{device_id}] command started (sudo: {'yes' if feed_sudo else 'no'}, "
+            f"{raw_command_length} chars)"
+        )
         needs_sudo = feed_sudo and "sudo" in cmd
         password   = sess.password if needs_sudo else None
+        debug_end = None
 
         if self._is_current(device_id, sess):
             self._status(device_id, "running", gen=gen)
@@ -689,6 +696,8 @@ class SSHManager:
             sess.cancelled = True
             if self._is_current(device_id, sess):
                 self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
+            debug_end = f"SSH [{device_id}] command cancelled"
+            self._debug_write(debug_end)
             self._finish_exec(sess)
             return
 
@@ -836,6 +845,7 @@ class SSHManager:
                     err_buf = _split_and_emit(err_buf, "err")
 
             if not self._is_current(device_id, sess):
+                debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
                 return
 
             # Flush each decoder and emit any trailing line with no newline.
@@ -858,19 +868,31 @@ class SSHManager:
 
             if sess.cancelled:
                 self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
+                debug_end = f"SSH [{device_id}] command cancelled"
             elif code == 0:
                 self._log(device_id, f"✓ {label} finished.", "ok", gen=gen)
             else:
                 self._log(device_id, f"✗ {label} exited with code {code}.", "err", gen=gen)
 
+            if not sess.cancelled:
+                if sudo_rejected:
+                    debug_end = f"SSH [{device_id}] command stopped: sudo did not accept the password"
+                else:
+                    debug_end = f"SSH [{device_id}] command finished (exit code {code})"
+
         except Exception as e:
             if not self._is_current(device_id, sess):
-                pass
+                debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
             elif sess.cancelled:
                 self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
+                debug_end = f"SSH [{device_id}] command cancelled"
             else:
                 self._log(device_id, f"Error: {e}", "err", gen=gen)
+                debug_end = f"SSH [{device_id}] command failed ({type(e).__name__})"
         finally:
+            if debug_end is None:
+                debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
+            self._debug_write(debug_end)
             self._finish_exec(sess)
 
     def _finish_exec(self, sess: "_Session"):
