@@ -8,6 +8,8 @@ SERVICE_NAME="simple-network-dashboard"
 UNIT_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
 INSTALL_STATE_DIR="/etc/simple-network-dashboard"
 INSTALL_STATE="${INSTALL_STATE_DIR}/install-state"
+MIN_PYTHON_MAJOR=3
+MIN_PYTHON_MINOR=11
 PORT_MIN=3000
 PORT_MAX=3010
 FORCED_PORT=""
@@ -1222,6 +1224,22 @@ initialize_authentication() {
     fi
 }
 
+check_python_version() {
+    local version major minor
+    version=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || version=""
+    if ! [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "Error: could not read the version of python3."
+        return 1
+    fi
+    major="${version%%.*}"
+    minor="${version#*.}"
+    if (( major < MIN_PYTHON_MAJOR || (major == MIN_PYTHON_MAJOR && minor < MIN_PYTHON_MINOR) )); then
+        echo "Error: Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or newer is required; this system has Python ${version}."
+        echo "Use an operating system release that ships it, such as Debian 12, Raspberry Pi OS (Debian 12 based), or Ubuntu 24.04."
+        return 1
+    fi
+}
+
 main() {
 if [ "$EUID" -ne 0 ]; then
     echo "Run with sudo: sudo bash install.sh"
@@ -1272,6 +1290,10 @@ echo "Installing Simple Network Dashboard..."
 # Check Python 3
 if ! command -v python3 &>/dev/null; then
     echo "Error: python3 not found. Install it with: sudo apt install python3 python3-venv"
+    exit 1
+fi
+
+if ! check_python_version; then
     exit 1
 fi
 

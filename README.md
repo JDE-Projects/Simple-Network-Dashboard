@@ -25,7 +25,7 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
 sudo apt install prometheus-node-exporter
 ```
 
-**On the server that will host the dashboard (requires Python 3.10+):**
+**On the server that will host the dashboard (requires Python 3.11+):**
 
 1. Download the latest release tarball (`simple-network-dashboard-vX.Y.Z.tar.gz`) from the [Releases](https://github.com/JDE-Projects/Simple-Network-Dashboard/releases) page.
 2. Optionally [verify the download](#verify-this-download-optional).
