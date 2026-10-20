@@ -988,7 +988,20 @@ class SSHManager:
         approval)."""
         return [did for did, s in self.sessions.items() if s.state == "connected"]
 
-    def owner_connected_ids(self, owner: str) -> list:
-        """Return the device IDs this owner currently has a connected (not
-        merely reserved) SSH session on."""
-        return [did for did, s in self.sessions.items() if s.owner == owner and s.state == "connected"]
+    def owner_ssh_snapshot(self, owner: str) -> tuple[list[str], list[str]]:
+        """Return this owner's connected and command-running device IDs.
+
+        Each session is read under its device lock so a reconnecting page sees
+        a coherent state even while command workers update their session.
+        """
+        connected_ids = []
+        running_ids = []
+        for device_id in list(self.sessions):
+            with self._device_lock(device_id):
+                session = self.sessions.get(device_id)
+                if session is None or session.owner != owner or session.state != "connected":
+                    continue
+                connected_ids.append(device_id)
+                if session.busy:
+                    running_ids.append(device_id)
+        return connected_ids, running_ids

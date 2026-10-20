@@ -625,12 +625,14 @@ async def ws_endpoint(ws: WebSocket):
     # Reconnecting within the grace window keeps the owner's SSH sessions.
     _cancel_pending_release(owner)
     try:
-        # Push current state so a fresh page load (or reconnect) is in sync
-        # ssh_connected = devices this owner currently owns
-        own_connected = ssh_mgr.owner_connected_ids(owner)
-        await ws.send_text(json.dumps({
+        # Push current state so a fresh page load (or reconnect) is in sync.
+        # The manager queues broadcasts for this socket until this init frame
+        # has been delivered, preserving the snapshot's ordering.
+        own_connected, own_running = ssh_mgr.owner_ssh_snapshot(owner)
+        await ws_mgr.send_init(ws, {
             "type": "init", "devices": runtime_state._devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
+            "ssh_running": own_running,
             "ssh_locked": ssh_mgr.locked_device_ids(),
             "debug": debug_log._debug_enabled(),
             "debug_failed": debug_log._debug_failed_notice,
@@ -638,7 +640,7 @@ async def ws_endpoint(ws: WebSocket):
             "recovery_mode": runtime_state._recovery_mode,
             "recovery_retry_available": runtime_state._recovery_backup_contents is not None,
             "recovered_notice": runtime_state._recovered_notice,
-        }))
+        })
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
             public = {k: v for k, v in m.items() if not k.startswith("_")}

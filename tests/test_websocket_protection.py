@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from pathlib import Path
@@ -14,7 +15,9 @@ from starlette.websockets import WebSocket
 
 import auth
 import main
+import ssh_manager
 from session_manager import SessionStore
+from ws_manager import _WSManager
 
 
 async def _async_true() -> bool:
@@ -73,6 +76,66 @@ def test_websocket_accepts_only_an_authenticated_browser_at_the_configured_origi
 
     with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
         assert websocket.receive_json()["type"] == "init"
+
+
+def test_init_snapshot_reports_only_the_owner_connected_and_running_sessions(tmp_path: Path, monkeypatch) -> None:
+    first = _authenticated_client(tmp_path, monkeypatch)
+    second = TestClient(main.app, base_url="https://dashboard.lan")
+    state = auth.load_auth_state(main.AUTH_FILE)
+    second_token, _expiry = main._session_store.create(state["session_generation"], remembered=False)
+    second.cookies.set(main.SESSION_COOKIE_NAME, second_token)
+    first_token = first.cookies.get(main.SESSION_COOKIE_NAME)
+    assert first_token
+    first_owner = main.SessionStore.token_digest(first_token)
+    monkeypatch.setattr(main.ssh_mgr, "sessions", {})
+
+    busy = ssh_manager._Session({}, "pw", first_owner, "busy-device")
+    busy.state = "connected"
+    busy.busy = True
+    idle = ssh_manager._Session({}, "pw", first_owner, "idle-device")
+    idle.state = "connected"
+    other = ssh_manager._Session({}, "pw", "other-owner", "other-device")
+    other.state = "connected"
+    main.ssh_mgr.sessions.update({
+        "busy-device": busy,
+        "idle-device": idle,
+        "other-device": other,
+    })
+
+    with first.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        init = websocket.receive_json()
+    with second.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        other_init = websocket.receive_json()
+
+    assert init["ssh_connected"] == ["busy-device", "idle-device"]
+    assert init["ssh_running"] == ["busy-device"]
+    assert other_init["ssh_connected"] == []
+    assert other_init["ssh_running"] == []
+
+
+def test_pending_socket_receives_init_before_queued_owner_broadcast() -> None:
+    class Socket:
+        def __init__(self):
+            self.frames: list[dict] = []
+
+        async def accept(self) -> None:
+            return None
+
+        async def send_text(self, data: str) -> None:
+            self.frames.append(json.loads(data))
+
+    async def exercise() -> list[dict]:
+        manager = _WSManager()
+        socket = Socket()
+        await manager.connect(socket, "owner-1")
+        await manager.send_to_owner("owner-1", {"type": "ssh_status", "state": "running"})
+        await manager.send_init(socket, {"type": "init"})
+        return socket.frames
+
+    assert asyncio.run(exercise()) == [
+        {"type": "init"},
+        {"type": "ssh_status", "state": "running"},
+    ]
 
 
 def test_websocket_rejects_missing_or_invalid_sessions(tmp_path: Path, monkeypatch) -> None:
@@ -218,6 +281,9 @@ def test_due_revoked_message_is_not_handled_before_policy_close(monkeypatch) -> 
         async def connect(self, _ws, _owner: str) -> None:
             return None
 
+        async def send_init(self, ws, msg: dict) -> None:
+            await ws.send_text(json.dumps(msg))
+
         def drop(self, _ws) -> None:
             return None
 
@@ -237,7 +303,7 @@ def test_due_revoked_message_is_not_handled_before_policy_close(monkeypatch) -> 
     monkeypatch.setattr(main, "ws_mgr", Manager())
     monkeypatch.setattr(main, "_websocket_request_is_valid", lambda _ws: _async_true())
     monkeypatch.setattr(main, "_session_token_is_valid", lambda _token: _async_false())
-    monkeypatch.setattr(main.ssh_mgr, "owner_connected_ids", lambda _owner: [])
+    monkeypatch.setattr(main.ssh_mgr, "owner_ssh_snapshot", lambda _owner: ([], []))
     monkeypatch.setattr(main.ssh_mgr, "stay_connected", lambda owner: handled.append(owner))
 
     asyncio.run(main.ws_endpoint(Socket()))
@@ -320,8 +386,8 @@ def test_second_session_cannot_see_or_keep_alive_first_session_ssh(tmp_path: Pat
     monkeypatch.setattr(main, "_pending_releases", pending_releases)
     monkeypatch.setattr(
         main.ssh_mgr,
-        "owner_connected_ids",
-        lambda owner: ["device-1"] if owner == first_owner else [],
+        "owner_ssh_snapshot",
+        lambda owner: (["device-1"], []) if owner == first_owner else ([], []),
     )
     monkeypatch.setattr(main.ssh_mgr, "stay_connected", lambda owner: stay_connected.append(owner))
 
@@ -343,7 +409,7 @@ def test_tabs_sharing_a_session_owner_keep_ssh_when_one_socket_closes(tmp_path: 
     owner = main.SessionStore.token_digest(token)
     pending_releases = {}
     monkeypatch.setattr(main, "_pending_releases", pending_releases)
-    monkeypatch.setattr(main.ssh_mgr, "owner_connected_ids", lambda _owner: ["device-1"])
+    monkeypatch.setattr(main.ssh_mgr, "owner_ssh_snapshot", lambda _owner: (["device-1"], []))
 
     with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as first_tab:
         assert first_tab.receive_json()["ssh_connected"] == ["device-1"]
@@ -363,7 +429,7 @@ def test_refresh_within_grace_keeps_the_session_owner_ssh(tmp_path: Path, monkey
     owner = main.SessionStore.token_digest(token)
     pending_releases = {}
     monkeypatch.setattr(main, "_pending_releases", pending_releases)
-    monkeypatch.setattr(main.ssh_mgr, "owner_connected_ids", lambda _owner: ["device-1"])
+    monkeypatch.setattr(main.ssh_mgr, "owner_ssh_snapshot", lambda _owner: (["device-1"], []))
 
     with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
         assert websocket.receive_json()["ssh_connected"] == ["device-1"]

@@ -9,17 +9,31 @@ class _WSManager:
         self._connections: list[WebSocket] = []
         self._owners: dict[WebSocket, str] = {}  # ws -> signed-in session owner
         self._selections: dict[WebSocket, str] = {}  # ws -> selected device id
+        self._pending_init: dict[WebSocket, list[str]] = {}
 
     async def connect(self, ws: WebSocket, owner_id: str = None):
         await ws.accept()
         self._connections.append(ws)
+        self._pending_init[ws] = []
         if owner_id:
             self._owners[ws] = owner_id
+
+    async def send_init(self, ws: WebSocket, msg: dict):
+        """Send a socket's first frame, then deliver broadcasts queued for it."""
+        try:
+            await ws.send_text(json.dumps(msg))
+            queued = self._pending_init.get(ws)
+            while queued:
+                await ws.send_text(queued.pop(0))
+            self._pending_init.pop(ws, None)
+        except Exception:
+            self.drop(ws)
 
     def drop(self, ws: WebSocket):
         self._connections = [c for c in self._connections if c is not ws]
         self._owners.pop(ws, None)
         self._selections.pop(ws, None)
+        self._pending_init.pop(ws, None)
 
     def set_selected_device(self, ws: WebSocket, device_id: Optional[str]):
         """Record (or clear) the device this socket has selected. An empty
@@ -53,7 +67,11 @@ class _WSManager:
         dead = []
         for ws in self._connections:
             try:
-                await ws.send_text(data)
+                queued = self._pending_init.get(ws)
+                if queued is not None:
+                    queued.append(data)
+                else:
+                    await ws.send_text(data)
             except Exception:
                 dead.append(ws)
         for ws in dead:
@@ -68,7 +86,11 @@ class _WSManager:
             if self._owners.get(ws) != owner_id:
                 continue
             try:
-                await ws.send_text(data)
+                queued = self._pending_init.get(ws)
+                if queued is not None:
+                    queued.append(data)
+                else:
+                    await ws.send_text(data)
             except Exception:
                 dead.append(ws)
         for ws in dead:
