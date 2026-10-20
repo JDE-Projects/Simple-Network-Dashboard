@@ -797,8 +797,10 @@ function connectWS() {
           $('debugChk').checked = false;
           showErrorBanner('Debug logging stopped because the log file could not be written. Check the server log directory.');
         }
-        // Restore SSH state from server (e.g. after page refresh)
+        // Restore SSH state from server (e.g. after page refresh).
+        SSH_STATE = {};
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
+        (msg.ssh_running || []).forEach(id => { SSH_STATE[id] = 'running'; });
         // Track which devices are locked (in use by any browser)
         SSH_LOCKS = {};
         (msg.ssh_locked || []).forEach(id => { SSH_LOCKS[id] = true; });
@@ -1354,6 +1356,7 @@ function renderDevices() {
     const card = document.querySelector(`[data-card="${d.id}"]`);
     if (!card) return;
     if (SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') card.classList.add('ssh-on');
+    cardRunning(card, SSH_STATE[d.id] === 'running');
     const sDot = card.querySelector('.dot.ssh');
     if (sDot && SSH_STATE[d.id] && SSH_STATE[d.id] !== 'idle') sDot.classList.add('ssh-connected');
     updateLockUI(d.id);

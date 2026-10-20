@@ -322,7 +322,7 @@ def test_fresh_failed_connect_with_no_prior_session_does_not_unlock(monkeypatch)
     assert locks == []
 
 
-def test_locked_device_ids_and_owner_connected_ids_exclude_reserved_sessions():
+def test_locked_device_ids_and_owner_snapshot_exclude_reserved_sessions():
     mgr = _mgr()
     device = _device()
 
@@ -338,4 +338,25 @@ def test_locked_device_ids_and_owner_connected_ids_exclude_reserved_sessions():
     mgr.sessions["d3"] = connected
 
     assert mgr.locked_device_ids() == ["d3"]
-    assert mgr.owner_connected_ids("owner-1") == ["d3"]
+    assert mgr.owner_ssh_snapshot("owner-1") == (["d3"], [])
+
+
+def test_owner_snapshot_reports_a_reserved_command_as_running(monkeypatch):
+    mgr = _mgr()
+    sess = ssh_manager._Session(_device(), "pw", "owner-1", "d1")
+    sess.state = "connected"
+    sess.client = object()
+    mgr.sessions["d1"] = sess
+
+    class UnstartedThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(ssh_manager.threading, "Thread", UnstartedThread)
+    assert mgr.run_command("d1", "echo hi", False, owner="owner-1") == {"ok": True}
+    assert mgr.owner_ssh_snapshot("owner-1") == (["d1"], ["d1"])
+    assert mgr.cancel("d1", owner="owner-1") == {"ok": True}
+    assert sess.cancel_requested is True
