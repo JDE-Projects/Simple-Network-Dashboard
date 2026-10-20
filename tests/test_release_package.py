@@ -20,6 +20,7 @@ REQUIRED_FILES = [
     "main.py",
     "config.py",
     "ws_manager.py",
+    "delivery_queue.py",
     "update_check.py",
     "runtime_state.py",
     "debug_log.py",

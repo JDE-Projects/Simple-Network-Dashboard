@@ -131,10 +131,17 @@ async def _broadcast(msg: dict):
         if t == "ssh_status":
             debug_log._debug_write(f"SSH [{did}] → {msg.get('state', '')}")
     owner = msg.pop("_owner", None)
+    still_current = msg.pop("_still_current", None)
     if owner:
-        await ws_mgr.send_to_owner(owner, msg)
+        if still_current is None:
+            await ws_mgr.send_to_owner(owner, msg)
+        else:
+            await ws_mgr.send_to_owner(owner, msg, still_current=still_current)
     else:
-        await ws_mgr.broadcast(msg)
+        if still_current is None:
+            await ws_mgr.broadcast(msg)
+        else:
+            await ws_mgr.broadcast(msg, still_current=still_current)
 
 
 ssh_mgr = SSHManager(_broadcast, debug_log._debug_write)
@@ -266,6 +273,7 @@ async def lifespan(app: FastAPI):
     yield
     metrics_task.cancel()
     idle_task.cancel()
+    ssh_mgr.shutdown_delivery()
     ssh_mgr.disconnect_all()
     debug_log.close_on_shutdown()
 
@@ -642,7 +650,7 @@ async def ws_endpoint(ws: WebSocket):
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
             public = {k: v for k, v in m.items() if not k.startswith("_")}
-            await ws.send_text(json.dumps({"type": "metrics", "device_id": did, "data": public}))
+            await ws_mgr.send_to(ws, {"type": "metrics", "device_id": did, "data": public})
         loop = asyncio.get_running_loop()
         next_check = loop.time() + WS_REVALIDATE_SECONDS
         while True:

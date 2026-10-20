@@ -198,7 +198,7 @@ def test_delivery_drops_a_message_stamped_with_a_stale_generation():
     assert broadcast_calls == []
 
 
-def test_delivery_forwards_a_message_with_a_matching_generation_and_strips_gen():
+def test_delivery_forwards_a_current_message_with_later_generation_revalidation():
     mgr = _mgr()
     device = _device()
 
@@ -222,6 +222,7 @@ def test_delivery_forwards_a_message_with_a_matching_generation_and_strips_gen()
     delivered = broadcast_calls[0]
     assert delivered["text"] == "current output"
     assert "_gen" not in delivered
+    assert delivered["_still_current"]()
 
 
 def test_trailing_connected_status_is_dropped_if_replaced_before_delivery(monkeypatch):

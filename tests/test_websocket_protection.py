@@ -130,6 +130,9 @@ def test_pending_socket_receives_init_before_queued_owner_broadcast() -> None:
         await manager.connect(socket, "owner-1")
         await manager.send_to_owner("owner-1", {"type": "ssh_status", "state": "running"})
         await manager.send_init(socket, {"type": "init"})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        manager.drop(socket)
         return socket.frames
 
     assert asyncio.run(exercise()) == [

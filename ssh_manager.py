@@ -18,6 +18,8 @@ import time
 
 import paramiko
 
+from delivery_queue import DeliveryQueue
+
 IDLE_WARN_SECONDS    = 270   # send warning after 4.5 minutes idle
 IDLE_TIMEOUT_SECONDS = 300   # disconnect after 5 minutes idle
 
@@ -206,7 +208,7 @@ class SSHManager:
         that must not reach the browser; defaults to a no-op."""
         self._broadcast   = broadcast_fn
         self._debug_write = debug_write if debug_write is not None else (lambda _text: None)
-        self._loop      = None          # set via set_loop() after uvicorn starts
+        self._delivery  = DeliveryQueue(lambda msg: self._deliver(msg), self._debug_write)
         self.sessions: dict[str, _Session] = {}
         self._pending: dict[str, _PendingHostKey] = {}  # device_id -> pending prompt
         self._owner_activity: dict[str, dict] = {}  # owner -> {"last_active": float, "warned": bool}
@@ -228,7 +230,7 @@ class SSHManager:
         self._gen_counter = 0
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
-        self._loop = loop
+        self._delivery.start(loop)
 
     # ---- locking helpers ---------------------------------------------------
 
@@ -273,8 +275,17 @@ class SSHManager:
     # ---- internal push helpers (safe to call from any thread) -------------
 
     def _push(self, msg: dict):
-        if self._loop and not self._loop.is_closed():
-            asyncio.run_coroutine_threadsafe(self._deliver(msg), self._loop)
+        """Queue a non-terminal message without blocking its caller."""
+        self._delivery.push(msg)
+
+    def _push_terminal(self, msg: dict, should_continue) -> bool:
+        """Queue terminal output, waiting for capacity. Never call this while
+        holding a device lock (see DeliveryQueue.push_terminal)."""
+        return self._delivery.push_terminal(msg, should_continue)
+
+    def shutdown_delivery(self):
+        """Wake terminal producers and stop the event-loop delivery drain."""
+        self._delivery.shutdown()
 
     async def _deliver(self, msg: dict):
         """Runs on the event loop thread. `_push` only schedules delivery, so
@@ -287,9 +298,14 @@ class SSHManager:
         through unchanged."""
         gen = msg.pop("_gen", None)
         if gen is not None:
-            current = self.sessions.get(msg.get("device_id"))
+            device_id = msg.get("device_id")
+            current = self.sessions.get(device_id)
             if current is None or current.generation != gen:
                 return
+            msg["_still_current"] = lambda: (
+                (current := self.sessions.get(device_id)) is not None
+                and current.generation == gen
+            )
         await self._broadcast(msg)
 
     def _log(self, device_id: str, text: str, level: str = "out", owner: str = None,
