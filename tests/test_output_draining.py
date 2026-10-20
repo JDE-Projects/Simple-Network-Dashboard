@@ -347,11 +347,13 @@ def test_run_command_uses_a_distinct_prompt_for_each_sudo_wrapping_form(monkeypa
     assert mgr.run_command("d1", "echo root", True) == {"ok": True}
 
     first, second = captured
-    first_prompt = first[-1]
-    second_prompt = second[-1]
+    first_prompt = first[-2]
+    second_prompt = second[-2]
     assert first_prompt != second_prompt
     assert first[1] == f"sudo -S -p {first_prompt} reboot"
     assert second[1] == f"sudo -S -p {second_prompt} bash -c 'echo root'"
+    assert first[-1] == len("sudo reboot")
+    assert second[-1] == len("echo root")
 
 
 def test_high_volume_interleaved_output_is_emitted_with_no_loss_or_reordering():
