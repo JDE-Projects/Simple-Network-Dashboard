@@ -635,10 +635,12 @@ async def ws_endpoint(ws: WebSocket):
         # The manager queues broadcasts for this socket until this init frame
         # has been delivered, preserving the snapshot's ordering.
         own_connected, own_running = ssh_mgr.owner_ssh_snapshot(owner)
+        terminals = ssh_mgr.owner_terminal_snapshot(owner)
         await ws_mgr.send_init(ws, {
             "type": "init", "devices": runtime_state._devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
             "ssh_running": own_running,
+            "ssh_terminals": terminals,
             "ssh_locked": ssh_mgr.locked_device_ids(),
             "debug": debug_log._debug_enabled(),
             "debug_failed": debug_log._debug_failed_notice,
@@ -647,6 +649,9 @@ async def ws_endpoint(ws: WebSocket):
             "recovery_retry_available": runtime_state._recovery_backup_contents is not None,
             "recovered_notice": runtime_state._recovered_notice,
         })
+        for terminal in terminals:
+            if terminal["fullscreen"]:
+                ssh_mgr.request_terminal_redraw(terminal["device_id"], terminal["run_id"], owner)
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
             public = {k: v for k, v in m.items() if not k.startswith("_")}

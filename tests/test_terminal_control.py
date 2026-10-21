@@ -5,7 +5,9 @@ import threading
 
 import config
 import main
+import pytest
 import ssh_manager
+from terminal_history import TerminalHistory
 from terminal_run import TerminalWriter
 from tests.test_session_enforcement import _FakeChannel, _FakeClient
 from tests.test_websocket_protection import _authenticated_client
@@ -410,6 +412,7 @@ def test_claim_clears_typed_input_but_keeps_resize_and_interrupt():
 def test_websocket_control_fanout_and_input_backpressure(tmp_path, monkeypatch):
     client = _authenticated_client(tmp_path, monkeypatch)
     monkeypatch.setattr(main.ssh_mgr, "owner_ssh_snapshot", lambda _owner: ([], []))
+    monkeypatch.setattr(main.ssh_mgr, "owner_terminal_snapshot", lambda _owner: [])
     monkeypatch.setattr(main.ssh_mgr, "claim_terminal", lambda *_args: {"ok": True, "rev": 7})
     monkeypatch.setattr(main.ssh_mgr, "terminal_input", lambda *_args: {"ok": False, "full": True})
     with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as first:
@@ -423,6 +426,80 @@ def test_websocket_control_fanout_and_input_backpressure(tmp_path, monkeypatch):
             assert second_control == {"type": "term_control", "device_id": "d1", "run_id": "run-1", "yours": False, "rev": 7}
             first.send_json({"type": "term_input", "device_id": "d1", "run_id": "run-1", "rev": 7, "data": "x"})
             assert first.receive_json()["type"] == "term_input_full"
+
+
+def test_exec_history_hides_sudo_authentication_and_precedes_terminal_push():
+    phrase, mark = "SNDsudopromptA", "SNDtermmarkB"
+    manager = _manager()
+    channel = _FakeChannel([("out", f"hidden {phrase}".encode()),
+                            ("out", f"pw Sorry, try again. {mark}visible".encode())])
+    session = _exec_session(manager, channel)
+    session.history = TerminalHistory()
+    order = []
+
+    def push(message, should_continue):
+        order.append((message["type"], session.history.snapshot()["partial"]))
+        return should_continue()
+
+    manager._push_terminal = push
+    manager._log = lambda *_args, **_kwargs: None
+    manager._status = lambda *_args, **_kwargs: None
+    manager._push = lambda _message: None
+    manager._exec(session, "command", "Label", True, sudo_phrase=phrase, sudo_mark=mark, run_id="run-1")
+    assert order == [("term_data", "visible")]
+
+
+def test_owner_terminal_snapshot_and_redraw_only_target_current_fullscreen_run():
+    manager = _manager()
+    session = _session(manager)
+    session.cols, session.rows, session.label = 80, 24, "A command"
+    session.history = TerminalHistory()
+    session.history.feed("saved\npartial", 7)
+    session.history.feed("\x1b[?1049h", 8)
+    snapshot = manager.owner_terminal_snapshot("owner")
+    assert snapshot == [{"device_id": "d1", "run_id": "run-1", "cols": 80, "rows": 24,
+                         "lines": ["saved"], "partial": "partial", "fullscreen": True,
+                         "seq": 8, "label": "A command"}]
+    assert manager.owner_terminal_snapshot("other") == []
+    assert manager.request_terminal_redraw("d1", "run-1", "owner")
+    assert session.channel.wrote.wait(1)
+    _stop(session)
+    assert session.channel.resizes == [{"width": 80, "height": 23}, {"width": 80, "height": 24}]
+    assert not manager.request_terminal_redraw("d1", "stale", "owner")
+    session.history.feed("\x1b[?1049l", 9)
+    assert not session.history.snapshot()["fullscreen"]
+
+
+def test_finish_drops_terminal_history():
+    manager = _manager()
+    session = _session(manager)
+    session.history = TerminalHistory()
+    manager._finish_exec(session)
+    assert session.history is None
+
+
+def test_websocket_init_includes_terminal_history_and_redraws_fullscreen(tmp_path, monkeypatch):
+    client = _authenticated_client(tmp_path, monkeypatch)
+    terminal = {"device_id": "d1", "run_id": "run-1", "cols": 80, "rows": 24,
+                "lines": [], "partial": "", "fullscreen": True, "seq": 3, "label": "Label"}
+    calls = []
+    monkeypatch.setattr(main.ssh_mgr, "owner_ssh_snapshot", lambda _owner: ([], []))
+    monkeypatch.setattr(main.ssh_mgr, "owner_terminal_snapshot", lambda _owner: [terminal])
+    monkeypatch.setattr(main.ssh_mgr, "request_terminal_redraw", lambda *args: calls.append(args))
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as ws:
+        assert ws.receive_json()["ssh_terminals"] == [terminal]
+    assert len(calls) == 1 and calls[0][:2] == ("d1", "run-1")
+
+
+def test_websocket_init_does_not_redraw_a_normal_terminal(tmp_path, monkeypatch):
+    client = _authenticated_client(tmp_path, monkeypatch)
+    terminal = {"device_id": "d1", "run_id": "run-1", "cols": 80, "rows": 24,
+                "lines": [], "partial": "", "fullscreen": False, "seq": 3, "label": "Label"}
+    monkeypatch.setattr(main.ssh_mgr, "owner_ssh_snapshot", lambda _owner: ([], []))
+    monkeypatch.setattr(main.ssh_mgr, "owner_terminal_snapshot", lambda _owner: [terminal])
+    monkeypatch.setattr(main.ssh_mgr, "request_terminal_redraw", lambda *_args: pytest.fail("redraw requested"))
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as ws:
+        assert ws.receive_json()["ssh_terminals"] == [terminal]
 
 
 def test_debug_lines_do_not_include_terminal_secrets_or_resize_carrier(monkeypatch):
@@ -446,3 +523,17 @@ def test_debug_lines_do_not_include_terminal_secrets_or_resize_carrier(monkeypat
     session.password = marker
     _exec(manager, session, sudo=True)
     assert all(marker not in line for line in debug)
+
+
+def test_worst_case_history_init_frame_fits_socket_queue():
+    import json
+    manager = _manager()
+    session = _session(manager)
+    session.label, session.cols, session.rows = "Label", 120, 30
+    session.history = ssh_manager.TerminalHistory()
+    for _ in range(config.TERM_HISTORY_MAX_LINES):
+        session.history._lines.append("é" * config.TERM_HISTORY_MAX_LINE_CHARS)
+    terminals = manager.owner_terminal_snapshot("owner")
+    assert terminals[0]["lines"] and terminals[0]["lines"][-1] == "é" * config.TERM_HISTORY_MAX_LINE_CHARS
+    assert len(json.dumps({"type": "init", "ssh_terminals": terminals})) < config.SOCKET_QUEUE_MAX_BYTES // 2
+    _stop(session)

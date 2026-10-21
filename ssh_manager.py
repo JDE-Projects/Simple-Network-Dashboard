@@ -16,6 +16,7 @@ import time
 import paramiko
 
 from delivery_queue import DeliveryQueue
+from terminal_history import TerminalHistory, trim_to_budget
 from terminal_run import OutputBatcher, SudoGate, TerminalWriter, build_command, clamp_size, read_channel
 import config
 
@@ -146,6 +147,8 @@ class _Session:
         self.stop_timer        = None
         self.forced            = False
         self.writer_stuck      = False
+        self.history           = None
+        self.label             = None
 
     def connect(self):
         c = paramiko.SSHClient()
@@ -180,6 +183,7 @@ class _Session:
             self.client   = None
             self.channel  = None
             self.password = None   # wipe from memory
+            self.history = None
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +687,8 @@ class SSHManager:
     def run_command(self, device_id: str, raw_cmd: str, use_sudo: bool,
                     label: str = None, owner: str = None, cmd_id: str = None,
                     cols=None, rows=None) -> dict:
+        label = label or "Custom command"
+        cols, rows = clamp_size(cols, rows)
         with self._device_lock(device_id):
             sess = self.sessions.get(device_id)
             if not sess or sess.state != "connected":
@@ -709,11 +715,12 @@ class SSHManager:
             sess.control_rev = 0
             sess.auth_complete = False
             sess.last_io = time.monotonic()
+            sess.history = TerminalHistory()
+            sess.label = label
+            sess.cols, sess.rows = cols, rows
             run_id = sess.run_id
 
-        label = label or "Custom command"
         cmd, phrase, mark = build_command(raw_cmd, use_sudo)
-        cols, rows = clamp_size(cols, rows)
 
         threading.Thread(
             target=self._exec,
@@ -794,7 +801,12 @@ class SSHManager:
 
             def emit(text, seq):
                 send_start()
-                sess.last_io = time.monotonic()
+                with self._device_lock(device_id):
+                    if self.sessions.get(device_id) is not sess or sess.run_id != run_id:
+                        return False
+                    if sess.history is not None:
+                        sess.history.feed(text, seq)
+                    sess.last_io = time.monotonic()
                 return self._push_terminal({"type": "term_data", "device_id": device_id,
                     "run_id": run_id, "seq": seq, "data": text, "_owner": sess.owner, "_gen": gen},
                     lambda: self._is_current(device_id, sess) and sess.run_id == run_id)
@@ -886,6 +898,8 @@ class SSHManager:
                 sess.channel = None
                 sess.run_id  = None
                 sess.writer = None
+                sess.history = None
+                sess.label = None
                 owner = sess.owner
                 still_current = True
             else:
@@ -903,6 +917,36 @@ class SSHManager:
             # replace landing between here and delivery is caught at
             # delivery time by the generation stamp.
             self._status(device_id, "connected", gen=sess.generation)
+
+    def owner_terminal_snapshot(self, owner: str) -> list[dict]:
+        """Return recoverable terminal state for this owner's current runs."""
+        terminals = []
+        for device_id in list(self.sessions):
+            with self._device_lock(device_id):
+                sess = self.sessions.get(device_id)
+                if (sess is None or sess.owner != owner or sess.state != "connected"
+                        or not sess.busy or sess.history is None):
+                    continue
+                terminals.append({
+                    "device_id": device_id,
+                    "run_id": sess.run_id,
+                    "cols": sess.cols,
+                    "rows": sess.rows,
+                    "label": sess.label,
+                    **sess.history.snapshot(),
+                })
+        return trim_to_budget(terminals, config.TERM_INIT_HISTORY_MAX_CHARS)
+
+    def request_terminal_redraw(self, device_id: str, run_id: str, owner: str) -> bool:
+        """Request a full-screen program redraw through its writer thread."""
+        with self._device_lock(device_id):
+            sess = self.sessions.get(device_id)
+            if (sess is None or sess.owner != owner or sess.run_id != run_id
+                    or sess.writer is None or sess.rows is None):
+                return False
+            sess.writer.resize(sess.cols, sess.rows - 1)
+            sess.writer.resize(sess.cols, sess.rows)
+            return True
 
     # ---- idle timeout --------------------------------------------------------
 

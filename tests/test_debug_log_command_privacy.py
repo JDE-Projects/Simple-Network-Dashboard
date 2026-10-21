@@ -8,6 +8,7 @@ import debug_log
 import main
 import pytest
 import ssh_manager
+from terminal_history import TerminalHistory
 from tests.test_session_enforcement import _FakeChannel, _FakeClient
 
 
@@ -110,6 +111,36 @@ def test_sudo_acceptance_and_rejection_have_private_terminal_lines(tmp_path, mon
     assert sum(line.rstrip().endswith("SSH [device-7] command finished (exit code 0)") for line in lines) == 1
     assert sum(line.rstrip().endswith("SSH [device-7] command stopped: sudo did not accept the password") for line in lines) == 1
     assert len(lines) == 4
+
+
+def test_terminal_history_input_and_sudo_password_are_not_logged(tmp_path, monkeypatch):
+    path = _enable(tmp_path, monkeypatch)
+    manager = _manager()
+    sess = _session(manager)
+    phrase, mark = "SNDsudopromptA", "SNDtermmarkB"
+    sess.run_id = "accepted"
+    sess.busy = True
+    sess.history = TerminalHistory()
+    sess.client = _FakeClient(_FakeChannel([("out", phrase.encode()),
+                                            ("out", mark.encode() + f"{MARKER}\n".encode())]))
+    snapshots = []
+    def push_terminal(message, should_continue):
+        snapshots.extend(manager.owner_terminal_snapshot("owner-1"))
+        return should_continue()
+
+    manager._push_terminal = push_terminal
+    manager._push = lambda message: (
+        manager.claim_terminal("device-7", "accepted", "owner-1", "socket-1"),
+        manager.terminal_input("device-7", "accepted", 1, MARKER, "owner-1", "socket-1"),
+    ) if message["type"] == "term_start" else None
+    manager._exec(
+        sess, f"echo {MARKER}", f"label {MARKER}", True, sudo_phrase=phrase, sudo_mark=mark,
+        raw_command_length=len(MARKER), run_id="accepted",
+    )
+
+    assert snapshots and MARKER in snapshots[0]["lines"]
+    assert manager.owner_terminal_snapshot("owner-1") == []
+    assert MARKER not in open(path, encoding="utf-8").read()
 
 
 def test_cancel_before_channel_and_mid_run_each_log_one_cancelled_end(tmp_path, monkeypatch):
