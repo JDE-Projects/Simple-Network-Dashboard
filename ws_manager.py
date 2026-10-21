@@ -1,6 +1,7 @@
 import asyncio
 import collections
 import json
+import secrets
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -21,6 +22,7 @@ class _WSManager:
     def __init__(self):
         self._connections: list[WebSocket] = []
         self._owners: dict[WebSocket, str] = {}  # ws -> signed-in session owner
+        self._socket_ids: dict[WebSocket, str] = {}  # ws -> opaque socket id
         self._selections: dict[WebSocket, str] = {}  # ws -> selected device id
         self._states: dict[WebSocket, _SocketState] = {}
         self._closing: set[asyncio.Task] = set()  # keeps close tasks alive until done
@@ -33,6 +35,7 @@ class _WSManager:
         state.sender = asyncio.create_task(self._send_queued(ws, state))
         if owner_id:
             self._owners[ws] = owner_id
+        self._socket_ids[ws] = secrets.token_urlsafe(16)
 
     async def send_init(self, ws: WebSocket, msg: dict):
         """Queue a socket's first frame before every held outbound frame."""
@@ -54,6 +57,7 @@ class _WSManager:
     def drop(self, ws: WebSocket):
         self._connections = [c for c in self._connections if c is not ws]
         self._owners.pop(ws, None)
+        self._socket_ids.pop(ws, None)
         self._selections.pop(ws, None)
         state = self._states.pop(ws, None)
         if state is not None:
@@ -130,6 +134,13 @@ class _WSManager:
 
     def owner_of(self, ws: WebSocket) -> str:
         return self._owners.get(ws)
+
+    def socket_id(self, ws: WebSocket) -> str:
+        return self._socket_ids.get(ws)
+
+    def owner_sockets(self, owner_id: str) -> list[tuple[WebSocket, str]]:
+        return [(ws, self._socket_ids[ws]) for ws in self._connections
+                if self._owners.get(ws) == owner_id and ws in self._socket_ids]
 
     def owner_count(self, owner_id: str) -> int:
         return sum(1 for o in self._owners.values() if o == owner_id)

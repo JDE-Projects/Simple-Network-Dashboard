@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import codecs
+import collections
 from dataclasses import dataclass
 import secrets
 import shlex
+import socket
+import threading
 import time
+from threading import Thread as _Thread
 
 import config
 
@@ -140,6 +144,109 @@ class ReadResult:
     refused: bool
     superseded: bool
     exit_code: int
+
+
+class TerminalWriter:
+    """Serialize terminal input, control bytes, and resize operations."""
+
+    def __init__(self, chan, on_stuck):
+        self._chan = chan
+        self._on_stuck = on_stuck
+        self._items = collections.deque()
+        self._pending_input = 0
+        self._closed = False
+        self._condition = threading.Condition()
+        self.thread = _Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def input(self, data: str) -> bool:
+        encoded = data.encode("utf-8")
+        with self._condition:
+            if self._closed or self._pending_input + len(encoded) > config.TERM_PENDING_INPUT_MAX_BYTES:
+                return False
+            self._items.append(("write", encoded, True))
+            self._pending_input += len(encoded)
+            self._condition.notify()
+            return True
+
+    def resize(self, cols: int, rows: int):
+        self._put(("resize", cols, rows))
+
+    def password(self, password: str):
+        if password:
+            done = threading.Event()
+            self._put(("write", (password + "\n").encode("utf-8"), False, done))
+            return done
+        return None
+
+    def interrupt(self):
+        with self._condition:
+            if not self._closed:
+                self._items.appendleft(("write", b"\x03", False))
+                self._condition.notify()
+
+    def clear_input(self):
+        with self._condition:
+            self._items = collections.deque(
+                item for item in self._items if item[0] != "write" or not item[2])
+            self._pending_input = 0
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+    def _put(self, item):
+        with self._condition:
+            if not self._closed:
+                self._items.append(item)
+                self._condition.notify()
+
+    def _run(self):
+        try:
+            self._chan.settimeout(config.TERM_SEND_TIMEOUT)
+        except Exception:
+            pass
+        while True:
+            with self._condition:
+                while not self._items and not self._closed:
+                    self._condition.wait(0.1)
+                if self._closed:
+                    return
+                item = self._items.popleft()
+                if item[0] == "write" and item[2]:
+                    self._pending_input -= len(item[1])
+            if item[0] == "resize":
+                try:
+                    self._chan.resize_pty(width=item[1], height=item[2])
+                except Exception:
+                    pass
+                continue
+            data = item[1]
+            deadline = time.monotonic() + config.TERM_WRITE_DEADLINE
+            stuck = False
+            while data and not self._closed:
+                if time.monotonic() >= deadline:
+                    stuck = True
+                    break
+                try:
+                    sent = self._chan.send(data)
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+                if not sent:
+                    # Paramiko returns 0 once the channel is closed.
+                    break
+                data = data[sent:]
+            if len(item) > 3:
+                item[3].set()
+            if stuck:
+                self._on_stuck()
+            if data:
+                return
 
 
 def read_channel(chan, gate, batcher, emit, should_continue, send_password,

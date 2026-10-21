@@ -99,6 +99,16 @@ class _FakeChannel:
     def sendall(self, text):
         self.stdin_writes.append(text)
 
+    def send(self, data):
+        self.stdin_writes.append(data.decode("utf-8"))
+        return len(data)
+
+    def settimeout(self, _timeout):
+        pass
+
+    def resize_pty(self, **_kwargs):
+        pass
+
 
 class _FakeClient:
     """Paramiko client/transport stand-in that opens the scripted channel."""

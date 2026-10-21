@@ -249,7 +249,7 @@ def test_cancel_before_channel_is_wired_still_takes_effect(monkeypatch):
     sess.cancelled        = False
     sess.cancel_requested = False
 
-    result = mgr.cancel("d1", owner="owner-1")
+    result = mgr.cancel("d1", sess.run_id, owner="owner-1")
     assert result == {"ok": True}
     assert sess.cancel_requested is True
     assert sess.cancelled is True
@@ -358,5 +358,5 @@ def test_owner_snapshot_reports_a_reserved_command_as_running(monkeypatch):
     monkeypatch.setattr(ssh_manager.threading, "Thread", UnstartedThread)
     assert mgr.run_command("d1", "echo hi", False, owner="owner-1")["ok"] is True
     assert mgr.owner_ssh_snapshot("owner-1") == (["d1"], ["d1"])
-    assert mgr.cancel("d1", owner="owner-1") == {"ok": True}
+    assert mgr.cancel("d1", sess.run_id, owner="owner-1") == {"ok": True}
     assert sess.cancel_requested is True

@@ -676,6 +676,20 @@ async def ws_endpoint(ws: WebSocket):
                 ws_mgr.set_selected_device(ws, msg.get("id"))
             elif msg.get("type") == "stay_connected":
                 ssh_mgr.stay_connected(owner)
+            elif msg.get("type") == "term_claim":
+                result = ssh_mgr.claim_terminal(msg.get("device_id"), msg.get("run_id"), owner, ws_mgr.socket_id(ws))
+                if result.get("ok"):
+                    for target, socket_id in ws_mgr.owner_sockets(owner):
+                        await ws_mgr.send_to(target, {"type": "term_control", "device_id": msg.get("device_id"),
+                            "run_id": msg.get("run_id"), "yours": socket_id == ws_mgr.socket_id(ws), "rev": result["rev"]})
+            elif msg.get("type") == "term_input":
+                result = ssh_mgr.terminal_input(msg.get("device_id"), msg.get("run_id"), msg.get("rev"),
+                    msg.get("data"), owner, ws_mgr.socket_id(ws))
+                if result.get("full"):
+                    await ws_mgr.send_to(ws, {"type": "term_input_full", "device_id": msg.get("device_id"), "run_id": msg.get("run_id")})
+            elif msg.get("type") == "term_resize":
+                ssh_mgr.terminal_resize(msg.get("device_id"), msg.get("run_id"), msg.get("rev"),
+                    msg.get("cols"), msg.get("rows"), owner, ws_mgr.socket_id(ws))
     except WebSocketDisconnect:
         pass
     finally:
@@ -852,6 +866,10 @@ class DeviceIdIn(BaseModel):
     device_id: str
 
 
+class CancelIn(DeviceIdIn):
+    run_id: str
+
+
 @app.post("/api/ssh/disconnect")
 async def ssh_disconnect(body: DeviceIdIn, request: Request):
     return ssh_mgr.disconnect(body.device_id, _request_session_owner(request))
@@ -884,8 +902,8 @@ async def ssh_run(body: RunIn, request: Request):
 
 
 @app.post("/api/ssh/cancel")
-async def ssh_cancel(body: DeviceIdIn, request: Request):
-    return ssh_mgr.cancel(body.device_id, _request_session_owner(request))
+async def ssh_cancel(body: CancelIn, request: Request):
+    return ssh_mgr.cancel(body.device_id, body.run_id, _request_session_owner(request))
 
 
 class TrustIn(BaseModel):
