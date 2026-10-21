@@ -21,6 +21,14 @@ def _tags(page) -> list[str]:
     return _console(page).locator(".ln .tag").all_text_contents()
 
 
+def _data(page, routes, seq: int, data: str) -> None:
+    """Send a batch and wait until the terminal has received and drawn it, so a
+    clock change afterwards cannot land on its line feeds."""
+    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": seq, "data": data})
+    page.wait_for_function("([id, seq]) => (LIVE_TERMINALS.get(id) || {}).lastSeq >= seq", arg=[SEEDED_DEVICE_ID, seq])
+    page.evaluate("id => new Promise(done => LIVE_TERMINALS.get(id).terminal.write('', done))", SEEDED_DEVICE_ID)
+
+
 def _time(page, value: str) -> str:
     page.clock.set_fixed_time(value)
     return page.evaluate("() => new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'})")
@@ -33,7 +41,7 @@ def test_fold_keeps_line_feed_times_and_scrollback_output(page, app_server_with_
     times = []
     for index, value in enumerate(("2024-01-01T12:00:01", "2024-01-01T12:00:02", "2024-01-01T12:00:03"), 1):
         times.append(_time(page, value))
-        _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": index, "data": f"line {index}\r\n"})
+        _data(page, routes, index, f"line {index}\r\n")
     _time(page, "2024-01-01T12:00:09")
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one"})
     expect(_box(page)).to_have_count(0)
@@ -66,9 +74,9 @@ def test_fold_progress_redraw_uses_final_text(page, app_server_with_device):
 def test_fold_marks_closed_full_screen_view_without_its_contents(page, app_server_with_device):
     _, routes = _open_connected_page(page, app_server_with_device)
     _start(routes)
-    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 1, "data": "before\r\n"})
+    _data(page, routes, 1, "before\r\n")
     closed_time = _time(page, "2024-01-01T12:00:04")
-    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 2, "data": "\x1b[?1049hsecret screen\x1b[?1049lafter\r\n"})
+    _data(page, routes, 2, "\x1b[?1049hsecret screen\x1b[?1049lafter\r\n")
     _time(page, "2024-01-01T12:00:09")
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one"})
     expect(_box(page)).to_have_count(0)
@@ -82,9 +90,9 @@ def test_fold_scrollback_trim_keeps_times_aligned_and_console_cap(page, app_serv
     _, routes = _open_connected_page(page, app_server_with_device)
     _start(routes, rows=5)
     first_time = _time(page, "2024-01-01T12:00:05")
-    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 1, "data": "".join(f"old {index}\r\n" for index in range(4800))})
+    _data(page, routes, 1, "".join(f"old {index}\r\n" for index in range(4800)))
     second_time = _time(page, "2024-01-01T12:00:06")
-    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 2, "data": "".join(f"new {index}\r\n" for index in range(400))})
+    _data(page, routes, 2, "".join(f"new {index}\r\n" for index in range(400)))
     _time(page, "2024-01-01T12:00:09")
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one"})
     expect(_box(page)).to_have_count(0)
@@ -107,7 +115,7 @@ def test_fold_queues_app_messages_after_terminal_rows(page, app_server_with_devi
     before_time = _tags(page)[0]
     _start(routes)
     terminal_time = _time(page, "2024-01-01T12:00:07")
-    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 1, "data": "terminal\r\n"})
+    _data(page, routes, 1, "terminal\r\n")
     run_time = _time(page, "2024-01-01T12:00:08")
     _send(routes, {"type": "ssh_log", "device_id": SEEDED_DEVICE_ID, "text": "during run", "level": "warn"})
     expect(_console(page).locator(".ln", has_text="terminal")).to_have_count(0)
