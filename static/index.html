@@ -830,6 +830,7 @@ function connectWS() {
         renderStats();
         renderLibrary();
         reconcileTabs();
+        rebuildLiveTerminals(msg.ssh_terminals || []);
         break;
       case 'metrics':
         METRICS[msg.device_id] = msg.data;
@@ -1314,7 +1315,9 @@ function terminalHasFocus(live) {
 
 function updateTerminalStrip(live) {
   if (!live.live || live.inputFull) return;
-  if (live.yours && terminalHasFocus(live)) {
+  if (live.redrawWaiting) {
+    live.strip.textContent = 'Waiting for the program to redraw. Press a key in the window if it stays blank.';
+  } else if (live.yours && terminalHasFocus(live)) {
     live.strip.textContent = 'Running. Your typing goes to this command.';
   } else if (live.yours === false) {
     live.strip.textContent = 'Typing is in another tab. Click here to type.';
@@ -1391,9 +1394,9 @@ function showTerminalInputFull(msg) {
   }, 4000);
 }
 
-function startLiveTerminal(msg) {
+function startLiveTerminal(msg, options = {}) {
   if (!msg.device_id || !msg.run_id) return;
-  foldLiveTerminal(msg.device_id);
+  if (!options.skipFold) foldLiveTerminal(msg.device_id);
   ensureTab(msg.device_id);
   const con = consoleFor(msg.device_id);
   const box = document.createElement('div');
@@ -1405,9 +1408,11 @@ function startLiveTerminal(msg) {
   frame.className = 'terminal-frame';
   box.append(strip, frame);
   con.appendChild(box);
-  const terminal = new Terminal({cols: msg.cols, rows: msg.rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
+  const cols = msg.cols || 120;
+  const rows = msg.rows || 30;
+  const terminal = new Terminal({cols, rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
   terminal.open(frame);
-  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows: msg.rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, lineTimes: [], fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
+  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, lineTimes: [], fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
   LIVE_TERMINALS.set(msg.device_id, live);
   terminal.onLineFeed(() => {
     if (live.live && terminal.buffer.active.type === 'normal') {
@@ -1465,11 +1470,15 @@ function startLiveTerminal(msg) {
   }
   paintFocus(terminalHasFocus(live));
   refreshLiveTerminal(live);
+  return live;
 }
 
 function writeTerminalData(msg) {
   const live = LIVE_TERMINALS.get(msg.device_id);
   if (!live || !live.live || live.runId !== msg.run_id || typeof msg.seq !== 'number' || msg.seq <= live.lastSeq) return;
+  clearTimeout(live.redrawTimer);
+  live.redrawWaiting = false;
+  updateTerminalStrip(live);
   live.lastSeq = msg.seq;
   live.terminal.write(String(msg.data || ''), () => {
     if (!live.live) return;
@@ -1480,7 +1489,7 @@ function writeTerminalData(msg) {
   });
 }
 
-function terminalFoldRows(live, foldTime) {
+function terminalFoldRows(live, foldTime, includeOpenFullScreenClosure = true) {
   const buffer = live.terminal.buffer.normal;
   const first = Math.max(0, buffer.length - 5000);
   const timeByLine = new Map(live.lineTimes.filter(entry => !entry.marker.isDisposed).map(entry => [entry.marker.line, entry.time]));
@@ -1509,13 +1518,14 @@ function terminalFoldRows(live, foldTime) {
     const position = rows.findIndex(row => row.start >= closure.marker.line);
     rows.splice(position < 0 ? rows.length : position, 0, {text: '(full-screen view closed)', level: 'muted', time: closure.time});
   }
-  if (live.fullScreen) rows.push({text: '(full-screen view closed)', level: 'muted', time: foldTime});
+  if (includeOpenFullScreenClosure && live.fullScreen) rows.push({text: '(full-screen view closed)', level: 'muted', time: foldTime});
   return rows;
 }
 
 function disposeLiveTerminal(live) {
   clearTimeout(live.resizeTimer);
   clearTimeout(live.inputFullTimer);
+  clearTimeout(live.redrawTimer);
   live.terminal.dispose();
   live.box.remove();
   if (LIVE_TERMINALS.get(live.deviceId) === live) LIVE_TERMINALS.delete(live.deviceId);
@@ -1528,6 +1538,7 @@ function foldLiveTerminal(deviceId, runId) {
   live.folding = true;
   clearTimeout(live.resizeTimer);
   clearTimeout(live.inputFullTimer);
+  clearTimeout(live.redrawTimer);
   live.terminal.write('', () => {
     const con = document.querySelector(`[data-console="${live.deviceId}"]`);
     if (!con || !live.box.parentNode || live.box.parentNode !== con) {
@@ -1540,6 +1551,69 @@ function foldLiveTerminal(deviceId, runId) {
     insertConsoleRows(live.deviceId, rows, live.box);
     disposeLiveTerminal(live);
   });
+}
+
+function resetRecoveredTerminalControl(live) {
+  live.yours = undefined;
+  live.rev = undefined;
+  live.claimPending = false;
+  delete live.box.dataset.yours;
+  delete live.box.dataset.rev;
+  updateTerminalStrip(live);
+  if (terminalHasFocus(live)) claimTerminalControl(live);
+}
+
+function restoreLiveTerminal(entry, includeHeader, carried = null) {
+  const rows = [];
+  if (includeHeader) rows.push({text: '$ Command', level: 'cmd', time: ''});
+  (entry.lines || []).forEach(text => rows.push({text: String(text), level: 'out', time: ''}));
+  if (rows.length) insertConsoleRows(entry.device_id, rows);
+  const live = startLiveTerminal({
+    device_id: entry.device_id,
+    run_id: entry.run_id,
+    cols: entry.cols || 120,
+    rows: entry.rows || 30,
+  }, {skipFold: true});
+  if (!live) return;
+  if (carried) {
+    live.appMessages = carried.appMessages;
+    live.appMessagesDropped = carried.appMessagesDropped;
+  }
+  live.lastSeq = typeof entry.seq === 'number' ? entry.seq : -1;
+  // Recovery writes are snapshots, not newly received output, so they never get line times.
+  live.terminal.write(String(entry.partial || ''));
+  if (entry.fullscreen) {
+    live.fullScreen = true;
+    live.terminal.write('\x1b[?1049h', () => refreshLiveTerminal(live));
+    live.redrawTimer = setTimeout(() => {
+      if (!live.live) return;
+      live.redrawWaiting = true;
+      updateTerminalStrip(live);
+    }, 2000);
+  }
+  refreshLiveTerminal(live);
+}
+
+function rebuildLiveTerminals(entries) {
+  const snapshots = new Map(entries.filter(entry => entry.device_id && entry.run_id).map(entry => [entry.device_id, entry]));
+  [...LIVE_TERMINALS.entries()].forEach(([deviceId, live]) => {
+    const entry = snapshots.get(deviceId);
+    if (!entry) foldLiveTerminal(deviceId);
+    else if (live.runId === entry.run_id && live.lastSeq >= (typeof entry.seq === 'number' ? entry.seq : -1)) {
+      resetRecoveredTerminalControl(live);
+      snapshots.delete(deviceId);
+    } else if (live.runId !== entry.run_id) {
+      foldLiveTerminal(deviceId);
+      restoreLiveTerminal(entry, true);
+      snapshots.delete(deviceId);
+    } else {
+      const carried = {appMessages: live.appMessages, appMessagesDropped: live.appMessagesDropped};
+      disposeLiveTerminal(live);
+      restoreLiveTerminal(entry, false, carried);
+      snapshots.delete(deviceId);
+    }
+  });
+  snapshots.forEach(entry => restoreLiveTerminal(entry, true));
 }
 
 /* Prominent, dismissable red banner for failures the user must not miss
@@ -2296,17 +2370,29 @@ function doExport(showCustom) {
   const d    = dev(activeTabId);
   const name = d ? d.name : 'Console';
   const con  = document.querySelector(`[data-console="${activeTabId}"]`);
-  const lines = con ? Array.from(con.querySelectorAll('.ln')).map(ln => {
-    const t = ln.querySelector('.tag').textContent;
-    let m;
-    if (ln.classList.contains('custom-cmd')) {
-      const entry = customCmdText.get(ln);
-      m = (showCustom && entry) ? ('$ ' + entry.command) : ('$ ' + (entry ? entry.placeholder : 'Command'));
-    } else {
-      m = ln.querySelector('.msg').textContent;
-    }
-    return `${t}  ${name} · ${m}`;
-  }) : [];
+  const exportTime = consoleTime();
+  const lines = [];
+  if (con) {
+    Array.from(con.children).forEach(child => {
+      if (child.classList.contains('ln')) {
+        const t = child.querySelector('.tag').textContent;
+        let m;
+        if (child.classList.contains('custom-cmd')) {
+          const entry = customCmdText.get(child);
+          m = (showCustom && entry) ? ('$ ' + entry.command) : ('$ ' + (entry ? entry.placeholder : 'Command'));
+        } else {
+          m = child.querySelector('.msg').textContent;
+        }
+        lines.push(`${t}  ${name} · ${m}`);
+        return;
+      }
+      if (!child.classList.contains('live-terminal')) return;
+      const live = LIVE_TERMINALS.get(activeTabId);
+      if (!live || live.box !== child || !live.live) return;
+      terminalFoldRows(live, exportTime, false).forEach(row => lines.push(`${row.time}  ${name} · ${row.text}`));
+      lines.push(`${exportTime}  ${name} · (command still running when exported)`);
+    });
+  }
   if (!lines.length) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
   const blob = new Blob([lines.join('\n') + '\n'], {type: 'text/plain'});
   const url  = URL.createObjectURL(blob);
@@ -2320,7 +2406,7 @@ function doExport(showCustom) {
 $('exportBtn').onclick = () => {
   if (!activeTabId) return;
   const con = document.querySelector(`[data-console="${activeTabId}"]`);
-  if (!con || !con.querySelector('.ln')) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
+  if (!con || (!con.querySelector('.ln') && !con.querySelector('.live-terminal'))) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
   const hasCustom = !!con.querySelector('.ln.custom-cmd');
   if (!hasCustom) { doExport(false); return; }
   $('exportPrompt').classList.add('show');
