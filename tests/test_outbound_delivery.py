@@ -261,7 +261,11 @@ def test_init_precedes_held_broadcasts_and_cached_metrics():
         await manager.broadcast({"type": "before-init"})
         await manager.send_init(socket, {"type": "init"})
         await manager.send_to(socket, {"type": "metrics"})
-        for _ in range(5):
+        # Python 3.11's wait_for adds loop turns per send, so wait on the
+        # frame count rather than a fixed number of yields.
+        for _ in range(100):
+            if len(socket.frames) >= 3:
+                break
             await asyncio.sleep(0)
         manager.drop(socket)
         return socket.frames
