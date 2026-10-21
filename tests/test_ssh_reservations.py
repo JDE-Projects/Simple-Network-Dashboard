@@ -164,15 +164,14 @@ def test_run_command_rejects_a_second_call_while_the_first_is_busy(monkeypatch):
     entered = threading.Event()
     release = threading.Event()
 
-    def fake_exec(self, sess_arg, cmd, label, feed_sudo, cmd_id=None, sudo_prompt=None,
-                  raw_command_length=0):
+    def fake_exec(self, sess_arg, cmd, label, feed_sudo, *args, **kwargs):
         entered.set()
         release.wait(5)
 
     monkeypatch.setattr(ssh_manager.SSHManager, "_exec", fake_exec)
 
     result1 = mgr.run_command("d1", "echo hi", False, owner="owner-1")
-    assert result1 == {"ok": True}
+    assert result1["ok"] is True and result1["run_id"]
     assert entered.wait(2), "worker thread never started"
 
     # busy was reserved under the lock before the worker thread was even
@@ -250,7 +249,7 @@ def test_cancel_before_channel_is_wired_still_takes_effect(monkeypatch):
     sess.cancelled        = False
     sess.cancel_requested = False
 
-    result = mgr.cancel("d1", owner="owner-1")
+    result = mgr.cancel("d1", sess.run_id, owner="owner-1")
     assert result == {"ok": True}
     assert sess.cancel_requested is True
     assert sess.cancelled is True
@@ -357,7 +356,7 @@ def test_owner_snapshot_reports_a_reserved_command_as_running(monkeypatch):
             return None
 
     monkeypatch.setattr(ssh_manager.threading, "Thread", UnstartedThread)
-    assert mgr.run_command("d1", "echo hi", False, owner="owner-1") == {"ok": True}
+    assert mgr.run_command("d1", "echo hi", False, owner="owner-1")["ok"] is True
     assert mgr.owner_ssh_snapshot("owner-1") == (["d1"], ["d1"])
-    assert mgr.cancel("d1", owner="owner-1") == {"ok": True}
+    assert mgr.cancel("d1", sess.run_id, owner="owner-1") == {"ok": True}
     assert sess.cancel_requested is True

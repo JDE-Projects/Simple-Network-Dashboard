@@ -20,6 +20,9 @@ REQUIRED_FILES = [
     "main.py",
     "config.py",
     "ws_manager.py",
+    "delivery_queue.py",
+    "terminal_run.py",
+    "terminal_history.py",
     "update_check.py",
     "runtime_state.py",
     "debug_log.py",
@@ -39,6 +42,11 @@ REQUIRED_FILES = [
     "static/index.html",
     "static/favicon.svg",
     "static/fonts/OFL.txt",
+    "static/vendor/xterm/xterm.js",
+    "static/vendor/xterm/xterm.css",
+    "static/vendor/xterm/addon-fit.js",
+    "static/vendor/xterm/LICENSE-xterm.txt",
+    "static/vendor/xterm/LICENSE-addon-fit.txt",
 ]
 
 FORBIDDEN_FILES = [

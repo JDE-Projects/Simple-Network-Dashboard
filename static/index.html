@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Simple Network Dashboard</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1" />
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
 <style>
   @font-face {
     font-family: "Sora";
@@ -336,6 +337,15 @@
   .ln.muted .msg{ color: var(--text-faint); }
   .ln.out  .msg { color: var(--text-dim); }
   .console-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px; }
+  .live-terminal { margin: 4px 0 10px 73px; max-width: calc(100% - 73px); }
+  .terminal-strip { min-height: 24px; padding: 4px 8px; color: var(--text-faint); font-size: 10px; line-height: 16px; border: 1px solid var(--border); border-bottom: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+  .terminal-frame { overflow: hidden; border: 1px solid var(--border); border-radius: 0 0 var(--radius-sm) var(--radius-sm); background: var(--bg); }
+  .live-terminal.terminal-focused .terminal-frame { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .live-terminal.terminal-ended .terminal-frame { border-radius: var(--radius-sm); }
+  .live-terminal .xterm { height: 100%; padding: 2px 0; }
+  .live-terminal .xterm-viewport { overflow-y: hidden !important; }
+  .live-terminal.terminal-scrollback .xterm-viewport { overflow-y: scroll !important; }
+  .live-terminal.terminal-fullscreen .xterm-viewport { overflow-y: hidden !important; }
 
   /* ---- library panel ---- */
   .library  { grid-area: lib; }
@@ -697,14 +707,18 @@
   </div>
 </div>
 
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/addon-fit.js"></script>
 <script>
 /* ============================================================
    Theme
    ============================================================ */
 let currentTheme = "dark";
+const LIVE_TERMINALS = new Map(); // device_id -> the one current, view-only terminal box
 function applyTheme(theme){
   currentTheme = (theme === "light") ? "light" : "dark";
   document.body.classList.toggle("light", currentTheme === "light");
+  LIVE_TERMINALS.forEach(updateTerminalTheme);
 }
 function toggleTheme(){
   const next = currentTheme === "light" ? "dark" : "light";
@@ -720,6 +734,11 @@ let DEVICES   = [];
 let METRICS   = {};          // device_id -> metrics dict (no _raw fields)
 let SSH_STATE = {};          // device_id -> 'connected'|'running'|'idle'
 let SSH_LOCKS = {};          // device_id -> true (locked by any browser)
+const TERMINAL_RUN_IDS = {}; // device_id -> current terminal run_id
+const ENDED_RUN_IDS = new Set(); // ended run_ids, so a late run reply cannot restore one
+const LOCAL_COMMAND_IDS = new Set(); // cmd_ids this page sent, so its own term_start is recognized
+const PENDING_CUSTOM_SAVES_BY_CMD_ID = new Map();
+const PENDING_CUSTOM_SAVES_BY_RUN_ID = new Map();
 let CONFIG_READ_ONLY = false;
 let RECOVERY_NOTICE_SHOWN = false;
 let currentDeviceId = null;
@@ -801,6 +820,10 @@ function connectWS() {
         SSH_STATE = {};
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
         (msg.ssh_running || []).forEach(id => { SSH_STATE[id] = 'running'; });
+        Object.keys(TERMINAL_RUN_IDS).forEach(id => { delete TERMINAL_RUN_IDS[id]; });
+        (msg.ssh_terminals || []).forEach(terminal => {
+          if (terminal.device_id && terminal.run_id) TERMINAL_RUN_IDS[terminal.device_id] = terminal.run_id;
+        });
         // Track which devices are locked (in use by any browser)
         SSH_LOCKS = {};
         (msg.ssh_locked || []).forEach(id => { SSH_LOCKS[id] = true; });
@@ -809,16 +832,35 @@ function connectWS() {
         renderStats();
         renderLibrary();
         reconcileTabs();
+        rebuildLiveTerminals(msg.ssh_terminals || []);
         break;
       case 'metrics':
         METRICS[msg.device_id] = msg.data;
         if (msg.device_id === currentDeviceId) renderStats();
         break;
       case 'ssh_log':
-        addLine(msg.device_id, msg.text, msg.level, msg.cmd_id);
+        queueOrAddLine(msg.device_id, msg.text, msg.level, msg.cmd_id);
         break;
       case 'ssh_status':
         handleSSHStatus(msg.device_id, msg.state);
+        break;
+      case 'term_start':
+        rememberRunId(msg.device_id, msg.run_id);
+        bindPendingCustomSave(msg.cmd_id, msg.run_id);
+        startLiveTerminal(msg);
+        break;
+      case 'term_data':
+        writeTerminalData(msg);
+        break;
+      case 'term_end':
+        forgetRunId(msg.device_id, msg.run_id);
+        foldLiveTerminal(msg.device_id, msg.run_id);
+        break;
+      case 'term_control':
+        updateTerminalControl(msg);
+        break;
+      case 'term_input_full':
+        showTerminalInputFull(msg);
         break;
       case 'ssh_lock':
         if (msg.locked) SSH_LOCKS[msg.device_id] = true;
@@ -1142,15 +1184,19 @@ function renderCustomCmd(msgEl, entry) {
   msgEl.appendChild(toggle);
 }
 
-function addLine(id, text, level, cmdId) {
-  ensureTab(id);
-  const con = consoleFor(id);
+function consoleTime() {
+  return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+function buildConsoleLine(text, level, cmdId, time = consoleTime()) {
   const ln  = document.createElement('div');
   ln.className = 'ln ' + (level || 'out');
-  const t  = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  ln.innerHTML = '<span class="tag"></span><span class="msg"></span>';
-  ln.querySelector('.tag').textContent = t;
-  const msgEl = ln.querySelector('.msg');
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.textContent = time;
+  const msgEl = document.createElement('span');
+  msgEl.className = 'msg';
+  ln.append(tag, msgEl);
   if (level === 'cmd' && cmdId != null) {
     ln.classList.add('custom-cmd');
     const entry = customCmdById.has(cmdId) ? customCmdById.get(cmdId) : null;
@@ -1160,9 +1206,476 @@ function addLine(id, text, level, cmdId) {
   } else {
     msgEl.textContent = text;
   }
-  con.appendChild(ln);
-  while (con.children.length > MAX_LINES) con.removeChild(con.firstChild);
+  return ln;
+}
+
+function insertConsoleRows(id, rows, before = null) {
+  ensureTab(id);
+  const con = consoleFor(id);
+  const batch = document.createDocumentFragment();
+  rows.forEach(row => batch.appendChild(buildConsoleLine(row.text, row.level, row.cmdId, row.time)));
+  con.insertBefore(batch, before);
+  const lines = con.querySelectorAll('.ln');
+  const excess = Math.max(0, lines.length - MAX_LINES);
+  for (let index = 0; index < excess; index++) lines[index].remove();
   if (id === activeTabId) con.scrollTop = con.scrollHeight;
+}
+
+function addLine(id, text, level, cmdId) {
+  insertConsoleRows(id, [{text, level, cmdId, time: consoleTime()}]);
+}
+
+function queueOrAddLine(id, text, level, cmdId) {
+  const live = LIVE_TERMINALS.get(id);
+  if (!live) {
+    addLine(id, text, level, cmdId);
+    return;
+  }
+  live.appMessages.push({text, level, cmdId, time: consoleTime()});
+  if (live.appMessages.length > 200) {
+    live.appMessages.shift();
+    live.appMessagesDropped = true;
+  }
+}
+
+function terminalTheme() {
+  const style = getComputedStyle(document.body);
+  return {
+    background: style.getPropertyValue('--bg').trim(), foreground: style.getPropertyValue('--text').trim(),
+    cursor: style.getPropertyValue('--accent').trim(), selectionBackground: style.getPropertyValue('--border').trim(),
+    black: style.getPropertyValue('--bg-2').trim(), brightBlack: style.getPropertyValue('--text-faint').trim(),
+    red: style.getPropertyValue('--red').trim(), brightRed: style.getPropertyValue('--red').trim(),
+    green: style.getPropertyValue('--green').trim(), brightGreen: style.getPropertyValue('--green').trim(),
+    yellow: style.getPropertyValue('--amber').trim(), brightYellow: style.getPropertyValue('--amber').trim(),
+    blue: style.getPropertyValue('--blue').trim(), brightBlue: style.getPropertyValue('--blue').trim(),
+    cyan: style.getPropertyValue('--accent').trim(), brightCyan: style.getPropertyValue('--accent-2').trim(),
+    white: style.getPropertyValue('--text').trim(), brightWhite: style.getPropertyValue('--text').trim(),
+  };
+}
+
+function updateTerminalTheme(live) {
+  live.terminal.options.theme = terminalTheme();
+}
+
+async function terminalRunSize(id) {
+  const con = consoleFor(id);
+  if (!con.offsetParent || con.clientWidth === 0 || con.clientHeight === 0) return {cols: 120, rows: 30};
+  const probe = document.createElement('span');
+  probe.textContent = 'W';
+  probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;font-family:JetBrains Mono, monospace;font-size:12px;line-height:normal;white-space:pre;';
+  con.appendChild(probe);
+  try {
+    await document.fonts.ready;
+    const cell = probe.getBoundingClientRect();
+    if (!cell.width || !cell.height) return {cols: 120, rows: 30};
+    return {
+      cols: Math.min(500, Math.max(20, Math.floor((con.clientWidth - 111) / cell.width))),
+      rows: Math.min(200, Math.max(5, Math.floor((con.clientHeight - 52) / cell.height))),
+    };
+  } catch (error) {
+    return {cols: 120, rows: 30};
+  } finally {
+    probe.remove();
+  }
+}
+
+function terminalCellHeight(live) {
+  const row = live.frame.querySelector('.xterm-rows > div');
+  const height = row ? row.getBoundingClientRect().height : 0;
+  return height || live.terminal._core?._renderService?.dimensions?.css?.cell?.height || 15;
+}
+
+function terminalContentRows(live) {
+  const buffer = live.terminal.buffer.active;
+  return Math.min(live.rows, Math.max(1, buffer.baseY + buffer.cursorY + 1));
+}
+
+function scrollTerminalIntoView(live) {
+  if (live.deviceId !== activeTabId) return;
+  const con = consoleFor(live.deviceId);
+  con.scrollTop = Math.max(0, live.box.offsetTop + live.box.offsetHeight - con.clientHeight + 12);
+}
+
+function refreshLiveTerminal(live) {
+  const con = consoleFor(live.deviceId);
+  const cellHeight = terminalCellHeight(live);
+  const availableRows = Math.max(1, Math.floor((con.clientHeight - 52) / cellHeight));
+  const contentRows = live.fullScreen ? live.rows : terminalContentRows(live);
+  const visibleRows = Math.min(live.rows, availableRows, contentRows);
+  live.frame.style.height = `${Math.max(1, Math.floor(visibleRows * cellHeight) + 4)}px`;
+  // A terminal taller than the console (window shrunk after it started) shows
+  // its bottom rows, where the cursor and newest output are.
+  live.frame.scrollTop = Math.max(0, Math.floor((contentRows - visibleRows) * cellHeight));
+  const scrolled = !live.fullScreen && live.terminal.buffer.active.baseY > 0;
+  live.box.classList.toggle('terminal-scrollback', scrolled);
+  live.box.classList.toggle('terminal-fullscreen', live.fullScreen);
+  scrollTerminalIntoView(live);
+}
+
+function terminalHasFocus(live) {
+  return document.activeElement === live.terminal.textarea;
+}
+
+const TERMINAL_PAGER_PROMPTS = [
+  /^:$/,
+  /^(\S.* )?\(END\)( - Next: \S.*)?( \(column \d+\))?$/,
+  /^(\S.* )?lines \d+-\d+(\/\d+)?( byte \d+(\/\d+)?)?( \d+%)?( \(END\))?( - Next: \S.*)?( \(column \d+\))?( \(press RETURN\))?$/,
+  /^--More--( ?\(\d+%\))?$/,
+  /^Manual page .* line \d+.*\(press h for help or q to quit\)$/,
+];
+
+function terminalPagerPrompt(live) {
+  const buffer = live.terminal.buffer.active;
+  const line = buffer.getLine(buffer.baseY + buffer.cursorY);
+  if (!line) return false;
+  const text = line.translateToString(true).trim();
+  return TERMINAL_PAGER_PROMPTS.some(pattern => pattern.test(text));
+}
+
+function updateTerminalStrip(live) {
+  if (!live.live || live.inputFull) return;
+  if (live.redrawWaiting) {
+    live.strip.textContent = 'Waiting for the program to redraw. Press a key in the window if it stays blank.';
+  } else if (live.yours === false) {
+    live.strip.textContent = 'Typing is in another tab. Click here to type.';
+  } else if (live.pagerWaiting) {
+    live.strip.textContent = live.yours && terminalHasFocus(live)
+      ? 'Paged view? q closes it · Ctrl+C stops the command'
+      : 'Paged view? Click here, then q closes it';
+  } else if (live.yours && terminalHasFocus(live)) {
+    live.strip.textContent = 'Running. Your typing goes to this command.';
+  } else {
+    live.strip.textContent = 'Running. Click in this window to type.';
+  }
+}
+
+function sendTerminalMessage(message) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(message));
+  return true;
+}
+
+function acknowledgeTerminalWrite(live, seq, immediate = false) {
+  if (!live.live || !Number.isInteger(seq)) return;
+  live.ackSeq = Math.max(live.ackSeq, seq);
+  const send = () => {
+    live.ackTimer = null;
+    if (!live.live || live.ackSeq <= live.ackSentSeq) return;
+    if (sendTerminalMessage({type: 'term_ack', device_id: live.deviceId, run_id: live.runId, seq: live.ackSeq})) {
+      live.ackSentSeq = live.ackSeq;
+      live.ackAt = performance.now();
+    }
+  };
+  if (immediate || performance.now() - live.ackAt >= 50) send();
+  else if (!live.ackTimer) live.ackTimer = setTimeout(send, Math.max(1, 50 - (performance.now() - live.ackAt)));
+}
+
+function claimTerminalControl(live) {
+  if (!live.live || live.yours || live.claimPending) return;
+  if (sendTerminalMessage({type: 'term_claim', device_id: live.deviceId, run_id: live.runId})) {
+    live.claimPending = true;
+  }
+}
+
+function scheduleTerminalResize(live) {
+  if (!live.live || !live.yours) return;
+  clearTimeout(live.resizeTimer);
+  live.resizeTimer = setTimeout(() => resizeLiveTerminal(live), 150);
+}
+
+async function resizeLiveTerminal(live) {
+  if (!live.live || !live.yours) return;
+  const con = consoleFor(live.deviceId);
+  if (!con.offsetParent || con.clientWidth === 0 || con.clientHeight === 0) return;
+  const size = await terminalRunSize(live.deviceId);
+  if (!live.live || !live.yours || LIVE_TERMINALS.get(live.deviceId) !== live) return;
+  if (size.cols === live.terminal.cols && size.rows === live.terminal.rows) return;
+  live.terminal.resize(size.cols, size.rows);
+  live.rows = size.rows;
+  live.pagerWaiting = terminalPagerPrompt(live);
+  updateTerminalStrip(live);
+  refreshLiveTerminal(live);
+  sendTerminalMessage({type: 'term_resize', device_id: live.deviceId, run_id: live.runId, rev: live.rev, ...size});
+}
+
+function sendTerminalInput(live, data) {
+  if (!live.live || !live.yours) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const text = String(data);
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(start + 16384, text.length);
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) end--;
+    sendTerminalMessage({type: 'term_input', device_id: live.deviceId, run_id: live.runId, rev: live.rev, data: text.slice(start, end)});
+    start = end;
+  }
+}
+
+function updateTerminalControl(msg) {
+  const live = LIVE_TERMINALS.get(msg.device_id);
+  if (!live || !live.live || live.runId !== msg.run_id) return;
+  live.yours = !!msg.yours;
+  live.rev = msg.rev;
+  live.claimPending = false;
+  live.box.dataset.yours = String(live.yours);
+  live.box.dataset.rev = String(live.rev);
+  updateTerminalStrip(live);
+  if (live.yours) scheduleTerminalResize(live);
+}
+
+function showTerminalInputFull(msg) {
+  const live = LIVE_TERMINALS.get(msg.device_id);
+  if (!live || !live.live || live.runId !== msg.run_id) return;
+  clearTimeout(live.inputFullTimer);
+  live.inputFull = true;
+  live.strip.textContent = 'Typing is arriving faster than the device accepts it.';
+  live.inputFullTimer = setTimeout(() => {
+    live.inputFull = false;
+    updateTerminalStrip(live);
+  }, 4000);
+}
+
+function startLiveTerminal(msg, options = {}) {
+  if (!msg.device_id || !msg.run_id) return;
+  if (!options.skipFold) foldLiveTerminal(msg.device_id);
+  ensureTab(msg.device_id);
+  const con = consoleFor(msg.device_id);
+  const box = document.createElement('div');
+  box.className = 'live-terminal';
+  box.dataset.runId = msg.run_id;
+  const strip = document.createElement('div');
+  strip.className = 'terminal-strip';
+  const frame = document.createElement('div');
+  frame.className = 'terminal-frame';
+  box.append(strip, frame);
+  con.appendChild(box);
+  const cols = msg.cols || 120;
+  const rows = msg.rows || 30;
+  const terminal = new Terminal({cols, rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
+  terminal.open(frame);
+  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, pagerWaiting: false, ackSeq: -1, ackSentSeq: -1, ackAt: -Infinity, ackTimer: null, lineTimes: [], normalLineFeeds: 0, fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
+  LIVE_TERMINALS.set(msg.device_id, live);
+  terminal.onLineFeed(() => {
+    if (live.live && terminal.buffer.active.type === 'normal') {
+      live.normalLineFeeds++;
+      live.lineTimes.push({marker: terminal.registerMarker(-1), time: consoleTime()});
+      // The console keeps at most MAX_LINES rows, so older times are never
+      // shown; each live marker also slows every write once scrollback is full.
+      if (live.lineTimes.length > MAX_LINES) live.lineTimes.shift().marker.dispose();
+    }
+  });
+  terminal.buffer.onBufferChange(buffer => {
+    const wasFullScreen = live.fullScreen;
+    live.fullScreen = buffer.type === 'alternate';
+    if (live.live && wasFullScreen && buffer.type === 'normal') {
+      live.fullScreenClosures.push({marker: terminal.registerMarker(), lineFeeds: live.normalLineFeeds, time: consoleTime()});
+    } else if (live.live && !wasFullScreen && buffer.type === 'alternate') {
+      // A program answering a resize (nano does) leaves and re-enters the
+      // full-screen view; with no new line in between, nothing was closed.
+      const closure = live.fullScreenClosures[live.fullScreenClosures.length - 1];
+      if (closure && closure.lineFeeds === live.normalLineFeeds) {
+        live.fullScreenClosures.pop();
+        closure.marker.dispose();
+      }
+    }
+  });
+  const paintFocus = focused => {
+    box.classList.toggle('terminal-focused', focused);
+    updateTerminalStrip(live);
+  };
+  terminal.textarea.addEventListener('focus', () => {
+    if (!live.live) return;
+    paintFocus(true);
+    claimTerminalControl(live);
+  });
+  terminal.textarea.addEventListener('blur', () => {
+    if (!live.live) return;
+    live.claimPending = false;
+    paintFocus(false);
+  });
+  box.addEventListener('click', () => {
+    if (!live.live) return;
+    terminal.focus();
+    claimTerminalControl(live);
+  });
+  terminal.onData(data => sendTerminalInput(live, data));
+  // Returning false leaves the key to the browser: Ctrl+C with a selection
+  // becomes its copy and Ctrl+V its paste, which the terminal receives once
+  // through its own paste handling. The handler runs for keydown, keypress and
+  // keyup, so the decision must be the same for each.
+  terminal.attachCustomKeyEventHandler(event => {
+    if (event.metaKey || !event.ctrlKey || event.altKey || event.shiftKey) return true;
+    const key = event.key.toLowerCase();
+    if (key === 'c' && terminal.hasSelection()) {
+      if (event.type === 'keydown') navigator.clipboard.writeText(terminal.getSelection()).catch(() => {});
+      return false;
+    }
+    if (key === 'v') return false;
+    return true;
+  });
+  const startedHere = LOCAL_COMMAND_IDS.delete(msg.cmd_id);
+  if (startedHere) {
+    terminal.focus();
+    claimTerminalControl(live);
+  }
+  paintFocus(terminalHasFocus(live));
+  refreshLiveTerminal(live);
+  return live;
+}
+
+function writeTerminalData(msg) {
+  const live = LIVE_TERMINALS.get(msg.device_id);
+  if (!live || !live.live || live.runId !== msg.run_id || typeof msg.seq !== 'number' || msg.seq <= live.lastSeq) return;
+  clearTimeout(live.redrawTimer);
+  live.redrawWaiting = false;
+  updateTerminalStrip(live);
+  live.lastSeq = msg.seq;
+  // A hidden page's timers are throttled, so drawing (and an ack after it)
+  // could slow the command to a crawl; acknowledge on receipt instead.
+  if (document.hidden) acknowledgeTerminalWrite(live, msg.seq);
+  live.terminal.write(String(msg.data || ''), () => {
+    if (!live.live) return;
+    acknowledgeTerminalWrite(live, msg.seq);
+    // The terminal's own parser knows when a full-screen view is open, even
+    // when its switch sequence was split across two batches.
+    live.fullScreen = live.terminal.buffer.active.type === 'alternate';
+    live.pagerWaiting = terminalPagerPrompt(live);
+    updateTerminalStrip(live);
+    refreshLiveTerminal(live);
+  });
+}
+
+function terminalFoldRows(live, foldTime, includeOpenFullScreenClosure = true) {
+  const buffer = live.terminal.buffer.normal;
+  const first = Math.max(0, buffer.length - 5000);
+  const timeByLine = new Map(live.lineTimes.filter(entry => !entry.marker.isDisposed).map(entry => [entry.marker.line, entry.time]));
+  const output = [];
+  let text = '';
+  let start = first;
+  for (let index = first; index < buffer.length; index++) {
+    const line = buffer.getLine(index);
+    if (!line) continue;
+    if (!line.isWrapped) {
+      if (text) output.push({start, end: index - 1, text: text.trimEnd(), time: timeByLine.get(index - 1) || foldTime});
+      text = '';
+      start = index;
+    }
+    const next = buffer.getLine(index + 1);
+    text += line.translateToString(!(next && next.isWrapped));
+    if (!next || !next.isWrapped) {
+      output.push({start, end: index, text: text.trimEnd(), time: timeByLine.get(index) || foldTime});
+      text = '';
+    }
+  }
+  while (output.length && output[output.length - 1].text === '') output.pop();
+  const rows = output.map(row => ({...row, level: 'out'}));
+  for (const closure of live.fullScreenClosures) {
+    if (closure.marker.isDisposed) continue;
+    const position = rows.findIndex(row => row.start >= closure.marker.line);
+    rows.splice(position < 0 ? rows.length : position, 0, {text: '(full-screen view closed)', level: 'muted', time: closure.time});
+  }
+  if (includeOpenFullScreenClosure && live.fullScreen) rows.push({text: '(full-screen view closed)', level: 'muted', time: foldTime});
+  return rows;
+}
+
+function disposeLiveTerminal(live) {
+  clearTimeout(live.resizeTimer);
+  clearTimeout(live.inputFullTimer);
+  clearTimeout(live.redrawTimer);
+  clearTimeout(live.ackTimer);
+  live.terminal.dispose();
+  live.box.remove();
+  if (LIVE_TERMINALS.get(live.deviceId) === live) LIVE_TERMINALS.delete(live.deviceId);
+}
+
+function foldLiveTerminal(deviceId, runId) {
+  const live = LIVE_TERMINALS.get(deviceId);
+  if (!live || (runId && live.runId !== runId) || live.folding) return;
+  live.live = false;
+  live.folding = true;
+  clearTimeout(live.resizeTimer);
+  clearTimeout(live.inputFullTimer);
+  clearTimeout(live.redrawTimer);
+  live.terminal.write('', () => {
+    const con = document.querySelector(`[data-console="${live.deviceId}"]`);
+    if (!con || !live.box.parentNode || live.box.parentNode !== con) {
+      disposeLiveTerminal(live);
+      return;
+    }
+    const rows = terminalFoldRows(live, consoleTime());
+    if (live.appMessagesDropped) rows.push({text: 'Some app messages during this command were not kept.', level: 'warn', time: consoleTime()});
+    rows.push(...live.appMessages);
+    insertConsoleRows(live.deviceId, rows, live.box);
+    disposeLiveTerminal(live);
+    offerPendingCustomSave(live.deviceId, live.runId);
+  });
+}
+
+function resetRecoveredTerminalControl(live) {
+  live.yours = undefined;
+  live.rev = undefined;
+  live.claimPending = false;
+  delete live.box.dataset.yours;
+  delete live.box.dataset.rev;
+  updateTerminalStrip(live);
+  if (terminalHasFocus(live)) claimTerminalControl(live);
+}
+
+function restoreLiveTerminal(entry, includeHeader, carried = null) {
+  const rows = [];
+  if (includeHeader) rows.push({text: '$ Command', level: 'cmd', time: ''});
+  (entry.lines || []).forEach(text => rows.push({text: String(text), level: 'out', time: ''}));
+  if (rows.length) insertConsoleRows(entry.device_id, rows);
+  const live = startLiveTerminal({
+    device_id: entry.device_id,
+    run_id: entry.run_id,
+    cols: entry.cols || 120,
+    rows: entry.rows || 30,
+  }, {skipFold: true});
+  if (!live) return;
+  if (carried) {
+    live.appMessages = carried.appMessages;
+    live.appMessagesDropped = carried.appMessagesDropped;
+  }
+  live.lastSeq = typeof entry.seq === 'number' ? entry.seq : -1;
+  acknowledgeTerminalWrite(live, live.lastSeq, true);
+  // Recovery writes are snapshots, not newly received output, so they never get line times.
+  live.terminal.write(String(entry.partial || ''), () => {
+    if (!live.live) return;
+    live.pagerWaiting = terminalPagerPrompt(live);
+    updateTerminalStrip(live);
+  });
+  if (entry.fullscreen) {
+    live.fullScreen = true;
+    live.terminal.write('\x1b[?1049h', () => refreshLiveTerminal(live));
+    live.redrawTimer = setTimeout(() => {
+      if (!live.live) return;
+      live.redrawWaiting = true;
+      updateTerminalStrip(live);
+    }, 2000);
+  }
+  refreshLiveTerminal(live);
+}
+
+function rebuildLiveTerminals(entries) {
+  const snapshots = new Map(entries.filter(entry => entry.device_id && entry.run_id).map(entry => [entry.device_id, entry]));
+  [...LIVE_TERMINALS.entries()].forEach(([deviceId, live]) => {
+    const entry = snapshots.get(deviceId);
+    if (!entry) foldLiveTerminal(deviceId);
+    else if (live.runId === entry.run_id && live.lastSeq >= (typeof entry.seq === 'number' ? entry.seq : -1)) {
+      resetRecoveredTerminalControl(live);
+      snapshots.delete(deviceId);
+    } else if (live.runId !== entry.run_id) {
+      foldLiveTerminal(deviceId);
+      restoreLiveTerminal(entry, true);
+      snapshots.delete(deviceId);
+    } else {
+      const carried = {appMessages: live.appMessages, appMessagesDropped: live.appMessagesDropped};
+      disposeLiveTerminal(live);
+      restoreLiveTerminal(entry, false, carried);
+      snapshots.delete(deviceId);
+    }
+  });
+  snapshots.forEach(entry => restoreLiveTerminal(entry, true));
 }
 
 /* Prominent, dismissable red banner for failures the user must not miss
@@ -1250,8 +1763,13 @@ function setTabState(id, state) {
 function ensureTab(id) {
   if (openTabs[id]) return;
   openTabs[id] = true;
-  consoleFor(id);
-  if (!activeTabId) activeTabId = id;
+  const becomesActive = !activeTabId;
+  if (becomesActive) activeTabId = id;
+  const con = consoleFor(id);
+  if (becomesActive) {
+    $('consoleEmpty').style.display = 'none';
+    con.style.display = 'block';
+  }
   renderTabs();
 }
 
@@ -1262,6 +1780,11 @@ function setActiveTab(id) {
     c.style.display = c.dataset.console === id ? 'block' : 'none';
   });
   consoleFor(id).scrollTop = 999999;
+  const live = LIVE_TERMINALS.get(id);
+  if (live) {
+    refreshLiveTerminal(live);
+    scheduleTerminalResize(live);
+  }
   renderTabs();
   selectDevice(id);
 }
@@ -1298,11 +1821,34 @@ function reconcileTabs() {
   renderTabs();
 }
 
+window.addEventListener('resize', () => LIVE_TERMINALS.forEach(live => {
+  refreshLiveTerminal(live);
+  scheduleTerminalResize(live);
+}));
+
 /* ============================================================
    SSH state changes
    ============================================================ */
+function rememberRunId(deviceId, runId) {
+  if (deviceId && runId && !ENDED_RUN_IDS.has(runId)) TERMINAL_RUN_IDS[deviceId] = runId;
+}
+
+function forgetRunId(deviceId, runId) {
+  if (!runId) return;
+  ENDED_RUN_IDS.add(runId);
+  if (ENDED_RUN_IDS.size > 100) ENDED_RUN_IDS.delete(ENDED_RUN_IDS.values().next().value);
+  if (TERMINAL_RUN_IDS[deviceId] === runId) delete TERMINAL_RUN_IDS[deviceId];
+}
+
 function handleSSHStatus(id, state) {
   SSH_STATE[id] = state;
+  if (state !== 'running') {
+    forgetRunId(id, TERMINAL_RUN_IDS[id]);
+    if (state === 'idle') {
+      discardPendingCustomSaves(id);
+      foldLiveTerminal(id);
+    }
+  }
   setTabState(id, state === 'idle' ? 'disconnected' : state);
   updateDisconnectAllBtn();
 
@@ -1496,7 +2042,15 @@ function wireCard(card, d) {
   connectBtn.onclick = e => { e.stopPropagation(); tryConnect(); };
   pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') connectBtn.click(); });
 
-  card.querySelector('[data-cancel]').onclick     = e => { e.stopPropagation(); sshPost('/api/ssh/cancel', {device_id: id}); };
+  card.querySelector('[data-cancel]').onclick     = e => {
+    e.stopPropagation();
+    const runId = TERMINAL_RUN_IDS[id];
+    if (!runId) {
+      addLine(id, 'Could not stop: this page does not know which command is running. Refresh the page and try again.', 'err');
+      return;
+    }
+    sshPost('/api/ssh/cancel', {device_id: id, run_id: runId});
+  };
   card.querySelector('[data-disconnect]').onclick = e => {
     e.stopPropagation();
     askConfirm('Disconnect', `Disconnect from ${d.name}?`, async () => {
@@ -1533,15 +2087,22 @@ function wireCard(card, d) {
     // can never be attached to a later, unrelated line.
     const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
     customCmdById.set(cmdId, {command: cmd, placeholder: 'Custom Command'});
-    const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId});
+    LOCAL_COMMAND_IDS.add(cmdId);
+    const pendingSave = {deviceId: id, command: cmd, sudo, cmdId, runId: null, finished: false};
+    PENDING_CUSTOM_SAVES_BY_CMD_ID.set(cmdId, pendingSave);
+    const size = await terminalRunSize(id);
+    const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId, ...size});
     if (r && r.ok) {
+      rememberRunId(id, r.run_id);
+      bindPendingCustomSave(cmdId, r.run_id);
       // stored above; its echoed line will consume the tag
     } else {
-      customCmdById.delete(cmdId);
+      customCmdById.delete(cmdId); LOCAL_COMMAND_IDS.delete(cmdId);
+      finishPendingCustomSave(pendingSave);
       if (r && r.error) addLine(id, r.error, 'err');
       input.value = cmd; // restore the typed command so it can be corrected and retried
+      maybeOfferSave(id, cmd, sudo);
     }
-    maybeOfferSave(id, cmd, sudo);
   };
   card.querySelector('[data-run]').onclick = runCustom;
   card.querySelector('[data-custom]').addEventListener('keydown', e => { if (e.key === 'Enter') runCustom(e); });
@@ -1627,9 +2188,12 @@ function runLibCmd(deviceId, index) {
     ensureTab(deviceId); setActiveTab(deviceId);
     const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
     customCmdById.set(cmdId, {command: c.command, placeholder: 'Library Command'});
-    const r = await sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name, cmd_id: cmdId});
+    LOCAL_COMMAND_IDS.add(cmdId);
+    const size = await terminalRunSize(deviceId);
+    const r = await sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name, cmd_id: cmdId, ...size});
+    if (r && r.ok) rememberRunId(deviceId, r.run_id);
     if (!(r && r.ok)) {
-      customCmdById.delete(cmdId);
+      customCmdById.delete(cmdId); LOCAL_COMMAND_IDS.delete(cmdId);
       if (r && r.error) addLine(deviceId, r.error, 'err');
     }
   };
@@ -1711,6 +2275,29 @@ $('addCmdBtn').onclick = () => { if (currentDeviceId) openCmdEditor(currentDevic
 /* ============================================================
    Save-to-library prompt
    ============================================================ */
+function bindPendingCustomSave(cmdId, runId) {
+  const pending = PENDING_CUSTOM_SAVES_BY_CMD_ID.get(cmdId);
+  if (!pending || pending.finished || !runId) return;
+  pending.runId = runId;
+  PENDING_CUSTOM_SAVES_BY_RUN_ID.set(runId, pending);
+}
+function finishPendingCustomSave(pending) {
+  if (!pending || pending.finished) return;
+  pending.finished = true;
+  PENDING_CUSTOM_SAVES_BY_CMD_ID.delete(pending.cmdId);
+  if (pending.runId) PENDING_CUSTOM_SAVES_BY_RUN_ID.delete(pending.runId);
+}
+function offerPendingCustomSave(deviceId, runId) {
+  const pending = PENDING_CUSTOM_SAVES_BY_RUN_ID.get(runId);
+  if (!pending || pending.deviceId !== deviceId) return;
+  finishPendingCustomSave(pending);
+  if (!document.querySelector('.overlay.show')) maybeOfferSave(deviceId, pending.command, pending.sudo);
+}
+function discardPendingCustomSaves(deviceId) {
+  PENDING_CUSTOM_SAVES_BY_CMD_ID.forEach(pending => {
+    if (pending.deviceId === deviceId) finishPendingCustomSave(pending);
+  });
+}
 function maybeOfferSave(deviceId, command, sudo) {
   if (!askSaveCustom || CONFIG_READ_ONLY) return;
   const d = dev(deviceId); if (!d) return;
@@ -1880,17 +2467,29 @@ function doExport(showCustom) {
   const d    = dev(activeTabId);
   const name = d ? d.name : 'Console';
   const con  = document.querySelector(`[data-console="${activeTabId}"]`);
-  const lines = con ? Array.from(con.querySelectorAll('.ln')).map(ln => {
-    const t = ln.querySelector('.tag').textContent;
-    let m;
-    if (ln.classList.contains('custom-cmd')) {
-      const entry = customCmdText.get(ln);
-      m = (showCustom && entry) ? ('$ ' + entry.command) : ('$ ' + (entry ? entry.placeholder : 'Command'));
-    } else {
-      m = ln.querySelector('.msg').textContent;
-    }
-    return `${t}  ${name} · ${m}`;
-  }) : [];
+  const exportTime = consoleTime();
+  const lines = [];
+  if (con) {
+    Array.from(con.children).forEach(child => {
+      if (child.classList.contains('ln')) {
+        const t = child.querySelector('.tag').textContent;
+        let m;
+        if (child.classList.contains('custom-cmd')) {
+          const entry = customCmdText.get(child);
+          m = (showCustom && entry) ? ('$ ' + entry.command) : ('$ ' + (entry ? entry.placeholder : 'Command'));
+        } else {
+          m = child.querySelector('.msg').textContent;
+        }
+        lines.push(`${t}  ${name} · ${m}`);
+        return;
+      }
+      if (!child.classList.contains('live-terminal')) return;
+      const live = LIVE_TERMINALS.get(activeTabId);
+      if (!live || live.box !== child || !live.live) return;
+      terminalFoldRows(live, exportTime, false).forEach(row => lines.push(`${row.time}  ${name} · ${row.text}`));
+      lines.push(`${exportTime}  ${name} · (command still running when exported)`);
+    });
+  }
   if (!lines.length) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
   const blob = new Blob([lines.join('\n') + '\n'], {type: 'text/plain'});
   const url  = URL.createObjectURL(blob);
@@ -1904,7 +2503,7 @@ function doExport(showCustom) {
 $('exportBtn').onclick = () => {
   if (!activeTabId) return;
   const con = document.querySelector(`[data-console="${activeTabId}"]`);
-  if (!con || !con.querySelector('.ln')) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
+  if (!con || (!con.querySelector('.ln') && !con.querySelector('.live-terminal'))) { addLine(activeTabId, 'Nothing to export.', 'muted'); return; }
   const hasCustom = !!con.querySelector('.ln.custom-cmd');
   if (!hasCustom) { doExport(false); return; }
   $('exportPrompt').classList.add('show');

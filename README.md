@@ -12,7 +12,7 @@ If you enjoyed this project and would like to buy me a coffee, check out my [Ko-
 
 ## Highlights
 - Live device stats for CPU, RAM, disk, temperature, and network activity
-- SSH management per device: run saved commands or one-off custom commands with live console output
+- SSH management per device: run saved commands or one-off custom commands in a live terminal you can type into, so prompts, `nano`, `less`, and `top` work
 - Per-device command library with optional sudo and optional confirm prompts
 - SSH passwords are never saved: held in server memory only while connected, wiped immediately on disconnect
 - Local HTTPS out of the box: Caddy terminates the connection and proxies to the dashboard

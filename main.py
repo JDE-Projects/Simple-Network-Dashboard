@@ -74,7 +74,7 @@ from ws_manager import _WSManager
 # The release tooling reads the shipped version from a plain string assignment
 # in the entry script, so APP_VERSION lives here rather than in config. Modules
 # that need it (update_check) receive it by argument to avoid importing main.
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.8.0"
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +131,20 @@ async def _broadcast(msg: dict):
         if t == "ssh_status":
             debug_log._debug_write(f"SSH [{did}] → {msg.get('state', '')}")
     owner = msg.pop("_owner", None)
+    still_current = msg.pop("_still_current", None)
     if owner:
-        await ws_mgr.send_to_owner(owner, msg)
+        if still_current is None:
+            await ws_mgr.send_to_owner(owner, msg)
+        else:
+            await ws_mgr.send_to_owner(owner, msg, still_current=still_current)
     else:
-        await ws_mgr.broadcast(msg)
+        if still_current is None:
+            await ws_mgr.broadcast(msg)
+        else:
+            await ws_mgr.broadcast(msg, still_current=still_current)
 
 
-ssh_mgr = SSHManager(_broadcast, debug_log._debug_write)
+ssh_mgr = SSHManager(_broadcast, debug_log._debug_write, lambda owner: ws_mgr.owner_count(owner) > 0)
 
 
 # Shared error message for endpoints that fail to persist a device change
@@ -266,6 +273,7 @@ async def lifespan(app: FastAPI):
     yield
     metrics_task.cancel()
     idle_task.cancel()
+    ssh_mgr.shutdown_delivery()
     ssh_mgr.disconnect_all()
     debug_log.close_on_shutdown()
 
@@ -619,6 +627,7 @@ async def ws_endpoint(ws: WebSocket):
         return
     owner = _session_owner(ws.cookies[SESSION_COOKIE_NAME])
     await ws_mgr.connect(ws, owner)
+    ssh_mgr.owner_socket_changed(owner)
     session_token = ws.cookies.get(SESSION_COOKIE_NAME)
     # Reconnecting within the grace window keeps the owner's SSH sessions.
     _cancel_pending_release(owner)
@@ -627,10 +636,12 @@ async def ws_endpoint(ws: WebSocket):
         # The manager queues broadcasts for this socket until this init frame
         # has been delivered, preserving the snapshot's ordering.
         own_connected, own_running = ssh_mgr.owner_ssh_snapshot(owner)
+        terminals = ssh_mgr.owner_terminal_snapshot(owner)
         await ws_mgr.send_init(ws, {
             "type": "init", "devices": runtime_state._devices_cache, "version": APP_VERSION,
             "ssh_connected": own_connected,
             "ssh_running": own_running,
+            "ssh_terminals": terminals,
             "ssh_locked": ssh_mgr.locked_device_ids(),
             "debug": debug_log._debug_enabled(),
             "debug_failed": debug_log._debug_failed_notice,
@@ -639,10 +650,13 @@ async def ws_endpoint(ws: WebSocket):
             "recovery_retry_available": runtime_state._recovery_backup_contents is not None,
             "recovered_notice": runtime_state._recovered_notice,
         })
+        for terminal in terminals:
+            if terminal["fullscreen"]:
+                ssh_mgr.request_terminal_redraw(terminal["device_id"], terminal["run_id"], owner)
         # Push cached metrics so the stats panel fills immediately
         for did, m in _metrics_cache.items():
             public = {k: v for k, v in m.items() if not k.startswith("_")}
-            await ws.send_text(json.dumps({"type": "metrics", "device_id": did, "data": public}))
+            await ws_mgr.send_to(ws, {"type": "metrics", "device_id": did, "data": public})
         loop = asyncio.get_running_loop()
         next_check = loop.time() + WS_REVALIDATE_SECONDS
         while True:
@@ -668,10 +682,27 @@ async def ws_endpoint(ws: WebSocket):
                 ws_mgr.set_selected_device(ws, msg.get("id"))
             elif msg.get("type") == "stay_connected":
                 ssh_mgr.stay_connected(owner)
+            elif msg.get("type") == "term_claim":
+                result = ssh_mgr.claim_terminal(msg.get("device_id"), msg.get("run_id"), owner, ws_mgr.socket_id(ws))
+                if result.get("ok"):
+                    for target, socket_id in ws_mgr.owner_sockets(owner):
+                        await ws_mgr.send_to(target, {"type": "term_control", "device_id": msg.get("device_id"),
+                            "run_id": msg.get("run_id"), "yours": socket_id == ws_mgr.socket_id(ws), "rev": result["rev"]})
+            elif msg.get("type") == "term_input":
+                result = ssh_mgr.terminal_input(msg.get("device_id"), msg.get("run_id"), msg.get("rev"),
+                    msg.get("data"), owner, ws_mgr.socket_id(ws))
+                if result.get("full"):
+                    await ws_mgr.send_to(ws, {"type": "term_input_full", "device_id": msg.get("device_id"), "run_id": msg.get("run_id")})
+            elif msg.get("type") == "term_resize":
+                ssh_mgr.terminal_resize(msg.get("device_id"), msg.get("run_id"), msg.get("rev"),
+                    msg.get("cols"), msg.get("rows"), owner, ws_mgr.socket_id(ws))
+            elif msg.get("type") == "term_ack":
+                ssh_mgr.terminal_ack(msg.get("device_id"), msg.get("run_id"), msg.get("seq"), owner)
     except WebSocketDisconnect:
         pass
     finally:
         ws_mgr.drop(ws)
+        ssh_mgr.owner_socket_changed(owner)
         if ws_mgr.owner_count(owner) == 0:
             # Don't release immediately: a page refresh reconnects moments
             # later and should keep its SSH sessions
@@ -844,6 +875,10 @@ class DeviceIdIn(BaseModel):
     device_id: str
 
 
+class CancelIn(DeviceIdIn):
+    run_id: str
+
+
 @app.post("/api/ssh/disconnect")
 async def ssh_disconnect(body: DeviceIdIn, request: Request):
     return ssh_mgr.disconnect(body.device_id, _request_session_owner(request))
@@ -863,19 +898,21 @@ class RunIn(BaseModel):
     use_sudo:  bool = False
     label:     Optional[Annotated[str, Field(max_length=MAX_NAME_LEN)]] = None
     cmd_id:    Optional[str] = None
+    cols:      Optional[int] = None
+    rows:      Optional[int] = None
 
 
 @app.post("/api/ssh/run")
 async def ssh_run(body: RunIn, request: Request):
     return ssh_mgr.run_command(
         body.device_id, body.command, body.use_sudo, body.label,
-        _request_session_owner(request), cmd_id=body.cmd_id,
+        _request_session_owner(request), cmd_id=body.cmd_id, cols=body.cols, rows=body.rows,
     )
 
 
 @app.post("/api/ssh/cancel")
-async def ssh_cancel(body: DeviceIdIn, request: Request):
-    return ssh_mgr.cancel(body.device_id, _request_session_owner(request))
+async def ssh_cancel(body: CancelIn, request: Request):
+    return ssh_mgr.cancel(body.device_id, body.run_id, _request_session_owner(request))
 
 
 class TrustIn(BaseModel):

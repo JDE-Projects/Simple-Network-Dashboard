@@ -255,8 +255,8 @@ def test_ssh_routes_use_the_signed_in_session_owner_and_ignore_legacy_header(tmp
 
     monkeypatch.setattr(main.ssh_mgr, "connect", lambda _id, _password, _device, owner: protect(owner))
     monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda _id, owner: protect(owner))
-    monkeypatch.setattr(main.ssh_mgr, "run_command", lambda _id, _cmd, _sudo, _label, owner, cmd_id: protect(owner))
-    monkeypatch.setattr(main.ssh_mgr, "cancel", lambda _id, owner: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "run_command", lambda _id, _cmd, _sudo, _label, owner, cmd_id, cols, rows: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "cancel", lambda _id, _run_id, owner: protect(owner))
     monkeypatch.setattr(main.ssh_mgr, "trust_host_key", lambda _id, _code, owner: protect(owner))
     monkeypatch.setattr(main.ssh_mgr, "reject_host_key", lambda _id, _code, owner: protect(owner))
 
@@ -265,7 +265,7 @@ def test_ssh_routes_use_the_signed_in_session_owner_and_ignore_legacy_header(tmp
         second.post("/api/ssh/connect", json={"device_id": "device-1", "password": "pw"}, headers=legacy_headers),
         second.post("/api/ssh/disconnect", json={"device_id": "device-1"}, headers=legacy_headers),
         second.post("/api/ssh/run", json={"device_id": "device-1", "command": "id"}, headers=legacy_headers),
-        second.post("/api/ssh/cancel", json={"device_id": "device-1"}, headers=legacy_headers),
+        second.post("/api/ssh/cancel", json={"device_id": "device-1", "run_id": "run-1"}, headers=legacy_headers),
         second.post("/api/ssh/trust_key", json={"device_id": "device-1", "code": "code"}, headers=legacy_headers),
         second.post("/api/ssh/reject_key", json={"device_id": "device-1", "code": "code"}, headers=legacy_headers),
     ]

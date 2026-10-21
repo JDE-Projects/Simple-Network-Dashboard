@@ -5,18 +5,20 @@ Passwords are held in memory only; never written anywhere.
 
 import asyncio
 import base64
-import codecs
 import hashlib
 import hmac
 import os
-import re
 import secrets
-import shlex
 import tempfile
 import threading
 import time
 
 import paramiko
+
+from delivery_queue import DeliveryQueue
+from terminal_history import TerminalHistory, trim_to_budget
+from terminal_run import OutputBatcher, SudoGate, TerminalWriter, build_command, clamp_size, read_channel
+import config
 
 IDLE_WARN_SECONDS    = 270   # send warning after 4.5 minutes idle
 IDLE_TIMEOUT_SECONDS = 300   # disconnect after 5 minutes idle
@@ -28,27 +30,6 @@ _EXPIRED_ERROR = "This host-key prompt expired or was already used. Reconnect to
 # Shares SND_DATA_DIR with main.py so known_hosts stays with the rest of the data.
 DATA_DIR         = os.environ.get("SND_DATA_DIR", "/var/lib/simple-network-dashboard")
 KNOWN_HOSTS_FILE = os.path.join(DATA_DIR, "known_hosts")
-
-# Strip ANSI escape sequences and dpkg progress spam from command output
-_ANSI_RE = re.compile(
-    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
-    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-    r"|\x1b[ -/]*[0-~]"
-)
-_PROGRESS_RE = re.compile(r"^Progress: \[\s*\d+%\]$")
-_BAR_RE       = re.compile(r"^\[[#.\s]*\]$")
-
-
-def _clean(line: str) -> str:
-    line = _ANSI_RE.sub("", line)
-    if "\r" in line:
-        parts = [p for p in line.split("\r") if p.strip()]
-        line = parts[-1] if parts else ""
-    s = line.strip()
-    if _PROGRESS_RE.match(s) or _BAR_RE.match(s):
-        return ""
-    return line
-
 
 def _fp(key) -> str:
     digest = hashlib.sha256(key.asbytes()).digest()
@@ -149,12 +130,31 @@ class _Session:
         self.client            = None
         self.busy              = False
         self.channel           = None
+        self.run_id            = None
         self.cancelled         = False
         self.cancel_requested  = False
         self.owner             = owner
         self.state             = "connecting"
         self.generation        = 0
         self.last_active       = time.monotonic()
+        self.last_io           = self.last_active
+        self.writer            = None
+        self.controller        = None
+        self.control_rev       = 0
+        self.auth_complete     = False
+        self.cols              = None
+        self.rows              = None
+        self.stop_timer        = None
+        self.forced            = False
+        self.writer_stuck      = False
+        self.history           = None
+        self.label             = None
+        self.sent_seq          = 0
+        self.sent_bytes        = {}
+        self.acked_seq         = 0
+        self.ack_progress_at   = time.monotonic()
+        self.ack_stalled       = False
+        self.term_condition    = threading.Condition()
 
     def connect(self):
         c = paramiko.SSHClient()
@@ -181,10 +181,6 @@ class _Session:
         except Exception:
             pass
 
-    @staticmethod
-    def _sudo_prefix(prompt: str) -> str:
-        return f"sudo -S -p {shlex.quote(prompt)}"
-
     def close(self):
         try:
             if self.client:
@@ -193,6 +189,7 @@ class _Session:
             self.client   = None
             self.channel  = None
             self.password = None   # wipe from memory
+            self.history = None
 
 
 # ---------------------------------------------------------------------------
@@ -200,13 +197,14 @@ class _Session:
 # ---------------------------------------------------------------------------
 
 class SSHManager:
-    def __init__(self, broadcast_fn, debug_write=None):
+    def __init__(self, broadcast_fn, debug_write=None, owner_watching=None):
         """broadcast_fn: async coroutine function that pushes a dict to all WS clients.
         debug_write: optional callable(str) used to log internal exception detail
         that must not reach the browser; defaults to a no-op."""
         self._broadcast   = broadcast_fn
         self._debug_write = debug_write if debug_write is not None else (lambda _text: None)
-        self._loop      = None          # set via set_loop() after uvicorn starts
+        self._owner_watching = owner_watching if owner_watching is not None else (lambda _owner: True)
+        self._delivery  = DeliveryQueue(lambda msg: self._deliver(msg), self._debug_write)
         self.sessions: dict[str, _Session] = {}
         self._pending: dict[str, _PendingHostKey] = {}  # device_id -> pending prompt
         self._owner_activity: dict[str, dict] = {}  # owner -> {"last_active": float, "warned": bool}
@@ -228,7 +226,7 @@ class SSHManager:
         self._gen_counter = 0
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
-        self._loop = loop
+        self._delivery.start(loop)
 
     # ---- locking helpers ---------------------------------------------------
 
@@ -273,8 +271,24 @@ class SSHManager:
     # ---- internal push helpers (safe to call from any thread) -------------
 
     def _push(self, msg: dict):
-        if self._loop and not self._loop.is_closed():
-            asyncio.run_coroutine_threadsafe(self._deliver(msg), self._loop)
+        """Queue a non-terminal message without blocking its caller."""
+        self._delivery.push(msg)
+
+    def _push_terminal(self, msg: dict, should_continue) -> bool:
+        """Queue terminal output, waiting for capacity. Never call this while
+        holding a device lock (see DeliveryQueue.push_terminal)."""
+        return self._delivery.push_terminal(msg, should_continue)
+
+    def shutdown_delivery(self):
+        """Wake terminal producers and stop the event-loop delivery drain."""
+        self._delivery.shutdown()
+
+    def owner_socket_changed(self, owner: str) -> None:
+        """Wake runs that may be waiting for an acknowledgement from this owner."""
+        for sess in list(self.sessions.values()):
+            if sess.owner == owner:
+                with sess.term_condition:
+                    sess.term_condition.notify_all()
 
     async def _deliver(self, msg: dict):
         """Runs on the event loop thread. `_push` only schedules delivery, so
@@ -287,9 +301,14 @@ class SSHManager:
         through unchanged."""
         gen = msg.pop("_gen", None)
         if gen is not None:
-            current = self.sessions.get(msg.get("device_id"))
+            device_id = msg.get("device_id")
+            current = self.sessions.get(device_id)
             if current is None or current.generation != gen:
                 return
+            msg["_still_current"] = lambda: (
+                (current := self.sessions.get(device_id)) is not None
+                and current.generation == gen
+            )
         await self._broadcast(msg)
 
     def _log(self, device_id: str, text: str, level: str = "out", owner: str = None,
@@ -595,10 +614,89 @@ class SSHManager:
             self._owner_activity.clear()
         return {"ok": True}
 
-    def cancel(self, device_id: str, owner: str = None) -> dict:
+    def claim_terminal(self, device_id: str, run_id: str, owner: str, socket_id: str) -> dict:
         with self._device_lock(device_id):
             sess = self.sessions.get(device_id)
-            if not sess or not sess.busy:
+            if not sess or sess.owner != owner or sess.state != "connected" or not sess.busy or sess.run_id != run_id:
+                self._debug_write(f"SSH [{device_id}] terminal input refused")
+                return {"ok": False}
+            sess.controller = socket_id
+            sess.control_rev += 1
+            if sess.writer:
+                sess.writer.clear_input()
+            return {"ok": True, "rev": sess.control_rev}
+
+    def terminal_input(self, device_id, run_id, rev, data, owner, socket_id) -> dict:
+        with self._device_lock(device_id):
+            sess = self.sessions.get(device_id)
+            valid = (isinstance(data, str) and len(data) <= config.TERM_INPUT_MAX_CHARS and sess
+                     and sess.owner == owner and sess.state == "connected" and sess.busy
+                     and sess.run_id == run_id and sess.controller == socket_id
+                     and sess.control_rev == rev and sess.auth_complete and sess.writer is not None)
+            if not valid:
+                self._debug_write(f"SSH [{device_id}] terminal input refused")
+                return {"ok": False}
+            if not sess.writer.input(data):
+                return {"ok": False, "full": True}
+            sess.last_io = time.monotonic()
+            return {"ok": True}
+
+    def terminal_resize(self, device_id, run_id, rev, cols, rows, owner, socket_id) -> dict:
+        with self._device_lock(device_id):
+            sess = self.sessions.get(device_id)
+            valid = (isinstance(cols, int) and not isinstance(cols, bool) and isinstance(rows, int) and not isinstance(rows, bool)
+                     and sess and sess.owner == owner and sess.state == "connected" and sess.busy
+                     and sess.run_id == run_id and sess.controller == socket_id and sess.control_rev == rev
+                     and sess.auth_complete and sess.writer is not None)
+            if not valid:
+                self._debug_write(f"SSH [{device_id}] terminal input refused")
+                return {"ok": False}
+            sess.cols, sess.rows = clamp_size(cols, rows)
+            sess.writer.resize(sess.cols, sess.rows)
+            return {"ok": True}
+
+    def terminal_ack(self, device_id, run_id, seq, owner) -> None:
+        """Record completed browser terminal writes for the current owner run."""
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            return
+        with self._device_lock(device_id):
+            sess = self.sessions.get(device_id)
+            if (sess is None or sess.owner != owner or sess.state != "connected"
+                    or not sess.busy or sess.run_id != run_id):
+                return
+            with sess.term_condition:
+                if seq > sess.sent_seq or seq <= sess.acked_seq:
+                    return
+                sess.acked_seq = seq
+                sess.ack_progress_at = time.monotonic()
+                sess.ack_stalled = False
+                for sent_seq in [item for item in sess.sent_bytes if item <= seq]:
+                    del sess.sent_bytes[sent_seq]
+                sess.term_condition.notify_all()
+
+    def _wait_for_terminal_ack(self, device_id, sess, run_id) -> bool:
+        """Pause SSH reading while the browser has too much unwritten output."""
+        with sess.term_condition:
+            while True:
+                if self.sessions.get(device_id) is not sess or sess.run_id != run_id:
+                    return False
+                if sess.cancelled:
+                    return True
+                if not self._owner_watching(sess.owner) or sess.ack_stalled:
+                    return True
+                if sum(sess.sent_bytes.values()) <= config.TERM_UNACKED_MAX_BYTES:
+                    return True
+                remaining = config.TERM_ACK_STALL_SECONDS - (time.monotonic() - sess.ack_progress_at)
+                if remaining <= 0:
+                    sess.ack_stalled = True
+                    self._debug_write("terminal acknowledgements stalled")
+                    return True
+                sess.term_condition.wait(min(0.25, remaining))
+
+    def cancel(self, device_id: str, run_id: str = None, owner: str = None) -> dict:
+        with self._device_lock(device_id):
+            sess = self.sessions.get(device_id)
+            if not sess or not sess.busy or sess.run_id != run_id:
                 return {"ok": False}
             if owner is not None and sess.owner != owner:
                 return {"ok": False, "not_owner": True,
@@ -608,8 +706,22 @@ class SSHManager:
             # takes effect instead of being silently dropped.
             sess.cancelled = True
             sess.cancel_requested = True
+            with sess.term_condition:
+                sess.term_condition.notify_all()
             channel = sess.channel
-
+            ready = channel is not None and sess.auth_complete and sess.writer is not None
+            if ready and sess.stop_timer is not None:
+                sess.forced = True
+                channel.close()
+                return {"ok": True}
+            if ready:
+                sess.writer.interrupt()
+                timer = threading.Timer(config.TERM_STOP_GRACE_SECONDS, self._force_stop,
+                                        args=(device_id, sess, run_id, channel))
+                timer.daemon = True
+                sess.stop_timer = timer
+                timer.start()
+                return {"ok": True}
         if channel is not None:
             try:
                 channel.close()
@@ -617,10 +729,20 @@ class SSHManager:
                 pass
         return {"ok": True}
 
+    def _force_stop(self, device_id, sess, run_id, channel):
+        with self._device_lock(device_id):
+            if self.sessions.get(device_id) is not sess or sess.run_id != run_id or sess.channel is not channel:
+                return
+            sess.forced = True
+            channel.close()
+
     # ---- command execution ------------------------------------------------
 
     def run_command(self, device_id: str, raw_cmd: str, use_sudo: bool,
-                    label: str = None, owner: str = None, cmd_id: str = None) -> dict:
+                    label: str = None, owner: str = None, cmd_id: str = None,
+                    cols=None, rows=None) -> dict:
+        label = label or "Custom command"
+        cols, rows = clamp_size(cols, rows)
         with self._device_lock(device_id):
             sess = self.sessions.get(device_id)
             if not sess or sess.state != "connected":
@@ -639,31 +761,37 @@ class SSHManager:
             sess.busy = True
             sess.cancelled = False
             sess.cancel_requested = False
+            sess.forced = False
+            sess.writer_stuck = False
+            sess.stop_timer = None
+            sess.run_id = secrets.token_urlsafe(16)
+            sess.controller = None
+            sess.control_rev = 0
+            sess.auth_complete = False
+            sess.last_io = time.monotonic()
+            sess.history = TerminalHistory()
+            sess.label = label
+            with sess.term_condition:
+                sess.sent_seq = sess.acked_seq = 0
+                sess.sent_bytes.clear()
+                sess.ack_progress_at = time.monotonic()
+                sess.ack_stalled = False
+            sess.cols, sess.rows = cols, rows
+            run_id = sess.run_id
 
-        label = label or "Custom command"
-        sudo_prompt = None
-        if use_sudo:
-            sudo_prompt = "__SND_SUDO_" + secrets.token_hex(8) + "__"
-            if raw_cmd.startswith("sudo "):
-                cmd = raw_cmd.replace("sudo ", f"{_Session._sudo_prefix(sudo_prompt)} ", 1)
-            else:
-                inner = raw_cmd.replace("'", "'\\''")
-                cmd = f"{_Session._sudo_prefix(sudo_prompt)} bash -c '{inner}'"
-            feed = True
-        else:
-            cmd  = raw_cmd
-            feed = False
+        cmd, phrase, mark = build_command(raw_cmd, use_sudo)
 
         threading.Thread(
             target=self._exec,
-            args=(sess, cmd, label, feed, cmd_id, sudo_prompt, len(raw_cmd)),
+            args=(sess, cmd, label, use_sudo, cmd_id, phrase, mark, cols, rows, len(raw_cmd), run_id),
             daemon=True,
         ).start()
-        return {"ok": True}
+        return {"ok": True, "run_id": run_id}
 
     def _exec(self, sess: "_Session", cmd: str, label: str, feed_sudo: bool,
-              cmd_id: str = None, sudo_prompt: str = None,
-              raw_command_length: int = 0):
+              cmd_id: str = None, sudo_phrase: str = None, sudo_mark: str = None,
+              cols: int = None, rows: int = None, raw_command_length: int = 0,
+              run_id: str = None):
         device_id = sess.device_id
         # Captured once: this worker may emit or change state only while it
         # remains current. Every emit below is stamped with this generation
@@ -682,9 +810,9 @@ class SSHManager:
             f"SSH [{device_id}] command started (sudo: {'yes' if feed_sudo else 'no'}, "
             f"{raw_command_length} chars)"
         )
-        needs_sudo = feed_sudo and "sudo" in cmd
-        password   = sess.password if needs_sudo else None
         debug_end = None
+        run_id = run_id or sess.run_id
+        cols, rows = clamp_size(cols, rows)
 
         if self._is_current(device_id, sess):
             self._status(device_id, "running", gen=gen)
@@ -702,9 +830,15 @@ class SSHManager:
             return
 
         try:
-            stdin, stdout, stderr = sess.client.exec_command(cmd, get_pty=needs_sudo)
-            chan = stdout.channel
+            transport = sess.client.get_transport()
+            chan = transport.open_session()
+            chan.get_pty(term="xterm-256color", width=cols, height=rows)
+            chan.exec_command(cmd)
             sess.channel = chan
+            sess.cols, sess.rows = cols, rows
+            writer = TerminalWriter(chan, lambda: self._writer_stuck(device_id, sess, run_id, chan))
+            sess.writer = writer
+            writer.start()
             if sess.cancel_requested:
                 sess.cancelled = True
                 try:
@@ -712,180 +846,81 @@ class SSHManager:
                 except Exception:
                     pass
 
-            def _safe(s: str) -> bool:
-                s = s.strip()
-                if not s:
-                    return True
-                if password and s == password:
+            gate = SudoGate(sudo_phrase, sudo_mark) if feed_sudo else None
+            started = False
+
+            def send_start():
+                nonlocal started
+                if not started and self._is_current(device_id, sess):
+                    started = True
+                    sess.auth_complete = True
+                    self._push({"type": "term_start", "device_id": device_id, "run_id": run_id,
+                                "cmd_id": cmd_id, "cols": cols, "rows": rows, "_owner": sess.owner,
+                                "_gen": gen})
+
+            def emit(text, seq):
+                send_start()
+                if not self._wait_for_terminal_ack(device_id, sess, run_id):
                     return False
-                if s.startswith("[sudo] password for"):
-                    return False
-                return True
+                with self._device_lock(device_id):
+                    if self.sessions.get(device_id) is not sess or sess.run_id != run_id:
+                        return False
+                    if sess.history is not None:
+                        sess.history.feed(text, seq)
+                    sess.last_io = time.monotonic()
+                pushed = self._push_terminal({"type": "term_data", "device_id": device_id,
+                    "run_id": run_id, "seq": seq, "data": text, "_owner": sess.owner, "_gen": gen},
+                    lambda: self._is_current(device_id, sess) and sess.run_id == run_id)
+                if pushed:
+                    with sess.term_condition:
+                        sess.sent_seq = seq
+                        sess.sent_bytes[seq] = len(text.encode("utf-8"))
+                return pushed
 
-            # Read the raw channel ourselves, interleaving stdout and stderr
-            # as data arrives, instead of draining stdout to EOF before ever
-            # looking at stderr. A pty-backed sudo command merges stderr into
-            # the stdout stream, so recv_stderr_ready() simply stays false for
-            # those; a plain command keeps the two apart. select() cannot
-            # watch a paramiko channel on Windows, so this polls instead.
-            out_decoder = codecs.getincrementaldecoder("utf-8")("replace")
-            err_decoder = codecs.getincrementaldecoder("utf-8")("replace")
-            out_buf = ""
-            err_buf = ""
-            sudo_password_sent = False
-            sudo_rejected = False
-            sudo_prompt_line_pending = {"out": False, "err": False}
+            if not feed_sudo:
+                send_start()
+            result = read_channel(chan, gate, OutputBatcher(), emit,
+                lambda: self._is_current(device_id, sess) and sess.run_id == run_id,
+                lambda: self._queue_sudo_password(writer, sess.password), send_start)
 
-            def _remove_sudo_prompts(buf: str, level: str) -> str:
-                """Hide complete sudo prompt lines and supply the password when asked."""
-                nonlocal sudo_password_sent, sudo_rejected
-                if sudo_rejected:
-                    return ""
-                if not sudo_prompt:
-                    return buf
-
-                if sudo_prompt_line_pending[level]:
-                    newline = buf.find("\n")
-                    if newline == -1:
-                        return ""
-                    buf = buf[newline + 1:]
-                    sudo_prompt_line_pending[level] = False
-
-                while sudo_prompt in buf:
-                    prompt_index = buf.index(sudo_prompt)
-                    prompt_count = buf.count(sudo_prompt)
-                    for _ in range(prompt_count):
-                        if sudo_password_sent:
-                            sudo_rejected = True
-                            try:
-                                chan.close()
-                            except Exception:
-                                pass
-                            if self._is_current(device_id, sess):
-                                self._log(device_id, "sudo did not accept the password.", "err", gen=gen)
-                            return ""
-                        sudo_password_sent = True
-                        if password:
-                            try:
-                                stdin.write(password + "\n")
-                                stdin.flush()
-                            except Exception:
-                                pass
-
-                    line_start = buf.rfind("\n", 0, prompt_index) + 1
-                    newline = buf.find("\n", prompt_index)
-                    if newline == -1:
-                        sudo_prompt_line_pending[level] = True
-                        return buf[:line_start]
-                    buf = buf[:line_start] + buf[newline + 1:]
-                return buf
-
-            def _split_and_emit(buf: str, level: str) -> str:
-                """Emit every complete line in `buf`, returning the trailing
-                partial line (kept for the next chunk). Stops emitting, but
-                still returns the remainder, once this worker is no longer
-                current."""
-                if sudo_rejected:
-                    return ""
-                if "\n" not in buf:
-                    return buf
-                *complete, remainder = buf.split("\n")
-                for raw_line in complete:
-                    if not self._is_current(device_id, sess):
-                        return remainder
-                    cleaned = _clean(raw_line)
-                    if cleaned.strip() and _safe(cleaned):
-                        self._log(device_id, cleaned, level, gen=gen)
-                return remainder
-
-            superseded = False
-            while True:
-                if not self._is_current(device_id, sess):
-                    superseded = True
-                    break
-
-                got_data = False
-                if chan.recv_ready():
-                    raw = chan.recv(32768)
-                    if raw:
-                        got_data = True
-                        out_buf += out_decoder.decode(raw, False)
-                        out_buf = _remove_sudo_prompts(out_buf, "out")
-                        out_buf = _split_and_emit(out_buf, "out")
-                if chan.recv_stderr_ready():
-                    raw = chan.recv_stderr(32768)
-                    if raw:
-                        got_data = True
-                        err_buf += err_decoder.decode(raw, False)
-                        err_buf = _remove_sudo_prompts(err_buf, "err")
-                        err_buf = _split_and_emit(err_buf, "err")
-
-                if not got_data:
-                    if (chan.exit_status_ready()
-                            and not chan.recv_ready()
-                            and not chan.recv_stderr_ready()):
-                        break
-                    time.sleep(0.02)
-
-            if not superseded:
-                # Final non-blocking drain: bytes that arrived right at exit.
-                while chan.recv_ready():
-                    raw = chan.recv(32768)
-                    if not raw:
-                        break
-                    out_buf += out_decoder.decode(raw, False)
-                    out_buf = _remove_sudo_prompts(out_buf, "out")
-                    out_buf = _split_and_emit(out_buf, "out")
-                while chan.recv_stderr_ready():
-                    raw = chan.recv_stderr(32768)
-                    if not raw:
-                        break
-                    err_buf += err_decoder.decode(raw, False)
-                    err_buf = _remove_sudo_prompts(err_buf, "err")
-                    err_buf = _split_and_emit(err_buf, "err")
-
-            if not self._is_current(device_id, sess):
+            if result.superseded or not self._is_current(device_id, sess):
                 debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
                 return
 
-            # Flush each decoder and emit any trailing line with no newline.
-            out_buf += out_decoder.decode(b"", True)
-            err_buf += err_decoder.decode(b"", True)
-            out_buf = _remove_sudo_prompts(out_buf, "out")
-            err_buf = _remove_sudo_prompts(err_buf, "err")
-            if out_buf:
-                cleaned = _clean(out_buf)
-                if cleaned.strip() and _safe(cleaned):
-                    self._log(device_id, cleaned, "out", gen=gen)
-            if err_buf:
-                cleaned = _clean(err_buf)
-                if cleaned.strip() and _safe(cleaned):
-                    self._log(device_id, cleaned, "err", gen=gen)
-
-            code = chan.recv_exit_status()
-            if sudo_rejected and code == 0:
-                code = 1
+            if result.gate_passed:
+                send_start()
+            if started:
+                self._push({"type": "term_end", "device_id": device_id, "run_id": run_id,
+                            "_owner": sess.owner, "_gen": gen})
 
             if sess.cancelled:
-                self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
-                debug_end = f"SSH [{device_id}] command cancelled"
-            elif code == 0:
-                self._log(device_id, f"✓ {label} finished.", "ok", gen=gen)
-            else:
-                self._log(device_id, f"✗ {label} exited with code {code}.", "err", gen=gen)
-
-            if not sess.cancelled:
-                if sudo_rejected:
-                    debug_end = f"SSH [{device_id}] command stopped: sudo did not accept the password"
+                if sess.forced:
+                    self._log(device_id, f"■ {label} did not respond to Ctrl+C, so it was stopped.", "warn", gen=gen)
                 else:
-                    debug_end = f"SSH [{device_id}] command finished (exit code {code})"
+                    self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
+                debug_end = self._cancelled_debug_end(device_id, sess)
+            elif result.refused:
+                self._log(device_id, f"✗ {label} did not run: sudo did not accept the password.", "err", gen=gen)
+                debug_end = f"SSH [{device_id}] command stopped: sudo did not accept the password"
+            elif not result.gate_passed:
+                self._log(device_id, f"✗ {label} did not run.", "err", gen=gen)
+                debug_end = f"SSH [{device_id}] command did not run"
+            else:
+                if result.exit_code == 0:
+                    self._log(device_id, f"✓ {label} finished.", "ok", gen=gen)
+                else:
+                    self._log(device_id, f"✗ {label} exited with code {result.exit_code}.", "err", gen=gen)
+                debug_end = f"SSH [{device_id}] command finished (exit code {result.exit_code})"
 
         except Exception as e:
             if not self._is_current(device_id, sess):
                 debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
             elif sess.cancelled:
-                self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
-                debug_end = f"SSH [{device_id}] command cancelled"
+                if sess.forced:
+                    self._log(device_id, f"■ {label} did not respond to Ctrl+C, so it was stopped.", "warn", gen=gen)
+                else:
+                    self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
+                debug_end = self._cancelled_debug_end(device_id, sess)
             else:
                 self._log(device_id, f"Error: {e}", "err", gen=gen)
                 debug_end = f"SSH [{device_id}] command failed ({type(e).__name__})"
@@ -895,20 +930,58 @@ class SSHManager:
             self._debug_write(debug_end)
             self._finish_exec(sess)
 
+    def _writer_stuck(self, device_id, sess, run_id, channel):
+        with self._device_lock(device_id):
+            if self.sessions.get(device_id) is sess and sess.run_id == run_id and sess.channel is channel:
+                sess.cancelled = True
+                sess.forced = True
+                sess.writer_stuck = True
+                channel.close()
+
+    @staticmethod
+    def _cancelled_debug_end(device_id, sess):
+        if sess.writer_stuck:
+            return f"SSH [{device_id}] command stopped: device stopped accepting input"
+        if sess.forced:
+            return f"SSH [{device_id}] command stopped: did not respond to Ctrl+C"
+        return f"SSH [{device_id}] command cancelled"
+
+    @staticmethod
+    def _queue_sudo_password(writer, password):
+        done = writer.password(password)
+        if done is not None:
+            done.wait(config.TERM_WRITE_DEADLINE)
+
     def _finish_exec(self, sess: "_Session"):
         """Identity-checked cleanup: clear busy/channel, reset the idle
         clock, and emit the trailing "connected" status only if this session
         is still the current one for its device."""
         device_id = sess.device_id
+        writer = None
         with self._device_lock(device_id):
+            writer = sess.writer
+            if writer:
+                writer.close()
+            if sess.stop_timer:
+                sess.stop_timer.cancel()
+                sess.stop_timer = None
             if self.sessions.get(device_id) is sess:
                 sess.busy    = False
                 sess.channel = None
+                sess.run_id  = None
+                sess.writer = None
+                sess.history = None
+                sess.label = None
+                with sess.term_condition:
+                    sess.term_condition.notify_all()
                 owner = sess.owner
                 still_current = True
             else:
                 owner = None
                 still_current = False
+
+        if writer:
+            writer.thread.join(config.TERM_SEND_TIMEOUT + 0.1)
 
         if still_current:
             if owner:
@@ -918,6 +991,43 @@ class SSHManager:
             # replace landing between here and delivery is caught at
             # delivery time by the generation stamp.
             self._status(device_id, "connected", gen=sess.generation)
+
+    def owner_terminal_snapshot(self, owner: str) -> list[dict]:
+        """Return recoverable terminal state for this owner's current runs."""
+        terminals = []
+        for device_id in list(self.sessions):
+            with self._device_lock(device_id):
+                sess = self.sessions.get(device_id)
+                if (sess is None or sess.owner != owner or sess.state != "connected"
+                        or not sess.busy or sess.history is None):
+                    continue
+                terminals.append({
+                    "device_id": device_id,
+                    "run_id": sess.run_id,
+                    "cols": sess.cols,
+                    "rows": sess.rows,
+                    "label": sess.label,
+                    **sess.history.snapshot(),
+                })
+                with sess.term_condition:
+                    if sess.sent_seq > sess.acked_seq:
+                        sess.acked_seq = sess.sent_seq
+                        sess.ack_progress_at = time.monotonic()
+                        sess.ack_stalled = False
+                        sess.sent_bytes.clear()
+                        sess.term_condition.notify_all()
+        return trim_to_budget(terminals, config.TERM_INIT_HISTORY_MAX_CHARS)
+
+    def request_terminal_redraw(self, device_id: str, run_id: str, owner: str) -> bool:
+        """Request a full-screen program redraw through its writer thread."""
+        with self._device_lock(device_id):
+            sess = self.sessions.get(device_id)
+            if (sess is None or sess.owner != owner or sess.run_id != run_id
+                    or sess.writer is None or sess.rows is None):
+                return False
+            sess.writer.resize(sess.cols, sess.rows - 1)
+            sess.writer.resize(sess.cols, sess.rows)
+            return True
 
     # ---- idle timeout --------------------------------------------------------
 
@@ -956,14 +1066,24 @@ class SSHManager:
                 self._owner_pop(owner)
                 continue
 
-            # If any session is busy, treat the owner as active
-            if any(s.busy for _, s in owned):
+            busy = [s for _, s in owned if s.busy]
+            if busy and any(now - s.last_io < config.TERM_SILENCE_SECONDS for s in busy):
                 with self._owner_activity_lock:
                     info = self._owner_activity.get(owner)
                     if info:
                         info["last_active"] = now
                         info["warned"] = False
+                        info["silent"] = False
                 continue
+            if busy:
+                # Silent past the limit: idle from the moment of crossing, so
+                # the warning goes out now and the timeout follows as usual.
+                with self._owner_activity_lock:
+                    info = self._owner_activity.get(owner)
+                    if info and not info.get("silent"):
+                        info["silent"] = True
+                        info["last_active"] = now - IDLE_WARN_SECONDS
+                        info["warned"] = False
 
             with self._owner_activity_lock:
                 info = self._owner_activity.get(owner)
@@ -992,6 +1112,10 @@ class SSHManager:
     def stay_connected(self, owner: str) -> dict:
         """Reset idle clock for the signed-in session that clicked Stay connected."""
         self._owner_reset(owner)
+        now = time.monotonic()
+        for sess in self.sessions.values():
+            if sess.owner == owner and sess.busy:
+                sess.last_io = now
         return {"ok": True}
 
     def release_owner(self, owner: str):

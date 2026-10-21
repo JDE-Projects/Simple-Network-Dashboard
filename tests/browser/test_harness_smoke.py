@@ -20,6 +20,23 @@ def test_login_loads_dashboard_over_websocket(logged_in_page, app_server):
     assert "No devices yet" in page.text_content("#deviceList")
 
 
+def test_terminal_library_assets_load(_chromium_available, page, app_server):
+    errors: list[str] = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+
+    page.goto(f"{app_server}/login")
+    page.fill("#password", DASHBOARD_PASSWORD)
+    page.click("#submit")
+    page.wait_for_url(f"{app_server}/")
+
+    assert page.evaluate("() => typeof window.Terminal") == "function"
+    assert page.evaluate("() => typeof window.FitAddon") != "undefined"
+    for path in ("xterm.css", "xterm.js", "addon-fit.js"):
+        assert page.request.get(f"{app_server}/static/vendor/xterm/{path}").status == 200
+    assert not errors
+
+
 def test_wrong_password_stays_on_login(_chromium_available, page, app_server):
     page.goto(f"{app_server}/login")
     page.fill("#password", DASHBOARD_PASSWORD + "-wrong")
