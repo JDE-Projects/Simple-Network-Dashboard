@@ -852,6 +852,12 @@ function connectWS() {
         forgetRunId(msg.device_id, msg.run_id);
         endLiveTerminal(msg.device_id, msg.run_id);
         break;
+      case 'term_control':
+        updateTerminalControl(msg);
+        break;
+      case 'term_input_full':
+        showTerminalInputFull(msg);
+        break;
       case 'ssh_lock':
         if (msg.locked) SSH_LOCKS[msg.device_id] = true;
         else delete SSH_LOCKS[msg.device_id];
@@ -1275,6 +1281,89 @@ function refreshLiveTerminal(live) {
   scrollTerminalIntoView(live);
 }
 
+function terminalHasFocus(live) {
+  return document.activeElement === live.terminal.textarea;
+}
+
+function updateTerminalStrip(live) {
+  if (!live.live || live.inputFull) return;
+  if (live.yours && terminalHasFocus(live)) {
+    live.strip.textContent = 'Running. Your typing goes to this command.';
+  } else if (live.yours === false) {
+    live.strip.textContent = 'Typing is in another tab. Click here to type.';
+  } else {
+    live.strip.textContent = 'Running. Click in this window to type.';
+  }
+}
+
+function sendTerminalMessage(message) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(message));
+  return true;
+}
+
+function claimTerminalControl(live) {
+  if (!live.live || live.yours || live.claimPending) return;
+  if (sendTerminalMessage({type: 'term_claim', device_id: live.deviceId, run_id: live.runId})) {
+    live.claimPending = true;
+  }
+}
+
+function scheduleTerminalResize(live) {
+  if (!live.live || !live.yours) return;
+  clearTimeout(live.resizeTimer);
+  live.resizeTimer = setTimeout(() => resizeLiveTerminal(live), 150);
+}
+
+async function resizeLiveTerminal(live) {
+  if (!live.live || !live.yours) return;
+  const con = consoleFor(live.deviceId);
+  if (!con.offsetParent || con.clientWidth === 0 || con.clientHeight === 0) return;
+  const size = await terminalRunSize(live.deviceId);
+  if (!live.live || !live.yours || LIVE_TERMINALS.get(live.deviceId) !== live) return;
+  if (size.cols === live.terminal.cols && size.rows === live.terminal.rows) return;
+  live.terminal.resize(size.cols, size.rows);
+  live.rows = size.rows;
+  refreshLiveTerminal(live);
+  sendTerminalMessage({type: 'term_resize', device_id: live.deviceId, run_id: live.runId, rev: live.rev, ...size});
+}
+
+function sendTerminalInput(live, data) {
+  if (!live.live || !live.yours) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const text = String(data);
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(start + 16384, text.length);
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) end--;
+    sendTerminalMessage({type: 'term_input', device_id: live.deviceId, run_id: live.runId, rev: live.rev, data: text.slice(start, end)});
+    start = end;
+  }
+}
+
+function updateTerminalControl(msg) {
+  const live = LIVE_TERMINALS.get(msg.device_id);
+  if (!live || !live.live || live.runId !== msg.run_id) return;
+  live.yours = !!msg.yours;
+  live.rev = msg.rev;
+  live.claimPending = false;
+  live.box.dataset.yours = String(live.yours);
+  live.box.dataset.rev = String(live.rev);
+  updateTerminalStrip(live);
+  if (live.yours) scheduleTerminalResize(live);
+}
+
+function showTerminalInputFull(msg) {
+  const live = LIVE_TERMINALS.get(msg.device_id);
+  if (!live || !live.live || live.runId !== msg.run_id) return;
+  clearTimeout(live.inputFullTimer);
+  live.inputFull = true;
+  live.strip.textContent = 'Typing is arriving faster than the device accepts it.';
+  live.inputFullTimer = setTimeout(() => {
+    live.inputFull = false;
+    updateTerminalStrip(live);
+  }, 4000);
+}
+
 function startLiveTerminal(msg) {
   if (!msg.device_id || !msg.run_id) return;
   endLiveTerminal(msg.device_id);
@@ -1291,17 +1380,48 @@ function startLiveTerminal(msg) {
   con.appendChild(box);
   const terminal = new Terminal({cols: msg.cols, rows: msg.rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
   terminal.open(frame);
-  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows: msg.rows, fullScreen: false, lastSeq: -1, live: true};
+  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows: msg.rows, fullScreen: false, lastSeq: -1, live: true, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false};
   LIVE_TERMINALS.set(msg.device_id, live);
   const paintFocus = focused => {
     box.classList.toggle('terminal-focused', focused);
-    strip.textContent = focused ? 'Running. Your typing goes to this command.' : 'Running. Click in this window to type.';
+    updateTerminalStrip(live);
   };
-  terminal.textarea.addEventListener('focus', () => { if (live.live) paintFocus(true); });
-  terminal.textarea.addEventListener('blur', () => { if (live.live) paintFocus(false); });
+  terminal.textarea.addEventListener('focus', () => {
+    if (!live.live) return;
+    paintFocus(true);
+    claimTerminalControl(live);
+  });
+  terminal.textarea.addEventListener('blur', () => {
+    if (!live.live) return;
+    live.claimPending = false;
+    paintFocus(false);
+  });
+  box.addEventListener('click', () => {
+    if (!live.live) return;
+    terminal.focus();
+    claimTerminalControl(live);
+  });
+  terminal.onData(data => sendTerminalInput(live, data));
+  // Returning false leaves the key to the browser: Ctrl+C with a selection
+  // becomes its copy and Ctrl+V its paste, which the terminal receives once
+  // through its own paste handling. The handler runs for keydown, keypress and
+  // keyup, so the decision must be the same for each.
+  terminal.attachCustomKeyEventHandler(event => {
+    if (event.metaKey || !event.ctrlKey || event.altKey || event.shiftKey) return true;
+    const key = event.key.toLowerCase();
+    if (key === 'c' && terminal.hasSelection()) {
+      if (event.type === 'keydown') navigator.clipboard.writeText(terminal.getSelection()).catch(() => {});
+      return false;
+    }
+    if (key === 'v') return false;
+    return true;
+  });
   const startedHere = LOCAL_COMMAND_IDS.delete(msg.cmd_id);
-  paintFocus(startedHere);
-  if (startedHere) requestAnimationFrame(() => terminal.focus());
+  if (startedHere) {
+    terminal.focus();
+    claimTerminalControl(live);
+  }
+  paintFocus(terminalHasFocus(live));
   refreshLiveTerminal(live);
 }
 
@@ -1322,6 +1442,8 @@ function endLiveTerminal(deviceId, runId) {
   const live = LIVE_TERMINALS.get(deviceId);
   if (!live || (runId && live.runId !== runId)) return;
   live.live = false;
+  clearTimeout(live.resizeTimer);
+  clearTimeout(live.inputFullTimer);
   live.box.classList.remove('terminal-focused', 'terminal-scrollback', 'terminal-fullscreen');
   live.box.classList.add('terminal-ended');
   live.strip.remove();
@@ -1426,7 +1548,10 @@ function setActiveTab(id) {
   });
   consoleFor(id).scrollTop = 999999;
   const live = LIVE_TERMINALS.get(id);
-  if (live) refreshLiveTerminal(live);
+  if (live) {
+    refreshLiveTerminal(live);
+    scheduleTerminalResize(live);
+  }
   renderTabs();
   selectDevice(id);
 }
@@ -1463,7 +1588,10 @@ function reconcileTabs() {
   renderTabs();
 }
 
-window.addEventListener('resize', () => LIVE_TERMINALS.forEach(refreshLiveTerminal));
+window.addEventListener('resize', () => LIVE_TERMINALS.forEach(live => {
+  refreshLiveTerminal(live);
+  scheduleTerminalResize(live);
+}));
 
 /* ============================================================
    SSH state changes
