@@ -1452,10 +1452,11 @@ function startLiveTerminal(msg, options = {}) {
   const rows = msg.rows || 30;
   const terminal = new Terminal({cols, rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
   terminal.open(frame);
-  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, pagerWaiting: false, ackSeq: -1, ackSentSeq: -1, ackAt: -Infinity, ackTimer: null, lineTimes: [], fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
+  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, pagerWaiting: false, ackSeq: -1, ackSentSeq: -1, ackAt: -Infinity, ackTimer: null, lineTimes: [], normalLineFeeds: 0, fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
   LIVE_TERMINALS.set(msg.device_id, live);
   terminal.onLineFeed(() => {
     if (live.live && terminal.buffer.active.type === 'normal') {
+      live.normalLineFeeds++;
       live.lineTimes.push({marker: terminal.registerMarker(-1), time: consoleTime()});
       // The console keeps at most MAX_LINES rows, so older times are never
       // shown; each live marker also slows every write once scrollback is full.
@@ -1466,7 +1467,15 @@ function startLiveTerminal(msg, options = {}) {
     const wasFullScreen = live.fullScreen;
     live.fullScreen = buffer.type === 'alternate';
     if (live.live && wasFullScreen && buffer.type === 'normal') {
-      live.fullScreenClosures.push({marker: terminal.registerMarker(), time: consoleTime()});
+      live.fullScreenClosures.push({marker: terminal.registerMarker(), lineFeeds: live.normalLineFeeds, time: consoleTime()});
+    } else if (live.live && !wasFullScreen && buffer.type === 'alternate') {
+      // A program answering a resize (nano does) leaves and re-enters the
+      // full-screen view; with no new line in between, nothing was closed.
+      const closure = live.fullScreenClosures[live.fullScreenClosures.length - 1];
+      if (closure && closure.lineFeeds === live.normalLineFeeds) {
+        live.fullScreenClosures.pop();
+        closure.marker.dispose();
+      }
     }
   });
   const paintFocus = focused => {
@@ -1754,8 +1763,13 @@ function setTabState(id, state) {
 function ensureTab(id) {
   if (openTabs[id]) return;
   openTabs[id] = true;
-  if (!activeTabId) activeTabId = id;
-  consoleFor(id);
+  const becomesActive = !activeTabId;
+  if (becomesActive) activeTabId = id;
+  const con = consoleFor(id);
+  if (becomesActive) {
+    $('consoleEmpty').style.display = 'none';
+    con.style.display = 'block';
+  }
   renderTabs();
 }
 

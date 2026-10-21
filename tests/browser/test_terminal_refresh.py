@@ -95,6 +95,13 @@ def test_reload_mid_command_rebuilds_watcher_and_filters_duplicate_batches(page,
 
 
 @pytest.mark.browser
+def test_recovery_shows_restored_console_and_hides_empty_placeholder(page, app_server_with_device):
+    _open_recovery_page(page, app_server_with_device, [[_entry()]])
+    expect(page.locator("#consoleEmpty")).to_be_hidden()
+    expect(_console(page)).to_be_visible()
+
+
+@pytest.mark.browser
 def test_reconnect_keeps_current_box_but_resets_control(page, app_server_with_device):
     routes = _open_recovery_page(page, app_server_with_device, [[], [_entry(lines=[], partial="", seq=1)]])
     _send(routes, {"type": "term_start", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "cmd_id": "other", "cols": 80, "rows": 24})

@@ -86,6 +86,36 @@ def test_fold_marks_closed_full_screen_view_without_its_contents(page, app_serve
 
 
 @pytest.mark.browser
+def test_fold_discards_closure_when_full_screen_restarts_immediately(page, app_server_with_device):
+    _, routes = _open_connected_page(page, app_server_with_device)
+    _start(routes)
+    # nano answering a resize: it moves the cursor, leaves the full-screen
+    # view and re-enters it, twice in one batch (captured from a real device).
+    bounce = "\x1b[28;1H\x1b[?1049l\x1b[23;0;0t\r\x1b[?1l\x1b>\x1b[?1049h\x1b[22;0;0t\x1b[1;27r\x1b[H\x1b[2J  GNU nano"
+    _data(page, routes, 1, "\x1b[?1049h\x1b[H\x1b[2J  GNU nano")
+    _data(page, routes, 2, bounce + bounce)
+    _data(page, routes, 3, "\x1b[28;1H\x1b[?1049l")
+    _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one"})
+    expect(_box(page)).to_have_count(0)
+    assert _messages(page) == ["(full-screen view closed)"]
+
+
+@pytest.mark.browser
+def test_fold_keeps_closures_when_normal_output_separates_full_screen_sessions(page, app_server_with_device):
+    _, routes = _open_connected_page(page, app_server_with_device)
+    _start(routes)
+    _data(page, routes, 1, "\x1b[?1049h")
+    _data(page, routes, 2, "\x1b[?1049l\x1b[23;0;0t\r\x1b[?1049h")
+    _data(page, routes, 3, "\x1b[?1049lfirst session finished\r\n\x1b[?1049h")
+    _data(page, routes, 4, "\x1b[?1049l")
+    _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one"})
+    expect(_box(page)).to_have_count(0)
+    messages = _messages(page)
+    assert messages.count("(full-screen view closed)") == 2
+    assert "first session finished" in messages
+
+
+@pytest.mark.browser
 def test_fold_scrollback_trim_keeps_times_aligned_and_console_cap(page, app_server_with_device):
     _, routes = _open_connected_page(page, app_server_with_device)
     _start(routes, rows=5)
