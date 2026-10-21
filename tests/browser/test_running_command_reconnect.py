@@ -15,6 +15,7 @@ from tests.browser.conftest import DASHBOARD_PASSWORD, SEEDED_DEVICE_ID
 def test_running_command_state_survives_redraw_reload_and_reconnect(page, app_server_with_device):
     running = {"value": True}
     connected = {"value": True}
+    run_id = "run-reconnect"
     routes = []
 
     def handle_ws(ws) -> None:
@@ -26,6 +27,7 @@ def test_running_command_state_survives_redraw_reload_and_reconnect(page, app_se
             if msg.get("type") == "init":
                 msg["ssh_connected"] = [SEEDED_DEVICE_ID] if connected["value"] else []
                 msg["ssh_running"] = [SEEDED_DEVICE_ID] if running["value"] else []
+                msg["ssh_terminals"] = [{"device_id": SEEDED_DEVICE_ID, "run_id": run_id}] if running["value"] else []
                 message = json.dumps(msg)
             ws.send(message)
 
@@ -59,7 +61,7 @@ def test_running_command_state_survives_redraw_reload_and_reconnect(page, app_se
 
     with page.expect_request("**/api/ssh/cancel") as request_info:
         stop.click()
-    assert request_info.value.post_data_json == {"device_id": SEEDED_DEVICE_ID}
+    assert request_info.value.post_data_json == {"device_id": SEEDED_DEVICE_ID, "run_id": run_id}
 
     running["value"] = False
     page.evaluate("() => ws.close()")

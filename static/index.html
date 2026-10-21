@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Simple Network Dashboard</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1" />
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css" />
 <style>
   @font-face {
     font-family: "Sora";
@@ -697,6 +698,8 @@
   </div>
 </div>
 
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/addon-fit.js"></script>
 <script>
 /* ============================================================
    Theme
@@ -720,6 +723,8 @@ let DEVICES   = [];
 let METRICS   = {};          // device_id -> metrics dict (no _raw fields)
 let SSH_STATE = {};          // device_id -> 'connected'|'running'|'idle'
 let SSH_LOCKS = {};          // device_id -> true (locked by any browser)
+const TERMINAL_RUN_IDS = {}; // device_id -> current terminal run_id
+const ENDED_RUN_IDS = new Set(); // ended run_ids, so a late run reply cannot restore one
 let CONFIG_READ_ONLY = false;
 let RECOVERY_NOTICE_SHOWN = false;
 let currentDeviceId = null;
@@ -801,6 +806,10 @@ function connectWS() {
         SSH_STATE = {};
         (msg.ssh_connected || []).forEach(id => { SSH_STATE[id] = 'connected'; });
         (msg.ssh_running || []).forEach(id => { SSH_STATE[id] = 'running'; });
+        Object.keys(TERMINAL_RUN_IDS).forEach(id => { delete TERMINAL_RUN_IDS[id]; });
+        (msg.ssh_terminals || []).forEach(terminal => {
+          if (terminal.device_id && terminal.run_id) TERMINAL_RUN_IDS[terminal.device_id] = terminal.run_id;
+        });
         // Track which devices are locked (in use by any browser)
         SSH_LOCKS = {};
         (msg.ssh_locked || []).forEach(id => { SSH_LOCKS[id] = true; });
@@ -819,6 +828,14 @@ function connectWS() {
         break;
       case 'ssh_status':
         handleSSHStatus(msg.device_id, msg.state);
+        break;
+      case 'term_start':
+        rememberRunId(msg.device_id, msg.run_id);
+        break;
+      case 'term_data':
+        break;
+      case 'term_end':
+        forgetRunId(msg.device_id, msg.run_id);
         break;
       case 'ssh_lock':
         if (msg.locked) SSH_LOCKS[msg.device_id] = true;
@@ -1301,8 +1318,20 @@ function reconcileTabs() {
 /* ============================================================
    SSH state changes
    ============================================================ */
+function rememberRunId(deviceId, runId) {
+  if (deviceId && runId && !ENDED_RUN_IDS.has(runId)) TERMINAL_RUN_IDS[deviceId] = runId;
+}
+
+function forgetRunId(deviceId, runId) {
+  if (!runId) return;
+  ENDED_RUN_IDS.add(runId);
+  if (ENDED_RUN_IDS.size > 100) ENDED_RUN_IDS.delete(ENDED_RUN_IDS.values().next().value);
+  if (TERMINAL_RUN_IDS[deviceId] === runId) delete TERMINAL_RUN_IDS[deviceId];
+}
+
 function handleSSHStatus(id, state) {
   SSH_STATE[id] = state;
+  if (state !== 'running') forgetRunId(id, TERMINAL_RUN_IDS[id]);
   setTabState(id, state === 'idle' ? 'disconnected' : state);
   updateDisconnectAllBtn();
 
@@ -1496,7 +1525,15 @@ function wireCard(card, d) {
   connectBtn.onclick = e => { e.stopPropagation(); tryConnect(); };
   pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') connectBtn.click(); });
 
-  card.querySelector('[data-cancel]').onclick     = e => { e.stopPropagation(); sshPost('/api/ssh/cancel', {device_id: id}); };
+  card.querySelector('[data-cancel]').onclick     = e => {
+    e.stopPropagation();
+    const runId = TERMINAL_RUN_IDS[id];
+    if (!runId) {
+      addLine(id, 'Could not stop: this page does not know which command is running. Refresh the page and try again.', 'err');
+      return;
+    }
+    sshPost('/api/ssh/cancel', {device_id: id, run_id: runId});
+  };
   card.querySelector('[data-disconnect]').onclick = e => {
     e.stopPropagation();
     askConfirm('Disconnect', `Disconnect from ${d.name}?`, async () => {
@@ -1535,6 +1572,7 @@ function wireCard(card, d) {
     customCmdById.set(cmdId, {command: cmd, placeholder: 'Custom Command'});
     const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId});
     if (r && r.ok) {
+      rememberRunId(id, r.run_id);
       // stored above; its echoed line will consume the tag
     } else {
       customCmdById.delete(cmdId);
@@ -1628,6 +1666,7 @@ function runLibCmd(deviceId, index) {
     const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
     customCmdById.set(cmdId, {command: c.command, placeholder: 'Library Command'});
     const r = await sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name, cmd_id: cmdId});
+    if (r && r.ok) rememberRunId(deviceId, r.run_id);
     if (!(r && r.ok)) {
       customCmdById.delete(cmdId);
       if (r && r.error) addLine(deviceId, r.error, 'err');

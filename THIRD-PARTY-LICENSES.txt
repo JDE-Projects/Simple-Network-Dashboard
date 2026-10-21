@@ -29,3 +29,18 @@ JetBrains Mono
   https://openfontlicense.org
 
 Full OFL-1.1 text for both fonts: static/fonts/OFL.txt
+
+# Bundled browser libraries (static/vendor/xterm/, shipped in the repo and tarball)
+xterm.js 5.5.0
+  Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+  Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
+  Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
+  License: MIT
+  https://github.com/xtermjs/xterm.js
+
+@xterm/addon-fit 0.10.0
+  Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+  License: MIT
+  https://github.com/xtermjs/xterm.js
+
+Full MIT license texts: static/vendor/xterm/LICENSE-xterm.txt and static/vendor/xterm/LICENSE-addon-fit.txt
