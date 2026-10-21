@@ -337,6 +337,15 @@
   .ln.muted .msg{ color: var(--text-faint); }
   .ln.out  .msg { color: var(--text-dim); }
   .console-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px; }
+  .live-terminal { margin: 4px 0 10px 73px; max-width: calc(100% - 73px); }
+  .terminal-strip { min-height: 24px; padding: 4px 8px; color: var(--text-faint); font-size: 10px; line-height: 16px; border: 1px solid var(--border); border-bottom: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+  .terminal-frame { overflow: hidden; border: 1px solid var(--border); border-radius: 0 0 var(--radius-sm) var(--radius-sm); background: var(--bg); }
+  .live-terminal.terminal-focused .terminal-frame { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .live-terminal.terminal-ended .terminal-frame { border-radius: var(--radius-sm); }
+  .live-terminal .xterm { height: 100%; padding: 2px 0; }
+  .live-terminal .xterm-viewport { overflow-y: hidden !important; }
+  .live-terminal.terminal-scrollback .xterm-viewport { overflow-y: scroll !important; }
+  .live-terminal.terminal-fullscreen .xterm-viewport { overflow-y: hidden !important; }
 
   /* ---- library panel ---- */
   .library  { grid-area: lib; }
@@ -705,9 +714,11 @@
    Theme
    ============================================================ */
 let currentTheme = "dark";
+const LIVE_TERMINALS = new Map(); // device_id -> the one current, view-only terminal box
 function applyTheme(theme){
   currentTheme = (theme === "light") ? "light" : "dark";
   document.body.classList.toggle("light", currentTheme === "light");
+  LIVE_TERMINALS.forEach(updateTerminalTheme);
 }
 function toggleTheme(){
   const next = currentTheme === "light" ? "dark" : "light";
@@ -725,6 +736,7 @@ let SSH_STATE = {};          // device_id -> 'connected'|'running'|'idle'
 let SSH_LOCKS = {};          // device_id -> true (locked by any browser)
 const TERMINAL_RUN_IDS = {}; // device_id -> current terminal run_id
 const ENDED_RUN_IDS = new Set(); // ended run_ids, so a late run reply cannot restore one
+const LOCAL_COMMAND_IDS = new Set(); // cmd_ids this page sent, so its own term_start is recognized
 let CONFIG_READ_ONLY = false;
 let RECOVERY_NOTICE_SHOWN = false;
 let currentDeviceId = null;
@@ -831,11 +843,14 @@ function connectWS() {
         break;
       case 'term_start':
         rememberRunId(msg.device_id, msg.run_id);
+        startLiveTerminal(msg);
         break;
       case 'term_data':
+        writeTerminalData(msg);
         break;
       case 'term_end':
         forgetRunId(msg.device_id, msg.run_id);
+        endLiveTerminal(msg.device_id, msg.run_id);
         break;
       case 'ssh_lock':
         if (msg.locked) SSH_LOCKS[msg.device_id] = true;
@@ -1178,8 +1193,139 @@ function addLine(id, text, level, cmdId) {
     msgEl.textContent = text;
   }
   con.appendChild(ln);
-  while (con.children.length > MAX_LINES) con.removeChild(con.firstChild);
+  while (con.querySelectorAll('.ln').length > MAX_LINES) {
+    const oldest = con.querySelector('.ln');
+    if (!oldest) break;
+    oldest.remove();
+  }
   if (id === activeTabId) con.scrollTop = con.scrollHeight;
+}
+
+function terminalTheme() {
+  const style = getComputedStyle(document.body);
+  return {
+    background: style.getPropertyValue('--bg').trim(), foreground: style.getPropertyValue('--text').trim(),
+    cursor: style.getPropertyValue('--accent').trim(), selectionBackground: style.getPropertyValue('--border').trim(),
+    black: style.getPropertyValue('--bg-2').trim(), brightBlack: style.getPropertyValue('--text-faint').trim(),
+    red: style.getPropertyValue('--red').trim(), brightRed: style.getPropertyValue('--red').trim(),
+    green: style.getPropertyValue('--green').trim(), brightGreen: style.getPropertyValue('--green').trim(),
+    yellow: style.getPropertyValue('--amber').trim(), brightYellow: style.getPropertyValue('--amber').trim(),
+    blue: style.getPropertyValue('--blue').trim(), brightBlue: style.getPropertyValue('--blue').trim(),
+    cyan: style.getPropertyValue('--accent').trim(), brightCyan: style.getPropertyValue('--accent-2').trim(),
+    white: style.getPropertyValue('--text').trim(), brightWhite: style.getPropertyValue('--text').trim(),
+  };
+}
+
+function updateTerminalTheme(live) {
+  live.terminal.options.theme = terminalTheme();
+}
+
+async function terminalRunSize(id) {
+  const con = consoleFor(id);
+  if (!con.offsetParent || con.clientWidth === 0 || con.clientHeight === 0) return {cols: 120, rows: 30};
+  const probe = document.createElement('span');
+  probe.textContent = 'W';
+  probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;font-family:JetBrains Mono, monospace;font-size:12px;line-height:normal;white-space:pre;';
+  con.appendChild(probe);
+  try {
+    await document.fonts.ready;
+    const cell = probe.getBoundingClientRect();
+    if (!cell.width || !cell.height) return {cols: 120, rows: 30};
+    return {
+      cols: Math.min(500, Math.max(20, Math.floor((con.clientWidth - 111) / cell.width))),
+      rows: Math.min(200, Math.max(5, Math.floor((con.clientHeight - 52) / cell.height))),
+    };
+  } catch (error) {
+    return {cols: 120, rows: 30};
+  } finally {
+    probe.remove();
+  }
+}
+
+function terminalCellHeight(live) {
+  const row = live.frame.querySelector('.xterm-rows > div');
+  const height = row ? row.getBoundingClientRect().height : 0;
+  return height || live.terminal._core?._renderService?.dimensions?.css?.cell?.height || 15;
+}
+
+function terminalContentRows(live) {
+  const buffer = live.terminal.buffer.active;
+  return Math.min(live.rows, Math.max(1, buffer.baseY + buffer.cursorY + 1));
+}
+
+function scrollTerminalIntoView(live) {
+  if (live.deviceId !== activeTabId) return;
+  const con = consoleFor(live.deviceId);
+  con.scrollTop = Math.max(0, live.box.offsetTop + live.box.offsetHeight - con.clientHeight + 12);
+}
+
+function refreshLiveTerminal(live) {
+  const con = consoleFor(live.deviceId);
+  const cellHeight = terminalCellHeight(live);
+  const availableRows = Math.max(1, Math.floor((con.clientHeight - 52) / cellHeight));
+  const contentRows = live.fullScreen ? live.rows : terminalContentRows(live);
+  const visibleRows = Math.min(live.rows, availableRows, contentRows);
+  live.frame.style.height = `${Math.max(1, Math.floor(visibleRows * cellHeight) + 4)}px`;
+  // A terminal taller than the console (window shrunk after it started) shows
+  // its bottom rows, where the cursor and newest output are.
+  live.frame.scrollTop = Math.max(0, Math.floor((contentRows - visibleRows) * cellHeight));
+  const scrolled = !live.fullScreen && live.terminal.buffer.active.baseY > 0;
+  live.box.classList.toggle('terminal-scrollback', scrolled);
+  live.box.classList.toggle('terminal-fullscreen', live.fullScreen);
+  scrollTerminalIntoView(live);
+}
+
+function startLiveTerminal(msg) {
+  if (!msg.device_id || !msg.run_id) return;
+  endLiveTerminal(msg.device_id);
+  ensureTab(msg.device_id);
+  const con = consoleFor(msg.device_id);
+  const box = document.createElement('div');
+  box.className = 'live-terminal';
+  box.dataset.runId = msg.run_id;
+  const strip = document.createElement('div');
+  strip.className = 'terminal-strip';
+  const frame = document.createElement('div');
+  frame.className = 'terminal-frame';
+  box.append(strip, frame);
+  con.appendChild(box);
+  const terminal = new Terminal({cols: msg.cols, rows: msg.rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
+  terminal.open(frame);
+  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows: msg.rows, fullScreen: false, lastSeq: -1, live: true};
+  LIVE_TERMINALS.set(msg.device_id, live);
+  const paintFocus = focused => {
+    box.classList.toggle('terminal-focused', focused);
+    strip.textContent = focused ? 'Running. Your typing goes to this command.' : 'Running. Click in this window to type.';
+  };
+  terminal.textarea.addEventListener('focus', () => { if (live.live) paintFocus(true); });
+  terminal.textarea.addEventListener('blur', () => { if (live.live) paintFocus(false); });
+  const startedHere = LOCAL_COMMAND_IDS.delete(msg.cmd_id);
+  paintFocus(startedHere);
+  if (startedHere) requestAnimationFrame(() => terminal.focus());
+  refreshLiveTerminal(live);
+}
+
+function writeTerminalData(msg) {
+  const live = LIVE_TERMINALS.get(msg.device_id);
+  if (!live || !live.live || live.runId !== msg.run_id || typeof msg.seq !== 'number' || msg.seq <= live.lastSeq) return;
+  live.lastSeq = msg.seq;
+  live.terminal.write(String(msg.data || ''), () => {
+    if (!live.live) return;
+    // The terminal's own parser knows when a full-screen view is open, even
+    // when its switch sequence was split across two batches.
+    live.fullScreen = live.terminal.buffer.active.type === 'alternate';
+    refreshLiveTerminal(live);
+  });
+}
+
+function endLiveTerminal(deviceId, runId) {
+  const live = LIVE_TERMINALS.get(deviceId);
+  if (!live || (runId && live.runId !== runId)) return;
+  live.live = false;
+  live.box.classList.remove('terminal-focused', 'terminal-scrollback', 'terminal-fullscreen');
+  live.box.classList.add('terminal-ended');
+  live.strip.remove();
+  LIVE_TERMINALS.delete(deviceId);
 }
 
 /* Prominent, dismissable red banner for failures the user must not miss
@@ -1267,8 +1413,8 @@ function setTabState(id, state) {
 function ensureTab(id) {
   if (openTabs[id]) return;
   openTabs[id] = true;
-  consoleFor(id);
   if (!activeTabId) activeTabId = id;
+  consoleFor(id);
   renderTabs();
 }
 
@@ -1279,6 +1425,8 @@ function setActiveTab(id) {
     c.style.display = c.dataset.console === id ? 'block' : 'none';
   });
   consoleFor(id).scrollTop = 999999;
+  const live = LIVE_TERMINALS.get(id);
+  if (live) refreshLiveTerminal(live);
   renderTabs();
   selectDevice(id);
 }
@@ -1315,6 +1463,8 @@ function reconcileTabs() {
   renderTabs();
 }
 
+window.addEventListener('resize', () => LIVE_TERMINALS.forEach(refreshLiveTerminal));
+
 /* ============================================================
    SSH state changes
    ============================================================ */
@@ -1331,7 +1481,10 @@ function forgetRunId(deviceId, runId) {
 
 function handleSSHStatus(id, state) {
   SSH_STATE[id] = state;
-  if (state !== 'running') forgetRunId(id, TERMINAL_RUN_IDS[id]);
+  if (state !== 'running') {
+    forgetRunId(id, TERMINAL_RUN_IDS[id]);
+    if (state === 'idle') endLiveTerminal(id);
+  }
   setTabState(id, state === 'idle' ? 'disconnected' : state);
   updateDisconnectAllBtn();
 
@@ -1570,12 +1723,14 @@ function wireCard(card, d) {
     // can never be attached to a later, unrelated line.
     const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
     customCmdById.set(cmdId, {command: cmd, placeholder: 'Custom Command'});
-    const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId});
+    LOCAL_COMMAND_IDS.add(cmdId);
+    const size = await terminalRunSize(id);
+    const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId, ...size});
     if (r && r.ok) {
       rememberRunId(id, r.run_id);
       // stored above; its echoed line will consume the tag
     } else {
-      customCmdById.delete(cmdId);
+      customCmdById.delete(cmdId); LOCAL_COMMAND_IDS.delete(cmdId);
       if (r && r.error) addLine(id, r.error, 'err');
       input.value = cmd; // restore the typed command so it can be corrected and retried
     }
@@ -1665,10 +1820,12 @@ function runLibCmd(deviceId, index) {
     ensureTab(deviceId); setActiveTab(deviceId);
     const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
     customCmdById.set(cmdId, {command: c.command, placeholder: 'Library Command'});
-    const r = await sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name, cmd_id: cmdId});
+    LOCAL_COMMAND_IDS.add(cmdId);
+    const size = await terminalRunSize(deviceId);
+    const r = await sshPost('/api/ssh/run', {device_id: deviceId, command: c.command, use_sudo: !!c.sudo, label: c.name, cmd_id: cmdId, ...size});
     if (r && r.ok) rememberRunId(deviceId, r.run_id);
     if (!(r && r.ok)) {
-      customCmdById.delete(cmdId);
+      customCmdById.delete(cmdId); LOCAL_COMMAND_IDS.delete(cmdId);
       if (r && r.error) addLine(deviceId, r.error, 'err');
     }
   };
