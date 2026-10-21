@@ -898,8 +898,7 @@ class SSHManager:
                     self._log(device_id, f"■ {label} did not respond to Ctrl+C, so it was stopped.", "warn", gen=gen)
                 else:
                     self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
-                debug_end = (f"SSH [{device_id}] command stopped: device stopped accepting input"
-                             if sess.writer_stuck else f"SSH [{device_id}] command cancelled")
+                debug_end = self._cancelled_debug_end(device_id, sess)
             elif result.refused:
                 self._log(device_id, f"✗ {label} did not run: sudo did not accept the password.", "err", gen=gen)
                 debug_end = f"SSH [{device_id}] command stopped: sudo did not accept the password"
@@ -921,8 +920,7 @@ class SSHManager:
                     self._log(device_id, f"■ {label} did not respond to Ctrl+C, so it was stopped.", "warn", gen=gen)
                 else:
                     self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
-                debug_end = (f"SSH [{device_id}] command stopped: device stopped accepting input"
-                             if sess.writer_stuck else f"SSH [{device_id}] command cancelled")
+                debug_end = self._cancelled_debug_end(device_id, sess)
             else:
                 self._log(device_id, f"Error: {e}", "err", gen=gen)
                 debug_end = f"SSH [{device_id}] command failed ({type(e).__name__})"
@@ -939,6 +937,14 @@ class SSHManager:
                 sess.forced = True
                 sess.writer_stuck = True
                 channel.close()
+
+    @staticmethod
+    def _cancelled_debug_end(device_id, sess):
+        if sess.writer_stuck:
+            return f"SSH [{device_id}] command stopped: device stopped accepting input"
+        if sess.forced:
+            return f"SSH [{device_id}] command stopped: did not respond to Ctrl+C"
+        return f"SSH [{device_id}] command cancelled"
 
     @staticmethod
     def _queue_sudo_password(writer, password):

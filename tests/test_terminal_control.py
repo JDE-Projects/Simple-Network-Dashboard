@@ -303,7 +303,62 @@ def test_exec_forced_stop_end_line_and_debug_message(monkeypatch):
     logs = _exec(manager, session, on_push=cancel_then_force)
     assert ("warn", "■ Label did not respond to Ctrl+C, so it was stopped.") in logs
     assert not any("exited with code" in text for _level, text in logs)
-    assert debug[-1] == "SSH [d1] command cancelled"
+    assert debug[-1] == "SSH [d1] command stopped: did not respond to Ctrl+C"
+
+
+def test_exec_second_stop_end_line_and_debug_message(monkeypatch):
+    manager = _manager()
+    channel = _FakeChannel([("out", b"ready")])
+    session = _exec_session(manager, channel)
+    debug = []
+    manager._debug_write = debug.append
+
+    class Timer:
+        def __init__(self, _delay, _callback, args):
+            self.daemon = False
+        def start(self):
+            pass
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(ssh_manager.threading, "Timer", Timer)
+
+    def cancel_twice(message):
+        if message["type"] == "term_start":
+            manager.cancel("d1", "run-1", "owner")
+            manager.cancel("d1", "run-1", "owner")
+
+    logs = _exec(manager, session, on_push=cancel_twice)
+    assert ("warn", "■ Label did not respond to Ctrl+C, so it was stopped.") in logs
+    assert debug[-1] == "SSH [d1] command stopped: did not respond to Ctrl+C"
+
+
+def test_exec_forced_stop_exception_end_line(monkeypatch):
+    manager = _manager()
+    channel = _FakeChannel([("out", b"ready")])
+    session = _exec_session(manager, channel)
+    debug = []
+    manager._debug_write = debug.append
+
+    class Timer:
+        def __init__(self, _delay, _callback, args):
+            self.daemon = False
+        def start(self):
+            pass
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(ssh_manager.threading, "Timer", Timer)
+
+    def cancel_twice_then_raise(*_args):
+        manager.cancel("d1", "run-1", "owner")
+        manager.cancel("d1", "run-1", "owner")
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(ssh_manager, "read_channel", cancel_twice_then_raise)
+    logs = _exec(manager, session)
+    assert ("warn", "■ Label did not respond to Ctrl+C, so it was stopped.") in logs
+    assert debug[-1] == "SSH [d1] command stopped: did not respond to Ctrl+C"
 
 
 def test_writer_deadline_stops_exec_and_writer_threads_end(monkeypatch):
