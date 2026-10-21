@@ -121,12 +121,13 @@ def test_live_box_focus_output_filtering_and_end(page, app_server_with_device):
     _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "mine", "seq": 1, "data": "right\r\n"})
     expect(mine.locator(".xterm-rows")).to_contain_text("right")
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "mine"})
-    expect(mine.locator(".terminal-strip")).to_have_count(0)
+    expect(mine).to_have_count(0)
+    expect(page.locator(f'[data-console="{SEEDED_DEVICE_ID}"] .ln.out .msg')).to_contain_text("right")
     _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "mine", "seq": 2, "data": "late"})
-    expect(mine.locator(".xterm-rows")).not_to_contain_text("late")
+    expect(page.locator(f'[data-console="{SEEDED_DEVICE_ID}"]')).not_to_contain_text("late")
     _start(routes, run_id="second")
     expect(_box(page, run_id="second")).to_have_count(1)
-    expect(_box(page, run_id="mine")).to_have_count(1)
+    expect(_box(page, run_id="mine")).to_have_count(0)
 
 
 @pytest.mark.browser
@@ -359,7 +360,8 @@ def test_terminal_fast_keystrokes_arrive_in_order_and_stop_at_end(page, app_serv
     assert "".join(message["data"] for message in messages) == text
     print(f"extra terminal input: messages={len(messages)}, characters={sum(len(message['data']) for message in messages)}")
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one"})
-    box.locator("textarea").press_sequentially("late")
+    expect(box).to_have_count(0)
+    page.keyboard.insert_text("late")
     page.wait_for_timeout(100)
     assert sum(len(message["data"]) for message in _messages(routes, "term_input")) == 200
 
