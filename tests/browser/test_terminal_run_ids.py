@@ -49,9 +49,8 @@ def _start_custom_command(card) -> None:
     card.locator("[data-run]").click()
 
 
-def _dismiss_save_prompt(page) -> None:
-    expect(page.locator("#saveModal")).to_have_class(re.compile(r"\bshow\b"))
-    page.locator("#saveSkip").click()
+def _save_prompt_is_hidden_while_running(page) -> None:
+    expect(page.locator("#saveModal")).not_to_have_class(re.compile(r"\bshow\b"))
 
 
 @pytest.mark.browser
@@ -62,7 +61,7 @@ def test_stop_uses_run_id_from_run_reply_before_terminal_start(page, app_server_
 
     # No term_start at all: the reply is the only source of the run_id.
     _start_custom_command(card)
-    _dismiss_save_prompt(page)
+    _save_prompt_is_hidden_while_running(page)
     _send(routes, {"type": "ssh_status", "device_id": SEEDED_DEVICE_ID, "state": "running"})
 
     with page.expect_request("**/api/ssh/cancel") as request_info:
@@ -89,7 +88,7 @@ def test_stop_uses_run_id_when_terminal_starts_before_run_reply(page, app_server
     assert request_info.value.post_data_json == {"device_id": SEEDED_DEVICE_ID, "run_id": "run-start"}
 
     pending[0].fulfill(status=200, content_type="application/json", body='{"ok": true, "run_id": "run-start"}')
-    _dismiss_save_prompt(page)
+    _save_prompt_is_hidden_while_running(page)
 
 
 @pytest.mark.browser
@@ -106,7 +105,6 @@ def test_late_run_reply_does_not_restore_an_ended_run(page, app_server_with_devi
     _send(routes, {"type": "term_start", "device_id": SEEDED_DEVICE_ID, "run_id": "run-late", "cmd_id": "cmd-one", "cols": 80, "rows": 24})
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "run-late"})
     pending[0].fulfill(status=200, content_type="application/json", body='{"ok": true, "run_id": "run-late"}')
-    _dismiss_save_prompt(page)
 
     card.locator("[data-cancel]").click()
     expect(page.locator(f'[data-console="{SEEDED_DEVICE_ID}"] .ln.err .msg')).to_have_text(
@@ -140,12 +138,11 @@ def test_second_run_replaces_the_previous_run_id(page, app_server_with_device):
     page.route("**/api/ssh/cancel", lambda route: route.fulfill(status=200, content_type="application/json", body='{"ok": true}'))
 
     _start_custom_command(card)
-    _dismiss_save_prompt(page)
     _send(routes, {"type": "term_start", "device_id": SEEDED_DEVICE_ID, "run_id": "run-first", "cmd_id": "cmd-one", "cols": 80, "rows": 24})
     _send(routes, {"type": "ssh_status", "device_id": SEEDED_DEVICE_ID, "state": "connected"})
     _start_custom_command(card)
-    _dismiss_save_prompt(page)
     _send(routes, {"type": "term_start", "device_id": SEEDED_DEVICE_ID, "run_id": "run-second", "cmd_id": "cmd-two", "cols": 80, "rows": 24})
+    page.locator("#saveSkip").click()
     _send(routes, {"type": "ssh_status", "device_id": SEEDED_DEVICE_ID, "state": "running"})
 
     with page.expect_request("**/api/ssh/cancel") as request_info:

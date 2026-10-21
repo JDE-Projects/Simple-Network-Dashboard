@@ -737,6 +737,8 @@ let SSH_LOCKS = {};          // device_id -> true (locked by any browser)
 const TERMINAL_RUN_IDS = {}; // device_id -> current terminal run_id
 const ENDED_RUN_IDS = new Set(); // ended run_ids, so a late run reply cannot restore one
 const LOCAL_COMMAND_IDS = new Set(); // cmd_ids this page sent, so its own term_start is recognized
+const PENDING_CUSTOM_SAVES_BY_CMD_ID = new Map();
+const PENDING_CUSTOM_SAVES_BY_RUN_ID = new Map();
 let CONFIG_READ_ONLY = false;
 let RECOVERY_NOTICE_SHOWN = false;
 let currentDeviceId = null;
@@ -844,6 +846,7 @@ function connectWS() {
         break;
       case 'term_start':
         rememberRunId(msg.device_id, msg.run_id);
+        bindPendingCustomSave(msg.cmd_id, msg.run_id);
         startLiveTerminal(msg);
         break;
       case 'term_data':
@@ -1550,6 +1553,7 @@ function foldLiveTerminal(deviceId, runId) {
     rows.push(...live.appMessages);
     insertConsoleRows(live.deviceId, rows, live.box);
     disposeLiveTerminal(live);
+    offerPendingCustomSave(live.deviceId, live.runId);
   });
 }
 
@@ -1777,7 +1781,10 @@ function handleSSHStatus(id, state) {
   SSH_STATE[id] = state;
   if (state !== 'running') {
     forgetRunId(id, TERMINAL_RUN_IDS[id]);
-    if (state === 'idle') foldLiveTerminal(id);
+    if (state === 'idle') {
+      discardPendingCustomSaves(id);
+      foldLiveTerminal(id);
+    }
   }
   setTabState(id, state === 'idle' ? 'disconnected' : state);
   updateDisconnectAllBtn();
@@ -2018,17 +2025,21 @@ function wireCard(card, d) {
     const cmdId = 'c' + Date.now().toString(36) + '-' + (_cmdSeq++);
     customCmdById.set(cmdId, {command: cmd, placeholder: 'Custom Command'});
     LOCAL_COMMAND_IDS.add(cmdId);
+    const pendingSave = {deviceId: id, command: cmd, sudo, cmdId, runId: null, finished: false};
+    PENDING_CUSTOM_SAVES_BY_CMD_ID.set(cmdId, pendingSave);
     const size = await terminalRunSize(id);
     const r = await sshPost('/api/ssh/run', {device_id: id, command: cmd, use_sudo: sudo, label: 'Custom command', cmd_id: cmdId, ...size});
     if (r && r.ok) {
       rememberRunId(id, r.run_id);
+      bindPendingCustomSave(cmdId, r.run_id);
       // stored above; its echoed line will consume the tag
     } else {
       customCmdById.delete(cmdId); LOCAL_COMMAND_IDS.delete(cmdId);
+      finishPendingCustomSave(pendingSave);
       if (r && r.error) addLine(id, r.error, 'err');
       input.value = cmd; // restore the typed command so it can be corrected and retried
+      maybeOfferSave(id, cmd, sudo);
     }
-    maybeOfferSave(id, cmd, sudo);
   };
   card.querySelector('[data-run]').onclick = runCustom;
   card.querySelector('[data-custom]').addEventListener('keydown', e => { if (e.key === 'Enter') runCustom(e); });
@@ -2201,6 +2212,29 @@ $('addCmdBtn').onclick = () => { if (currentDeviceId) openCmdEditor(currentDevic
 /* ============================================================
    Save-to-library prompt
    ============================================================ */
+function bindPendingCustomSave(cmdId, runId) {
+  const pending = PENDING_CUSTOM_SAVES_BY_CMD_ID.get(cmdId);
+  if (!pending || pending.finished || !runId) return;
+  pending.runId = runId;
+  PENDING_CUSTOM_SAVES_BY_RUN_ID.set(runId, pending);
+}
+function finishPendingCustomSave(pending) {
+  if (!pending || pending.finished) return;
+  pending.finished = true;
+  PENDING_CUSTOM_SAVES_BY_CMD_ID.delete(pending.cmdId);
+  if (pending.runId) PENDING_CUSTOM_SAVES_BY_RUN_ID.delete(pending.runId);
+}
+function offerPendingCustomSave(deviceId, runId) {
+  const pending = PENDING_CUSTOM_SAVES_BY_RUN_ID.get(runId);
+  if (!pending || pending.deviceId !== deviceId) return;
+  finishPendingCustomSave(pending);
+  if (!document.querySelector('.overlay.show')) maybeOfferSave(deviceId, pending.command, pending.sudo);
+}
+function discardPendingCustomSaves(deviceId) {
+  PENDING_CUSTOM_SAVES_BY_CMD_ID.forEach(pending => {
+    if (pending.deviceId === deviceId) finishPendingCustomSave(pending);
+  });
+}
 function maybeOfferSave(deviceId, command, sudo) {
   if (!askSaveCustom || CONFIG_READ_ONLY) return;
   const d = dev(deviceId); if (!d) return;

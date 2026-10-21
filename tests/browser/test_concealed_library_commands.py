@@ -84,9 +84,6 @@ def test_library_and_custom_commands_conceal_reveal_and_export(connected_device_
             "cmd_id": custom_request["cmd_id"],
         },
     )
-    # Running a custom command offers to save it; dismiss so it stops covering Export.
-    page.click("#saveSkip")
-
     custom_line = page.locator('[data-console="dev_browsertest01"] .ln.custom-cmd').nth(1)
     expect(custom_line.locator(".msg")).to_have_text("$ Custom Command (click to reveal)")
 

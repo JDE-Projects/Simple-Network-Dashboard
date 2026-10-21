@@ -88,8 +88,6 @@ def test_run_request_has_measured_size_and_hidden_console_falls_back(page, app_s
     payload = request_info.value.post_data_json
     assert 20 <= payload["cols"] <= 500
     assert 5 <= payload["rows"] <= 200
-    page.locator("#saveSkip").click()
-
     page.evaluate("() => { document.querySelector('#consoleBody').style.display = 'none'; }")
     card.locator("[data-custom]").fill("printf hidden")
     with page.expect_request("**/api/ssh/run") as request_info:
@@ -105,7 +103,6 @@ def test_live_box_focus_output_filtering_and_end(page, app_server_with_device):
     card.locator("[data-custom]").fill("printf mine")
     with page.expect_request("**/api/ssh/run") as request_info:
         card.locator("[data-run]").click()
-    page.locator("#saveSkip").click()
     _start(routes, run_id="mine", cmd_id=request_info.value.post_data_json["cmd_id"])
     mine = _box(page, run_id="mine")
     expect(mine).to_have_class(re.compile(r"\bterminal-focused\b"))
@@ -122,6 +119,7 @@ def test_live_box_focus_output_filtering_and_end(page, app_server_with_device):
     expect(mine.locator(".xterm-rows")).to_contain_text("right")
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "mine"})
     expect(mine).to_have_count(0)
+    page.locator("#saveSkip").click()
     expect(page.locator(f'[data-console="{SEEDED_DEVICE_ID}"] .ln.out .msg')).to_contain_text("right")
     _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "mine", "seq": 2, "data": "late"})
     expect(page.locator(f'[data-console="{SEEDED_DEVICE_ID}"]')).not_to_contain_text("late")
@@ -191,10 +189,10 @@ def test_run_started_elsewhere_after_own_run_is_not_focused(page, app_server_wit
     card.locator("[data-custom]").fill("printf mine")
     with page.expect_request("**/api/ssh/run") as request_info:
         card.locator("[data-run]").click()
-    page.locator("#saveSkip").click()
     _start(routes, run_id="mine", cmd_id=request_info.value.post_data_json["cmd_id"])
     expect(_box(page, run_id="mine")).to_have_class(re.compile(r"\bterminal-focused\b"))
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "mine"})
+    page.locator("#saveSkip").click()
 
     # Another tab of the same browser starts the next run: its cmd_id is not ours.
     _start(routes, run_id="theirs", cmd_id="c-from-another-tab")
@@ -388,11 +386,11 @@ def test_own_terminal_claims_after_run_reply_and_other_runs_wait_for_click(page,
     card.locator("[data-custom]").fill("printf mine")
     with page.expect_request("**/api/ssh/run") as request_info:
         card.locator("[data-run]").click()
-    page.locator("#saveSkip").click()
     _start(routes, run_id="after-reply", cmd_id=request_info.value.post_data_json["cmd_id"])
     assert _wait_for(page, lambda: len(_messages(routes, "term_claim"))) == 1
     assert _messages(routes, "term_claim")[0]["run_id"] == "after-reply"
     _send(routes, {"type": "term_end", "device_id": SEEDED_DEVICE_ID, "run_id": "after-reply"})
+    page.locator("#saveSkip").click()
 
     _start(routes, run_id="elsewhere", cmd_id="c-from-another-tab")
     page.wait_for_timeout(300)
