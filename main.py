@@ -144,7 +144,7 @@ async def _broadcast(msg: dict):
             await ws_mgr.broadcast(msg, still_current=still_current)
 
 
-ssh_mgr = SSHManager(_broadcast, debug_log._debug_write)
+ssh_mgr = SSHManager(_broadcast, debug_log._debug_write, lambda owner: ws_mgr.owner_count(owner) > 0)
 
 
 # Shared error message for endpoints that fail to persist a device change
@@ -627,6 +627,7 @@ async def ws_endpoint(ws: WebSocket):
         return
     owner = _session_owner(ws.cookies[SESSION_COOKIE_NAME])
     await ws_mgr.connect(ws, owner)
+    ssh_mgr.owner_socket_changed(owner)
     session_token = ws.cookies.get(SESSION_COOKIE_NAME)
     # Reconnecting within the grace window keeps the owner's SSH sessions.
     _cancel_pending_release(owner)
@@ -695,10 +696,13 @@ async def ws_endpoint(ws: WebSocket):
             elif msg.get("type") == "term_resize":
                 ssh_mgr.terminal_resize(msg.get("device_id"), msg.get("run_id"), msg.get("rev"),
                     msg.get("cols"), msg.get("rows"), owner, ws_mgr.socket_id(ws))
+            elif msg.get("type") == "term_ack":
+                ssh_mgr.terminal_ack(msg.get("device_id"), msg.get("run_id"), msg.get("seq"), owner)
     except WebSocketDisconnect:
         pass
     finally:
         ws_mgr.drop(ws)
+        ssh_mgr.owner_socket_changed(owner)
         if ws_mgr.owner_count(owner) == 0:
             # Don't release immediately: a page refresh reconnects moments
             # later and should keep its SSH sessions

@@ -1335,6 +1335,21 @@ function sendTerminalMessage(message) {
   return true;
 }
 
+function acknowledgeTerminalWrite(live, seq, immediate = false) {
+  if (!live.live || !Number.isInteger(seq)) return;
+  live.ackSeq = Math.max(live.ackSeq, seq);
+  const send = () => {
+    live.ackTimer = null;
+    if (!live.live || live.ackSeq <= live.ackSentSeq) return;
+    if (sendTerminalMessage({type: 'term_ack', device_id: live.deviceId, run_id: live.runId, seq: live.ackSeq})) {
+      live.ackSentSeq = live.ackSeq;
+      live.ackAt = performance.now();
+    }
+  };
+  if (immediate || performance.now() - live.ackAt >= 50) send();
+  else if (!live.ackTimer) live.ackTimer = setTimeout(send, Math.max(1, 50 - (performance.now() - live.ackAt)));
+}
+
 function claimTerminalControl(live) {
   if (!live.live || live.yours || live.claimPending) return;
   if (sendTerminalMessage({type: 'term_claim', device_id: live.deviceId, run_id: live.runId})) {
@@ -1415,7 +1430,7 @@ function startLiveTerminal(msg, options = {}) {
   const rows = msg.rows || 30;
   const terminal = new Terminal({cols, rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
   terminal.open(frame);
-  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, lineTimes: [], fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
+  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, ackSeq: -1, ackSentSeq: -1, ackAt: -Infinity, ackTimer: null, lineTimes: [], fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
   LIVE_TERMINALS.set(msg.device_id, live);
   terminal.onLineFeed(() => {
     if (live.live && terminal.buffer.active.type === 'normal') {
@@ -1483,8 +1498,12 @@ function writeTerminalData(msg) {
   live.redrawWaiting = false;
   updateTerminalStrip(live);
   live.lastSeq = msg.seq;
+  // A hidden page's timers are throttled, so drawing (and an ack after it)
+  // could slow the command to a crawl; acknowledge on receipt instead.
+  if (document.hidden) acknowledgeTerminalWrite(live, msg.seq);
   live.terminal.write(String(msg.data || ''), () => {
     if (!live.live) return;
+    acknowledgeTerminalWrite(live, msg.seq);
     // The terminal's own parser knows when a full-screen view is open, even
     // when its switch sequence was split across two batches.
     live.fullScreen = live.terminal.buffer.active.type === 'alternate';
@@ -1529,6 +1548,7 @@ function disposeLiveTerminal(live) {
   clearTimeout(live.resizeTimer);
   clearTimeout(live.inputFullTimer);
   clearTimeout(live.redrawTimer);
+  clearTimeout(live.ackTimer);
   live.terminal.dispose();
   live.box.remove();
   if (LIVE_TERMINALS.get(live.deviceId) === live) LIVE_TERMINALS.delete(live.deviceId);
@@ -1584,6 +1604,7 @@ function restoreLiveTerminal(entry, includeHeader, carried = null) {
     live.appMessagesDropped = carried.appMessagesDropped;
   }
   live.lastSeq = typeof entry.seq === 'number' ? entry.seq : -1;
+  acknowledgeTerminalWrite(live, live.lastSeq, true);
   // Recovery writes are snapshots, not newly received output, so they never get line times.
   live.terminal.write(String(entry.partial || ''));
   if (entry.fullscreen) {

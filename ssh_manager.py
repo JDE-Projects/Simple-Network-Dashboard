@@ -149,6 +149,12 @@ class _Session:
         self.writer_stuck      = False
         self.history           = None
         self.label             = None
+        self.sent_seq          = 0
+        self.sent_bytes        = {}
+        self.acked_seq         = 0
+        self.ack_progress_at   = time.monotonic()
+        self.ack_stalled       = False
+        self.term_condition    = threading.Condition()
 
     def connect(self):
         c = paramiko.SSHClient()
@@ -191,12 +197,13 @@ class _Session:
 # ---------------------------------------------------------------------------
 
 class SSHManager:
-    def __init__(self, broadcast_fn, debug_write=None):
+    def __init__(self, broadcast_fn, debug_write=None, owner_watching=None):
         """broadcast_fn: async coroutine function that pushes a dict to all WS clients.
         debug_write: optional callable(str) used to log internal exception detail
         that must not reach the browser; defaults to a no-op."""
         self._broadcast   = broadcast_fn
         self._debug_write = debug_write if debug_write is not None else (lambda _text: None)
+        self._owner_watching = owner_watching if owner_watching is not None else (lambda _owner: True)
         self._delivery  = DeliveryQueue(lambda msg: self._deliver(msg), self._debug_write)
         self.sessions: dict[str, _Session] = {}
         self._pending: dict[str, _PendingHostKey] = {}  # device_id -> pending prompt
@@ -275,6 +282,13 @@ class SSHManager:
     def shutdown_delivery(self):
         """Wake terminal producers and stop the event-loop delivery drain."""
         self._delivery.shutdown()
+
+    def owner_socket_changed(self, owner: str) -> None:
+        """Wake runs that may be waiting for an acknowledgement from this owner."""
+        for sess in list(self.sessions.values()):
+            if sess.owner == owner:
+                with sess.term_condition:
+                    sess.term_condition.notify_all()
 
     async def _deliver(self, msg: dict):
         """Runs on the event loop thread. `_push` only schedules delivery, so
@@ -641,6 +655,44 @@ class SSHManager:
             sess.writer.resize(sess.cols, sess.rows)
             return {"ok": True}
 
+    def terminal_ack(self, device_id, run_id, seq, owner) -> None:
+        """Record completed browser terminal writes for the current owner run."""
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            return
+        with self._device_lock(device_id):
+            sess = self.sessions.get(device_id)
+            if (sess is None or sess.owner != owner or sess.state != "connected"
+                    or not sess.busy or sess.run_id != run_id):
+                return
+            with sess.term_condition:
+                if seq > sess.sent_seq or seq <= sess.acked_seq:
+                    return
+                sess.acked_seq = seq
+                sess.ack_progress_at = time.monotonic()
+                sess.ack_stalled = False
+                for sent_seq in [item for item in sess.sent_bytes if item <= seq]:
+                    del sess.sent_bytes[sent_seq]
+                sess.term_condition.notify_all()
+
+    def _wait_for_terminal_ack(self, device_id, sess, run_id) -> bool:
+        """Pause SSH reading while the browser has too much unwritten output."""
+        with sess.term_condition:
+            while True:
+                if self.sessions.get(device_id) is not sess or sess.run_id != run_id:
+                    return False
+                if sess.cancelled:
+                    return True
+                if not self._owner_watching(sess.owner) or sess.ack_stalled:
+                    return True
+                if sum(sess.sent_bytes.values()) <= config.TERM_UNACKED_MAX_BYTES:
+                    return True
+                remaining = config.TERM_ACK_STALL_SECONDS - (time.monotonic() - sess.ack_progress_at)
+                if remaining <= 0:
+                    sess.ack_stalled = True
+                    self._debug_write("terminal acknowledgements stalled")
+                    return True
+                sess.term_condition.wait(min(0.25, remaining))
+
     def cancel(self, device_id: str, run_id: str = None, owner: str = None) -> dict:
         with self._device_lock(device_id):
             sess = self.sessions.get(device_id)
@@ -654,6 +706,8 @@ class SSHManager:
             # takes effect instead of being silently dropped.
             sess.cancelled = True
             sess.cancel_requested = True
+            with sess.term_condition:
+                sess.term_condition.notify_all()
             channel = sess.channel
             ready = channel is not None and sess.auth_complete and sess.writer is not None
             if ready and sess.stop_timer is not None:
@@ -717,6 +771,11 @@ class SSHManager:
             sess.last_io = time.monotonic()
             sess.history = TerminalHistory()
             sess.label = label
+            with sess.term_condition:
+                sess.sent_seq = sess.acked_seq = 0
+                sess.sent_bytes.clear()
+                sess.ack_progress_at = time.monotonic()
+                sess.ack_stalled = False
             sess.cols, sess.rows = cols, rows
             run_id = sess.run_id
 
@@ -801,15 +860,22 @@ class SSHManager:
 
             def emit(text, seq):
                 send_start()
+                if not self._wait_for_terminal_ack(device_id, sess, run_id):
+                    return False
                 with self._device_lock(device_id):
                     if self.sessions.get(device_id) is not sess or sess.run_id != run_id:
                         return False
                     if sess.history is not None:
                         sess.history.feed(text, seq)
                     sess.last_io = time.monotonic()
-                return self._push_terminal({"type": "term_data", "device_id": device_id,
+                pushed = self._push_terminal({"type": "term_data", "device_id": device_id,
                     "run_id": run_id, "seq": seq, "data": text, "_owner": sess.owner, "_gen": gen},
                     lambda: self._is_current(device_id, sess) and sess.run_id == run_id)
+                if pushed:
+                    with sess.term_condition:
+                        sess.sent_seq = seq
+                        sess.sent_bytes[seq] = len(text.encode("utf-8"))
+                return pushed
 
             if not feed_sudo:
                 send_start()
@@ -900,6 +966,8 @@ class SSHManager:
                 sess.writer = None
                 sess.history = None
                 sess.label = None
+                with sess.term_condition:
+                    sess.term_condition.notify_all()
                 owner = sess.owner
                 still_current = True
             else:
@@ -935,6 +1003,13 @@ class SSHManager:
                     "label": sess.label,
                     **sess.history.snapshot(),
                 })
+                with sess.term_condition:
+                    if sess.sent_seq > sess.acked_seq:
+                        sess.acked_seq = sess.sent_seq
+                        sess.ack_progress_at = time.monotonic()
+                        sess.ack_stalled = False
+                        sess.sent_bytes.clear()
+                        sess.term_condition.notify_all()
         return trim_to_budget(terminals, config.TERM_INIT_HISTORY_MAX_CHARS)
 
     def request_terminal_redraw(self, device_id: str, run_id: str, owner: str) -> bool:

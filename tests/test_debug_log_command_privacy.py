@@ -138,6 +138,8 @@ def test_terminal_history_input_and_sudo_password_are_not_logged(tmp_path, monke
         raw_command_length=len(MARKER), run_id="accepted",
     )
 
+    manager.terminal_ack("device-7", "accepted", 1, "owner-1")
+
     assert snapshots and MARKER in snapshots[0]["lines"]
     assert manager.owner_terminal_snapshot("owner-1") == []
     assert MARKER not in open(path, encoding="utf-8").read()
