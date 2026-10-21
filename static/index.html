@@ -1316,14 +1316,34 @@ function terminalHasFocus(live) {
   return document.activeElement === live.terminal.textarea;
 }
 
+const TERMINAL_PAGER_PROMPTS = [
+  /^:$/,
+  /^(\S.* )?\(END\)( - Next: \S.*)?( \(column \d+\))?$/,
+  /^(\S.* )?lines \d+-\d+(\/\d+)?( byte \d+(\/\d+)?)?( \d+%)?( \(END\))?( - Next: \S.*)?( \(column \d+\))?( \(press RETURN\))?$/,
+  /^--More--( ?\(\d+%\))?$/,
+  /^Manual page .* line \d+.*\(press h for help or q to quit\)$/,
+];
+
+function terminalPagerPrompt(live) {
+  const buffer = live.terminal.buffer.active;
+  const line = buffer.getLine(buffer.baseY + buffer.cursorY);
+  if (!line) return false;
+  const text = line.translateToString(true).trim();
+  return TERMINAL_PAGER_PROMPTS.some(pattern => pattern.test(text));
+}
+
 function updateTerminalStrip(live) {
   if (!live.live || live.inputFull) return;
   if (live.redrawWaiting) {
     live.strip.textContent = 'Waiting for the program to redraw. Press a key in the window if it stays blank.';
-  } else if (live.yours && terminalHasFocus(live)) {
-    live.strip.textContent = 'Running. Your typing goes to this command.';
   } else if (live.yours === false) {
     live.strip.textContent = 'Typing is in another tab. Click here to type.';
+  } else if (live.pagerWaiting) {
+    live.strip.textContent = live.yours && terminalHasFocus(live)
+      ? 'Paged view? q closes it · Ctrl+C stops the command'
+      : 'Paged view? Click here, then q closes it';
+  } else if (live.yours && terminalHasFocus(live)) {
+    live.strip.textContent = 'Running. Your typing goes to this command.';
   } else {
     live.strip.textContent = 'Running. Click in this window to type.';
   }
@@ -1372,6 +1392,8 @@ async function resizeLiveTerminal(live) {
   if (size.cols === live.terminal.cols && size.rows === live.terminal.rows) return;
   live.terminal.resize(size.cols, size.rows);
   live.rows = size.rows;
+  live.pagerWaiting = terminalPagerPrompt(live);
+  updateTerminalStrip(live);
   refreshLiveTerminal(live);
   sendTerminalMessage({type: 'term_resize', device_id: live.deviceId, run_id: live.runId, rev: live.rev, ...size});
 }
@@ -1430,7 +1452,7 @@ function startLiveTerminal(msg, options = {}) {
   const rows = msg.rows || 30;
   const terminal = new Terminal({cols, rows, scrollback: 5000, fontFamily: 'JetBrains Mono, monospace', fontSize: 12, theme: terminalTheme()});
   terminal.open(frame);
-  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, ackSeq: -1, ackSentSeq: -1, ackAt: -Infinity, ackTimer: null, lineTimes: [], fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
+  const live = {deviceId: msg.device_id, runId: msg.run_id, terminal, box, strip, frame, rows, fullScreen: false, lastSeq: -1, live: true, folding: false, yours: undefined, rev: undefined, claimPending: false, resizeTimer: null, inputFullTimer: null, inputFull: false, redrawTimer: null, redrawWaiting: false, pagerWaiting: false, ackSeq: -1, ackSentSeq: -1, ackAt: -Infinity, ackTimer: null, lineTimes: [], fullScreenClosures: [], appMessages: [], appMessagesDropped: false};
   LIVE_TERMINALS.set(msg.device_id, live);
   terminal.onLineFeed(() => {
     if (live.live && terminal.buffer.active.type === 'normal') {
@@ -1507,6 +1529,8 @@ function writeTerminalData(msg) {
     // The terminal's own parser knows when a full-screen view is open, even
     // when its switch sequence was split across two batches.
     live.fullScreen = live.terminal.buffer.active.type === 'alternate';
+    live.pagerWaiting = terminalPagerPrompt(live);
+    updateTerminalStrip(live);
     refreshLiveTerminal(live);
   });
 }
@@ -1606,7 +1630,11 @@ function restoreLiveTerminal(entry, includeHeader, carried = null) {
   live.lastSeq = typeof entry.seq === 'number' ? entry.seq : -1;
   acknowledgeTerminalWrite(live, live.lastSeq, true);
   // Recovery writes are snapshots, not newly received output, so they never get line times.
-  live.terminal.write(String(entry.partial || ''));
+  live.terminal.write(String(entry.partial || ''), () => {
+    if (!live.live) return;
+    live.pagerWaiting = terminalPagerPrompt(live);
+    updateTerminalStrip(live);
+  });
   if (entry.fullscreen) {
     live.fullScreen = true;
     live.terminal.write('\x1b[?1049h', () => refreshLiveTerminal(live));
