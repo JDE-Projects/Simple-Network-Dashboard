@@ -6,6 +6,6 @@
 # and on the Pi deployment.
 fastapi==0.156.1
 uvicorn[standard]==0.54.0
-paramiko==5.0.0
+paramiko==5.1.0
 httpx==0.28.1
 argon2-cffi==25.1.0
