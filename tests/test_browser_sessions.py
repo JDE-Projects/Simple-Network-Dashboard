@@ -192,10 +192,10 @@ def test_logout_releases_only_its_session_owner_immediately(tmp_path: Path, monk
         main.SessionStore.token_digest(signed_out_token),
         main.SessionStore.token_digest(other_token),
     }
-    released: list[str] = []
+    released: list[tuple[str, str]] = []
 
-    def release_owner(owner: str) -> None:
-        released.append(owner)
+    def release_owner(owner: str, *, reason: str = "unknown") -> None:
+        released.append((owner, reason))
         owners_with_sessions.remove(owner)
 
     monkeypatch.setattr(main.ssh_mgr, "release_owner", release_owner)
@@ -204,7 +204,7 @@ def test_logout_releases_only_its_session_owner_immediately(tmp_path: Path, monk
 
     signed_out_owner = main.SessionStore.token_digest(signed_out_token)
     assert response.status_code == 200
-    assert released == [signed_out_owner]
+    assert released == [(signed_out_owner, "signed out")]
     assert owners_with_sessions == {main.SessionStore.token_digest(other_token)}
 
 
@@ -218,7 +218,7 @@ def test_logout_logs_ssh_release_failure_but_still_completes(tmp_path: Path, mon
     assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
     debug_lines: list[str] = []
     marker = "release-marker"
-    monkeypatch.setattr(main.ssh_mgr, "release_owner", lambda _owner: (_ for _ in ()).throw(RuntimeError(marker)))
+    monkeypatch.setattr(main.ssh_mgr, "release_owner", lambda _owner, **_kwargs: (_ for _ in ()).throw(RuntimeError(marker)))
     monkeypatch.setattr(main.debug_log, "_debug_write", debug_lines.append)
 
     response = client.post("/api/auth/logout", headers=_csrf_headers(client))
@@ -257,7 +257,7 @@ def test_ssh_routes_use_the_signed_in_session_owner_and_ignore_legacy_header(tmp
         return {"ok": True}
 
     monkeypatch.setattr(main.ssh_mgr, "connect", lambda _id, _password, _device, owner: protect(owner))
-    monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda _id, owner: protect(owner))
+    monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda _id, owner, **_kwargs: protect(owner))
     monkeypatch.setattr(main.ssh_mgr, "run_command", lambda _id, _cmd, _sudo, _label, owner, cmd_id, cols, rows: protect(owner))
     monkeypatch.setattr(main.ssh_mgr, "cancel", lambda _id, _run_id, owner: protect(owner))
     monkeypatch.setattr(main.ssh_mgr, "trust_host_key", lambda _id, _code, owner: protect(owner))
@@ -276,6 +276,87 @@ def test_ssh_routes_use_the_signed_in_session_owner_and_ignore_legacy_header(tmp
     assert all(response.json() == {"ok": False, "not_owner": True} for response in responses)
     assert observed == [second_owner] * len(responses)
     assert first_owner not in observed
+
+
+def test_ssh_disconnect_route_passes_user_disconnected_reason(tmp_path: Path, monkeypatch) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth.publish_auth_state(auth_file, auth.create_auth_state("a" * 15))
+    store = SessionStore(tmp_path / "sessions.json")
+    monkeypatch.setattr(main, "AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(main, "_session_store", store)
+    client = TestClient(main.app, base_url="https://testserver")
+    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
+    calls = []
+    monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda device_id, owner, **kwargs: calls.append((device_id, owner, kwargs)) or {"ok": True})
+
+    response = client.post("/api/ssh/disconnect", json={"device_id": "device-1"}, headers=_csrf_headers(client))
+
+    assert response.json() == {"ok": True}
+    assert calls == [("device-1", main.SessionStore.token_digest(client.cookies[main.SESSION_COOKIE_NAME]), {
+        "reason": "user disconnected"})]
+
+
+def test_delete_device_route_passes_device_deleted_reason(tmp_path: Path, monkeypatch) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth.publish_auth_state(auth_file, auth.create_auth_state("a" * 15))
+    store = SessionStore(tmp_path / "sessions.json")
+    monkeypatch.setattr(main, "AUTH_FILE", str(auth_file))
+    monkeypatch.setattr(main, "_session_store", store)
+    monkeypatch.setattr(main.runtime_state, "_recovery_mode", False)
+    monkeypatch.setattr(main.runtime_state, "_devices_cache", [{"id": "device-1", "name": "Pi"}])
+    monkeypatch.setattr(main.persistence, "_save", lambda _devices: True)
+    monkeypatch.setattr(main.ws_mgr, "unselect_device_everywhere", lambda _device_id: None)
+
+    async def broadcast(_message):
+        pass
+
+    calls = []
+    monkeypatch.setattr(main.ws_mgr, "broadcast", broadcast)
+    monkeypatch.setattr(main.ssh_mgr, "disconnect", lambda device_id, **kwargs: calls.append((device_id, kwargs)))
+    client = TestClient(main.app, base_url="https://testserver")
+    assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
+
+    response = client.delete("/api/devices/device-1", headers=_csrf_headers(client))
+
+    assert response.json()["ok"] is True
+    assert calls == [("device-1", {"reason": "device deleted"})]
+
+
+def test_release_after_grace_passes_browser_closed_reason(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(main, "WS_RELEASE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(main, "_pending_releases", {"owner-1": object()})
+    monkeypatch.setattr(main.ws_mgr, "owner_count", lambda _owner: 0)
+    monkeypatch.setattr(main.ssh_mgr, "release_owner", lambda owner, **kwargs: calls.append((owner, kwargs)))
+
+    asyncio.run(main._release_after_grace("owner-1"))
+
+    assert calls == [("owner-1", {"reason": "browser closed"})]
+
+
+def test_lifespan_passes_server_shutdown_reason(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(main.persistence, "_load_startup_devices", lambda: ([], False, False))
+    monkeypatch.setattr(main.os.path, "exists", lambda _path: False)
+    monkeypatch.setattr(main.ssh_mgr, "set_loop", lambda _loop: None)
+    monkeypatch.setattr(main.ssh_mgr, "shutdown_delivery", lambda: None)
+    monkeypatch.setattr(main.ssh_mgr, "disconnect_all", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(main.debug_log, "configure", lambda **_kwargs: None)
+    monkeypatch.setattr(main.debug_log, "close_on_shutdown", lambda: None)
+
+    async def wait_until_cancelled():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "_metrics_loop", wait_until_cancelled)
+    monkeypatch.setattr(main, "_idle_loop", wait_until_cancelled)
+
+    async def run_lifespan() -> None:
+        async with main.lifespan(main.app):
+            pass
+
+    asyncio.run(run_lifespan())
+
+    assert calls == [{"reason": "server shutdown"}]
 
 
 def test_login_failures_are_throttled_without_permanent_lockout(tmp_path: Path, monkeypatch) -> None:

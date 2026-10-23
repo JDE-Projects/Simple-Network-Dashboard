@@ -31,7 +31,7 @@ def _mgr():
 
 
 def _device(device_id="d1"):
-    return {"id": device_id, "host": "10.0.0.9", "username": "pi"}
+    return {"id": device_id, "name": "Pi", "host": "10.0.0.9", "username": "pi"}
 
 
 def _pending_session(mgr, device_id="d1", owner="owner-1", code="the-code", generation=1):
@@ -73,6 +73,8 @@ def test_accept_with_matching_owner_and_code_pins_the_key_and_is_one_time(monkey
     _pending_session(mgr, owner="owner-1", code="the-code")
 
     saved = {}
+    debug = []
+    mgr._debug_write = debug.append
 
     def fake_load():
         return ssh_manager.paramiko.HostKeys()
@@ -89,6 +91,9 @@ def test_accept_with_matching_owner_and_code_pins_the_key_and_is_one_time(monkey
     assert result["host"] == "10.0.0.9"
     assert "d1" not in mgr._pending
     assert "hk" in saved
+    assert debug == [
+        f'SSH [d1 "Pi" 10.0.0.9] host key approved: ssh-ed25519 {ssh_manager._fp(_FakeKey())}'
+    ]
 
     # One-time: the same code cannot be replayed now that the pending is gone.
     result2 = mgr.trust_host_key("d1", "the-code", "owner-1")
@@ -121,7 +126,7 @@ def test_reject_broadcasts_idle_and_unlock(monkeypatch):
 
     statuses = []
     locks = []
-    monkeypatch.setattr(mgr, "_status", lambda did, state, owner=None, gen=None: statuses.append((did, state)))
+    monkeypatch.setattr(mgr, "_status", lambda did, state, *_args, **_kwargs: statuses.append((did, state)))
     monkeypatch.setattr(mgr, "_lock", lambda did, locked: locks.append((did, locked)))
 
     result = mgr.reject_host_key("d1", "the-code", "owner-1")
@@ -129,6 +134,20 @@ def test_reject_broadcasts_idle_and_unlock(monkeypatch):
     assert result == {"ok": True}
     assert ("d1", "idle") in statuses
     assert ("d1", False) in locks
+
+
+def test_reject_reports_host_key_declined_reason(monkeypatch):
+    mgr = _mgr()
+    sess = _pending_session(mgr)
+    sess.client = _FakeClient()
+    statuses = []
+    monkeypatch.setattr(mgr, "_status", lambda did, state, owner, **kwargs: statuses.append((did, state, owner, kwargs)))
+    monkeypatch.setattr(mgr, "_lock", lambda *args, **kwargs: None)
+
+    assert mgr.reject_host_key("d1", "the-code", "owner-1") == {"ok": True}
+
+    assert statuses == [("d1", "idle", "owner-1", {
+        "debug_tag": 'd1 "Pi" 10.0.0.9', "reason": "host key declined"})]
 
 
 def test_reject_with_wrong_code_or_owner_does_not_consume_the_pending():
@@ -171,6 +190,22 @@ def test_idle_sweep_clears_expired_pending_and_releases_the_reservation(monkeypa
 
     assert "d1" not in mgr._pending
     assert "d1" not in mgr.sessions
+
+
+def test_idle_sweep_reports_host_key_prompt_expired_reason(monkeypatch):
+    mgr = _mgr()
+    sess = _pending_session(mgr)
+    sess.client = _FakeClient()
+    mgr._pending["d1"].created_at -= (ssh_manager.HOST_KEY_PENDING_SECONDS + 1)
+    statuses = []
+    monkeypatch.setattr(mgr, "_status", lambda did, state, owner, **kwargs: statuses.append((did, state, owner, kwargs)))
+    monkeypatch.setattr(mgr, "_lock", lambda *args, **kwargs: None)
+
+    import time
+    mgr._sweep_expired_host_key_prompts(time.monotonic())
+
+    assert statuses == [("d1", "idle", "owner-1", {
+        "debug_tag": 'd1 "Pi" 10.0.0.9', "reason": "host-key prompt expired"})]
 
 
 def test_disconnect_clears_a_pending_host_key_prompt():

@@ -41,7 +41,7 @@ def _manager():
 
 
 def _session(manager, *, password=MARKER):
-    device = {"id": "device-7", "host": "host.example", "username": "operator"}
+    device = {"id": "device-7", "name": "Pi", "host": "host.example", "username": "operator"}
     sess = ssh_manager._Session(device, password, "owner-1", "device-7")
     sess.state = "connected"
     sess.generation = 1
@@ -50,7 +50,7 @@ def _session(manager, *, password=MARKER):
 
 
 def _command_lines(path):
-    return [line for line in open(path, encoding="utf-8") if "SSH [device-7] command" in line]
+    return [line for line in open(path, encoding="utf-8") if 'SSH [device-7 "Pi" host.example] command' in line]
 
 
 def _assert_one_run(path, start, end):
@@ -77,8 +77,8 @@ def test_success_logs_only_raw_length_and_outcome(tmp_path, monkeypatch):
     assert MARKER not in content
     _assert_one_run(
         path,
-        f"SSH [device-7] command started (sudo: no, {len(raw)} chars)",
-        "SSH [device-7] command finished (exit code 0)",
+        f'SSH [device-7 "Pi" host.example] command started (sudo: no, {len(raw)} chars)',
+        'SSH [device-7 "Pi" host.example] command finished (exit code 0)',
     )
 
 
@@ -108,9 +108,9 @@ def test_sudo_acceptance_and_rejection_have_private_terminal_lines(tmp_path, mon
     content = open(path, encoding="utf-8").read()
     assert MARKER not in content
     lines = _command_lines(path)
-    assert sum(line.rstrip().endswith(f"SSH [device-7] command started (sudo: yes, {len(raw)} chars)") for line in lines) == 2
-    assert sum(line.rstrip().endswith("SSH [device-7] command finished (exit code 0)") for line in lines) == 1
-    assert sum(line.rstrip().endswith("SSH [device-7] command stopped: sudo did not accept the password") for line in lines) == 1
+    assert sum(line.rstrip().endswith(f'SSH [device-7 "Pi" host.example] command started (sudo: yes, {len(raw)} chars)') for line in lines) == 2
+    assert sum(line.rstrip().endswith('SSH [device-7 "Pi" host.example] command finished (exit code 0)') for line in lines) == 1
+    assert sum(line.rstrip().endswith('SSH [device-7 "Pi" host.example] command stopped: sudo did not accept the password') for line in lines) == 1
     assert len(lines) == 4
 
 
@@ -168,8 +168,8 @@ def test_cancel_before_channel_and_mid_run_each_log_one_cancelled_end(tmp_path, 
     content = open(path, encoding="utf-8").read()
     assert MARKER not in content
     lines = _command_lines(path)
-    assert sum(line.rstrip().endswith(f"SSH [device-7] command started (sudo: no, {len(raw)} chars)") for line in lines) == 2
-    assert sum(line.rstrip().endswith("SSH [device-7] command cancelled") for line in lines) == 2
+    assert sum(line.rstrip().endswith(f'SSH [device-7 "Pi" host.example] command started (sudo: no, {len(raw)} chars)') for line in lines) == 2
+    assert sum(line.rstrip().endswith('SSH [device-7 "Pi" host.example] command cancelled') for line in lines) == 2
     assert len(lines) == 4
 
 
@@ -224,8 +224,8 @@ def test_command_exceptions_log_only_the_exception_type(tmp_path, monkeypatch, c
     assert MARKER not in content
     _assert_one_run(
         path,
-        f"SSH [device-7] command started (sudo: no, {len(raw)} chars)",
-        f"SSH [device-7] command failed ({failure.__name__})",
+        f'SSH [device-7 "Pi" host.example] command started (sudo: no, {len(raw)} chars)',
+        f'SSH [device-7 "Pi" host.example] command failed ({failure.__name__})',
     )
 
 
@@ -240,7 +240,7 @@ def test_not_connected_does_not_start_and_has_one_terminal_line(tmp_path, monkey
     content = open(path, encoding="utf-8").read()
     assert MARKER not in content
     assert len(_command_lines(path)) == 1
-    assert _command_lines(path)[0].rstrip().endswith("SSH [device-7] command not started: not connected")
+    assert _command_lines(path)[0].rstrip().endswith('SSH [device-7 "Pi" host.example] command not started: not connected')
 
 
 def test_replaced_session_still_gets_one_server_side_terminal_line(tmp_path, monkeypatch):
@@ -262,8 +262,8 @@ def test_replaced_session_still_gets_one_server_side_terminal_line(tmp_path, mon
     assert MARKER not in content
     _assert_one_run(
         path,
-        f"SSH [device-7] command started (sudo: no, {len(raw)} chars)",
-        "SSH [device-7] command ended: session replaced or disconnected",
+        f'SSH [device-7 "Pi" host.example] command started (sudo: no, {len(raw)} chars)',
+        'SSH [device-7 "Pi" host.example] command ended: session replaced or disconnected',
     )
 
 
@@ -304,6 +304,52 @@ def test_broadcast_skips_ssh_log_debug_writes_and_preserves_delivery(tmp_path, m
 
     assert delivered == [message]
     assert MARKER not in open(path, encoding="utf-8").read()
+
+
+@pytest.mark.parametrize("reason", [
+    "user disconnected",
+    "device deleted",
+    "signed out",
+    "browser closed",
+    "idle timeout",
+    "host key declined",
+    "host key approval failed",
+    "host-key prompt expired",
+    "connect failed",
+    "server shutdown",
+])
+def test_idle_status_logs_each_reason_and_hides_debug_metadata(tmp_path, monkeypatch, reason):
+    _enable(tmp_path, monkeypatch)
+    lines = []
+    delivered = []
+
+    async def _broadcast(message):
+        delivered.append(message)
+
+    monkeypatch.setattr(main.debug_log, "_debug_write", lines.append)
+    monkeypatch.setattr(main.ws_mgr, "broadcast", _broadcast)
+    message = {"type": "ssh_status", "device_id": "d1", "state": "idle",
+               "_debug_tag": 'd1 "Pi" 10.0.0.4', "_reason": reason}
+
+    asyncio.run(main._broadcast(message))
+
+    assert lines == [f'SSH [d1 "Pi" 10.0.0.4] → idle ({reason})']
+    assert delivered == [{"type": "ssh_status", "device_id": "d1", "state": "idle"}]
+
+
+def test_status_debug_metadata_is_hidden_when_debug_logging_is_off(monkeypatch):
+    delivered = []
+
+    async def _broadcast(message):
+        delivered.append(message)
+
+    monkeypatch.setattr(main.ws_mgr, "broadcast", _broadcast)
+    message = {"type": "ssh_status", "device_id": "d1", "state": "idle",
+               "_debug_tag": 'd1 "Pi" 10.0.0.4', "_reason": "unknown"}
+
+    asyncio.run(main._broadcast(message))
+
+    assert delivered == [{"type": "ssh_status", "device_id": "d1", "state": "idle"}]
 
 
 def test_paramiko_logs_are_sanitized_and_never_reach_stderr(tmp_path, monkeypatch, capsys):

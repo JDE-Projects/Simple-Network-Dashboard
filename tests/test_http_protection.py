@@ -140,8 +140,9 @@ def test_csrf_rejection_does_not_invoke_the_endpoint(tmp_path: Path, monkeypatch
     client, _store = _configured_client(tmp_path, monkeypatch)
     calls = 0
 
-    def release_owner(_owner: str):
+    def release_owner(_owner: str, *, reason: str = "unknown"):
         nonlocal calls
+        assert reason == "user disconnected"
         calls += 1
 
     monkeypatch.setattr(main.ssh_mgr, "release_owner", release_owner)

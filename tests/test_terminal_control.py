@@ -86,7 +86,7 @@ def test_control_rejections_handover_and_queue_limit(monkeypatch):
     monkeypatch.setattr(config, "TERM_PENDING_INPUT_MAX_BYTES", 1)
     assert manager.terminal_input("d1", "run-1", 1, "xx", "owner", "socket-a") == {"ok": False, "full": True}
     assert manager.claim_terminal("d1", "run-1", "owner", "socket-b") == {"ok": True, "rev": 2}
-    assert all(line == "SSH [d1] terminal input refused" for line in debug)
+    assert all(line == 'SSH [d1 "" host] terminal input refused' for line in debug)
     _stop(session)
 
 
@@ -203,7 +203,7 @@ def test_busy_silence_warns_once_then_times_out(monkeypatch):
     now = [10000.0]
     monkeypatch.setattr(ssh_manager.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(manager, "_sweep_expired_host_key_prompts", lambda _now: None)
-    monkeypatch.setattr(manager, "_close", lambda *_args: None)
+    monkeypatch.setattr(manager, "_close", lambda *_args, **_kwargs: None)
     pushed = []
     manager._push = pushed.append
     session.last_io = now[0] - config.TERM_SILENCE_SECONDS
@@ -269,7 +269,7 @@ def test_exec_stop_end_lines_and_debug_messages(monkeypatch):
     logs = _exec(manager, session)
     assert ("warn", "■ Label cancelled.") in logs
     assert not any("exited with code" in text for _level, text in logs)
-    assert debug[-1] == "SSH [d1] command cancelled"
+    assert debug[-1] == 'SSH [d1 "" host] command cancelled'
 
 
 
@@ -303,7 +303,7 @@ def test_exec_forced_stop_end_line_and_debug_message(monkeypatch):
     logs = _exec(manager, session, on_push=cancel_then_force)
     assert ("warn", "■ Label did not respond to Ctrl+C, so it was stopped.") in logs
     assert not any("exited with code" in text for _level, text in logs)
-    assert debug[-1] == "SSH [d1] command stopped: did not respond to Ctrl+C"
+    assert debug[-1] == 'SSH [d1 "" host] command stopped: did not respond to Ctrl+C'
 
 
 def test_exec_second_stop_end_line_and_debug_message(monkeypatch):
@@ -330,7 +330,7 @@ def test_exec_second_stop_end_line_and_debug_message(monkeypatch):
 
     logs = _exec(manager, session, on_push=cancel_twice)
     assert ("warn", "■ Label did not respond to Ctrl+C, so it was stopped.") in logs
-    assert debug[-1] == "SSH [d1] command stopped: did not respond to Ctrl+C"
+    assert debug[-1] == 'SSH [d1 "" host] command stopped: did not respond to Ctrl+C'
 
 
 def test_exec_forced_stop_exception_end_line(monkeypatch):
@@ -358,7 +358,7 @@ def test_exec_forced_stop_exception_end_line(monkeypatch):
     monkeypatch.setattr(ssh_manager, "read_channel", cancel_twice_then_raise)
     logs = _exec(manager, session)
     assert ("warn", "■ Label did not respond to Ctrl+C, so it was stopped.") in logs
-    assert debug[-1] == "SSH [d1] command stopped: did not respond to Ctrl+C"
+    assert debug[-1] == 'SSH [d1 "" host] command stopped: did not respond to Ctrl+C'
 
 
 def test_writer_deadline_stops_exec_and_writer_threads_end(monkeypatch):
@@ -380,7 +380,7 @@ def test_writer_deadline_stops_exec_and_writer_threads_end(monkeypatch):
     manager._finish_exec = lambda saved: (writers.append(saved.writer), original_finish(saved))[1]
     logs = _exec(manager, session)
     assert ("warn", "■ Label did not respond to Ctrl+C, so it was stopped.") in logs
-    assert debug[-1] == "SSH [d1] command stopped: device stopped accepting input"
+    assert debug[-1] == 'SSH [d1 "" host] command stopped: device stopped accepting input'
     assert not writers[0].thread.is_alive()
 
 

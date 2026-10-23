@@ -81,6 +81,26 @@ def test_idle_timeout_tears_down_the_session_and_pops_the_owner(monkeypatch):
     assert "owner-1" not in mgr._owner_activity
 
 
+def test_idle_timeout_reports_its_idle_reason(monkeypatch):
+    mgr = _mgr()
+    _connected_session(mgr)
+    mgr._owner_touch("owner-1")
+
+    statuses = []
+    monkeypatch.setattr(mgr, "_status", lambda did, state, owner, **kwargs: statuses.append((did, state, owner, kwargs)))
+    monkeypatch.setattr(mgr, "_lock", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mgr, "_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mgr, "_push", lambda _message: None)
+    mgr._owner_activity["owner-1"]["last_active"] = (
+        time.monotonic() - (ssh_manager.IDLE_TIMEOUT_SECONDS + 1))
+
+    mgr.tick_idle()
+
+    assert len(statuses) == 1
+    assert statuses[0][:3] == ("d1", "idle", "owner-1")
+    assert statuses[0][3]["reason"] == "idle timeout"
+
+
 def test_busy_owner_is_treated_as_active_and_not_timed_out(monkeypatch):
     mgr = _mgr()
     sess = _connected_session(mgr)

@@ -107,6 +107,27 @@ def test_trust_failure_tears_down_pending_session(tmp_path, monkeypatch):
     assert session.password is None
 
 
+def test_trust_failure_reports_host_key_approval_failed_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
+    monkeypatch.setattr(
+        ssh_manager,
+        "_save_known_hosts",
+        lambda _host_keys: (_ for _ in ()).throw(OSError("save failed")),
+    )
+    manager = _manager()
+    device_id, owner, _session = _pending(manager)
+    statuses = []
+    monkeypatch.setattr(manager, "_status", lambda did, state, status_owner, **kwargs: statuses.append((did, state, status_owner, kwargs)))
+    monkeypatch.setattr(manager, "_lock", lambda *args, **kwargs: None)
+
+    assert manager.trust_host_key(device_id, "approval-code", owner) == {
+        "ok": False, "error": "Could not save the host key."}
+
+    assert len(statuses) == 1
+    assert statuses[0][:3] == (device_id, "idle", owner)
+    assert statuses[0][3]["reason"] == "host key approval failed"
+
+
 def test_trust_failure_does_not_close_replacement_session(tmp_path, monkeypatch):
     monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
     manager = _manager()
