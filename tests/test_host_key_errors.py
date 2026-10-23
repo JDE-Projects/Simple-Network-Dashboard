@@ -31,7 +31,8 @@ def test_trust_host_key_hides_raw_error(monkeypatch):
     assert result == {"ok": False, "error": "Could not save the host key."}
     assert "detail" not in result
     assert "secret internals" not in result["error"]
-    assert messages == ["trust_host_key failed: RuntimeError: secret internals"]
+    assert messages == ["trust_host_key failed: RuntimeError"]
+    assert "secret internals" not in messages[0]
 
 
 def test_trust_host_key_missing_pending_is_plain():
@@ -53,4 +54,5 @@ def test_forget_host_key_hides_raw_error(monkeypatch):
     assert result == {"ok": False, "error": "Could not forget the host key."}
     assert "detail" not in result
     assert "secret internals" not in result["error"]
-    assert messages == ["forget_host_key failed: RuntimeError: secret internals"]
+    assert messages == ["forget_host_key failed: RuntimeError"]
+    assert "secret internals" not in messages[0]

@@ -360,8 +360,11 @@ async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None
             async with client.stream("GET", url) as resp:
                 resp.raise_for_status()
                 content_length = resp.headers.get("Content-Length")
-                if content_length is not None and int(content_length) > METRICS_MAX_RESPONSE_BYTES:
-                    return {"error": "response too large"}
+                if content_length is not None:
+                    if not content_length.isascii() or not content_length.isdecimal():
+                        return {"error": "bad response"}
+                    if int(content_length) > METRICS_MAX_RESPONSE_BYTES:
+                        return {"error": "response too large"}
                 chunks = []
                 received = 0
                 async for chunk in resp.aiter_bytes():
@@ -383,4 +386,6 @@ async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None
     except asyncio.TimeoutError:
         return {"error": "timeout"}
     except Exception as e:
-        return {"error": str(e)}
+        if isinstance(e, httpx.HTTPStatusError):
+            return {"error": f"http status {e.response.status_code}"}
+        return {"error": f"failed ({type(e).__name__})"}

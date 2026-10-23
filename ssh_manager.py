@@ -251,6 +251,21 @@ class SSHManager:
         under the device lock, so it never blocks on another thread."""
         return self.sessions.get(device_id) is sess
 
+    def _device_tag(self, device_id: str, sess: "_Session" = None) -> str:
+        """Return a one-line, bounded label for SSH diagnostics."""
+        sess = sess or self.sessions.get(device_id)
+        device = sess.device if sess is not None else None
+        if not isinstance(device, dict):
+            return device_id
+
+        def clean(value) -> str:
+            return "".join(char if char.isprintable() else " " for char in str(value)).strip()
+
+        name = clean(device.get("name", ""))
+        if len(name) > 40:
+            name = name[:39] + "…"
+        return f'{device_id} "{name}" {clean(device.get("host", ""))}'
+
     # ---- owner-activity helpers (single lock, every read-modify-write) ----
 
     def _owner_touch(self, owner: str) -> None:
@@ -326,8 +341,12 @@ class SSHManager:
             msg["_gen"] = gen
         self._push(msg)
 
-    def _status(self, device_id: str, state: str, owner: str = None, gen: int = None):
-        msg = {"type": "ssh_status", "device_id": device_id, "state": state}
+    def _status(self, device_id: str, state: str, owner: str = None, gen: int = None,
+                debug_tag: str = None, reason: str = "unknown"):
+        msg = {"type": "ssh_status", "device_id": device_id, "state": state,
+               "_debug_tag": debug_tag or self._device_tag(device_id)}
+        if state == "idle":
+            msg["_reason"] = reason
         if owner is None:
             sess = self.sessions.get(device_id)
             if sess:
@@ -399,17 +418,21 @@ class SSHManager:
                 del hk[host]
             hk.add(host, key.get_name(), key)
             _save_known_hosts(hk)
+            self._debug_write(
+                f"SSH [{self._device_tag(device_id, bound_sess)}] host key approved: "
+                f"{key.get_name()} {_fp(key)}"
+            )
             return {"ok": True, "host": host, "fingerprint": _fp(key)}
         except KnownHostsUnreadable as e:
-            self._debug_write(f"trust_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            self._debug_write(f"trust_host_key failed: {type(e.__cause__).__name__}")
             error = ("The approved host keys file could not be read, so nothing was changed. "
                      "Check the server log.")
         except Exception as e:
-            self._debug_write(f"trust_host_key failed: {type(e).__name__}: {e}")
+            self._debug_write(f"trust_host_key failed: {type(e).__name__}")
             error = "Could not save the host key."
 
         self._log(device_id, "Host key approval failed. Password cleared from memory.", "muted", pending.owner)
-        self._close(device_id, bound_sess)
+        self._close(device_id, bound_sess, reason="host key approval failed")
         return {"ok": False, "error": error}
 
     def reject_host_key(self, device_id: str, code: str, owner: str) -> dict:
@@ -421,7 +444,7 @@ class SSHManager:
             bound_sess = self.sessions.get(device_id)
 
         self._log(device_id, "Host key declined. Password cleared from memory.", "muted", pending.owner)
-        self._close(device_id, bound_sess)
+        self._close(device_id, bound_sess, reason="host key declined")
         return {"ok": True}
 
     def forget_host_key(self, host: str) -> dict:
@@ -432,12 +455,12 @@ class SSHManager:
                 _save_known_hosts(hk)
             return {"ok": True}
         except KnownHostsUnreadable as e:
-            self._debug_write(f"forget_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            self._debug_write(f"forget_host_key failed: {type(e.__cause__).__name__}")
             return {"ok": False,
                     "error": ("The approved host keys file could not be read, so nothing was changed. "
                               "Check the server log.")}
         except Exception as e:
-            self._debug_write(f"forget_host_key failed: {type(e).__name__}: {e}")
+            self._debug_write(f"forget_host_key failed: {type(e).__name__}")
             return {"ok": False, "error": "Could not forget the host key."}
 
     # ---- connection -------------------------------------------------------
@@ -505,7 +528,8 @@ class SSHManager:
                 else:
                     removed = False
             if removed and old_sess is not None:
-                self._status(device_id, "idle", owner)
+                self._status(device_id, "idle", owner, debug_tag=self._device_tag(device_id, sess),
+                             reason="connect failed")
                 self._lock(device_id, False)
             return {"ok": False, "error": "Authentication failed. Check username and password."}
         except KnownHostsUnreadable as e:
@@ -516,9 +540,10 @@ class SSHManager:
                 else:
                     removed = False
             if removed and old_sess is not None:
-                self._status(device_id, "idle", owner)
+                self._status(device_id, "idle", owner, debug_tag=self._device_tag(device_id, sess),
+                             reason="connect failed")
                 self._lock(device_id, False)
-            self._debug_write(f"connect failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            self._debug_write(f"connect failed: {type(e.__cause__).__name__}")
             return {"ok": False,
                     "error": ("Could not connect: the approved host keys file could not be read. "
                               "Check the server log.")}
@@ -530,7 +555,8 @@ class SSHManager:
                 else:
                     removed = False
             if removed and old_sess is not None:
-                self._status(device_id, "idle", owner)
+                self._status(device_id, "idle", owner, debug_tag=self._device_tag(device_id, sess),
+                             reason="connect failed")
                 self._lock(device_id, False)
             return {"ok": False, "error": f"Could not connect: {e}"}
 
@@ -556,7 +582,7 @@ class SSHManager:
         self._lock(device_id, True, gen=sess.generation)
         return {"ok": True}
 
-    def _close(self, device_id: str, sess: "_Session" = None):
+    def _close(self, device_id: str, sess: "_Session" = None, *, reason: str = "unknown"):
         """Identity-checked close: pop `device_id`'s slot only if it still
         holds `sess` (or holds anything at all, when `sess` is None), then
         close the socket outside the lock."""
@@ -578,12 +604,13 @@ class SSHManager:
         if popped is not None:
             self._clear_pending(device_id)
             owner = popped.owner
+            tag = self._device_tag(device_id, popped)
             popped.close()
             self._log(device_id, "Disconnected. Password cleared from memory.", "muted", owner)
-            self._status(device_id, "idle", owner)
+            self._status(device_id, "idle", owner, debug_tag=tag, reason=reason)
             self._lock(device_id, False)
 
-    def disconnect(self, device_id: str, owner: str = None) -> dict:
+    def disconnect(self, device_id: str, owner: str = None, *, reason: str = "unknown") -> dict:
         # Owner check and pop are one locked section so a superseding connect
         # (or a race with another close) can never slip between them.
         with self._device_lock(device_id):
@@ -601,15 +628,18 @@ class SSHManager:
         broadcast_owner = owner if owner is not None else (popped.owner if popped else None)
         if popped is not None:
             self._clear_pending(device_id)
+            tag = self._device_tag(device_id, popped)
             popped.close()
             self._log(device_id, "Disconnected. Password cleared from memory.", "muted", popped.owner)
-        self._status(device_id, "idle", broadcast_owner)
+        else:
+            tag = self._device_tag(device_id)
+        self._status(device_id, "idle", broadcast_owner, debug_tag=tag, reason=reason)
         self._lock(device_id, False)
         return {"ok": True}
 
-    def disconnect_all(self) -> dict:
+    def disconnect_all(self, *, reason: str = "unknown") -> dict:
         for did in list(self.sessions):
-            self._close(did)
+            self._close(did, reason=reason)
         with self._owner_activity_lock:
             self._owner_activity.clear()
         return {"ok": True}
@@ -618,7 +648,7 @@ class SSHManager:
         with self._device_lock(device_id):
             sess = self.sessions.get(device_id)
             if not sess or sess.owner != owner or sess.state != "connected" or not sess.busy or sess.run_id != run_id:
-                self._debug_write(f"SSH [{device_id}] terminal input refused")
+                self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] terminal input refused")
                 return {"ok": False}
             sess.controller = socket_id
             sess.control_rev += 1
@@ -634,7 +664,7 @@ class SSHManager:
                      and sess.run_id == run_id and sess.controller == socket_id
                      and sess.control_rev == rev and sess.auth_complete and sess.writer is not None)
             if not valid:
-                self._debug_write(f"SSH [{device_id}] terminal input refused")
+                self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] terminal input refused")
                 return {"ok": False}
             if not sess.writer.input(data):
                 return {"ok": False, "full": True}
@@ -649,7 +679,7 @@ class SSHManager:
                      and sess.run_id == run_id and sess.controller == socket_id and sess.control_rev == rev
                      and sess.auth_complete and sess.writer is not None)
             if not valid:
-                self._debug_write(f"SSH [{device_id}] terminal input refused")
+                self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] terminal input refused")
                 return {"ok": False}
             sess.cols, sess.rows = clamp_size(cols, rows)
             sess.writer.resize(sess.cols, sess.rows)
@@ -800,14 +830,14 @@ class SSHManager:
         gen = sess.generation
 
         if not sess.client:
-            self._debug_write(f"SSH [{device_id}] command not started: not connected")
+            self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] command not started: not connected")
             if self._is_current(device_id, sess):
                 self._log(device_id, "Not connected.", "err", gen=gen)
             self._finish_exec(sess)
             return
 
         self._debug_write(
-            f"SSH [{device_id}] command started (sudo: {'yes' if feed_sudo else 'no'}, "
+            f"SSH [{self._device_tag(device_id, sess)}] command started (sudo: {'yes' if feed_sudo else 'no'}, "
             f"{raw_command_length} chars)"
         )
         debug_end = None
@@ -824,7 +854,7 @@ class SSHManager:
             sess.cancelled = True
             if self._is_current(device_id, sess):
                 self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
-            debug_end = f"SSH [{device_id}] command cancelled"
+            debug_end = f"SSH [{self._device_tag(device_id, sess)}] command cancelled"
             self._debug_write(debug_end)
             self._finish_exec(sess)
             return
@@ -884,7 +914,7 @@ class SSHManager:
                 lambda: self._queue_sudo_password(writer, sess.password), send_start)
 
             if result.superseded or not self._is_current(device_id, sess):
-                debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
+                debug_end = f"SSH [{self._device_tag(device_id, sess)}] command ended: session replaced or disconnected"
                 return
 
             if result.gate_passed:
@@ -901,20 +931,20 @@ class SSHManager:
                 debug_end = self._cancelled_debug_end(device_id, sess)
             elif result.refused:
                 self._log(device_id, f"✗ {label} did not run: sudo did not accept the password.", "err", gen=gen)
-                debug_end = f"SSH [{device_id}] command stopped: sudo did not accept the password"
+                debug_end = f"SSH [{self._device_tag(device_id, sess)}] command stopped: sudo did not accept the password"
             elif not result.gate_passed:
                 self._log(device_id, f"✗ {label} did not run.", "err", gen=gen)
-                debug_end = f"SSH [{device_id}] command did not run"
+                debug_end = f"SSH [{self._device_tag(device_id, sess)}] command did not run"
             else:
                 if result.exit_code == 0:
                     self._log(device_id, f"✓ {label} finished.", "ok", gen=gen)
                 else:
                     self._log(device_id, f"✗ {label} exited with code {result.exit_code}.", "err", gen=gen)
-                debug_end = f"SSH [{device_id}] command finished (exit code {result.exit_code})"
+                debug_end = f"SSH [{self._device_tag(device_id, sess)}] command finished (exit code {result.exit_code})"
 
         except Exception as e:
             if not self._is_current(device_id, sess):
-                debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
+                debug_end = f"SSH [{self._device_tag(device_id, sess)}] command ended: session replaced or disconnected"
             elif sess.cancelled:
                 if sess.forced:
                     self._log(device_id, f"■ {label} did not respond to Ctrl+C, so it was stopped.", "warn", gen=gen)
@@ -923,10 +953,10 @@ class SSHManager:
                 debug_end = self._cancelled_debug_end(device_id, sess)
             else:
                 self._log(device_id, f"Error: {e}", "err", gen=gen)
-                debug_end = f"SSH [{device_id}] command failed ({type(e).__name__})"
+                debug_end = f"SSH [{self._device_tag(device_id, sess)}] command failed ({type(e).__name__})"
         finally:
             if debug_end is None:
-                debug_end = f"SSH [{device_id}] command ended: session replaced or disconnected"
+                debug_end = f"SSH [{self._device_tag(device_id, sess)}] command ended: session replaced or disconnected"
             self._debug_write(debug_end)
             self._finish_exec(sess)
 
@@ -938,13 +968,12 @@ class SSHManager:
                 sess.writer_stuck = True
                 channel.close()
 
-    @staticmethod
-    def _cancelled_debug_end(device_id, sess):
+    def _cancelled_debug_end(self, device_id, sess):
         if sess.writer_stuck:
-            return f"SSH [{device_id}] command stopped: device stopped accepting input"
+            return f"SSH [{self._device_tag(device_id, sess)}] command stopped: device stopped accepting input"
         if sess.forced:
-            return f"SSH [{device_id}] command stopped: did not respond to Ctrl+C"
-        return f"SSH [{device_id}] command cancelled"
+            return f"SSH [{self._device_tag(device_id, sess)}] command stopped: did not respond to Ctrl+C"
+        return f"SSH [{self._device_tag(device_id, sess)}] command cancelled"
 
     @staticmethod
     def _queue_sudo_password(writer, password):
@@ -1051,7 +1080,7 @@ class SSHManager:
             if expired_sess is not None:
                 self._log(device_id, "Host-key prompt expired. Password cleared from memory.",
                            "warn", pop_owner)
-                self._close(device_id, expired_sess)
+                self._close(device_id, expired_sess, reason="host-key prompt expired")
 
     def tick_idle(self):
         """Called from the asyncio idle loop every 2 s.  Warns and disconnects idle owners."""
@@ -1098,7 +1127,7 @@ class SSHManager:
                 # is left alone.
                 for did, s in owned:
                     self._log(did, "Disconnected due to idle timeout.", "warn", owner)
-                    self._close(did, s)
+                    self._close(did, s, reason="idle timeout")
                 self._push({"type": "ssh_idle_timeout", "_owner": owner})
                 self._owner_pop(owner)
             elif idle >= IDLE_WARN_SECONDS and not info["warned"]:
@@ -1118,11 +1147,11 @@ class SSHManager:
                 sess.last_io = now
         return {"ok": True}
 
-    def release_owner(self, owner: str):
+    def release_owner(self, owner: str, *, reason: str = "unknown"):
         """Close all sessions and host-key prompts owned by a signed-in session."""
         for did, s in list(self.sessions.items()):
             if s.owner == owner:
-                self._close(did, s)
+                self._close(did, s, reason=reason)
         for did, pending in list(self._pending.items()):
             if pending.owner == owner:
                 self._clear_pending(did)

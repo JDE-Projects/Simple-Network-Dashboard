@@ -83,6 +83,7 @@ APP_VERSION = "1.8.0"
 
 
 ws_mgr = _WSManager()
+debug_log.install_ssh_library_logging()
 
 # Latest metrics per device (includes _raw fields for delta calculation)
 _metrics_cache: dict[str, dict] = {}
@@ -114,7 +115,7 @@ async def _release_after_grace(owner: str):
     _pending_releases.pop(owner, None)
     # Re-check in case a reconnect arrived but cancellation hasn't landed yet
     if ws_mgr.owner_count(owner) == 0:
-        ssh_mgr.release_owner(owner)
+        ssh_mgr.release_owner(owner, reason="browser closed")
 
 # How long a persistently-failing device's identical error is suppressed
 # before one summary line is logged for that window.
@@ -125,11 +126,16 @@ async def _broadcast(msg: dict):
     """Broadcast wrapper that writes SSH status events to the debug log.
     If msg contains a private '_owner' key, route to that owner only;
     otherwise broadcast to everyone.  The key is popped before sending."""
+    debug_tag = msg.pop("_debug_tag", None)
+    reason = msg.pop("_reason", None)
     if debug_log._debug_enabled():
         t   = msg.get("type", "")
         did = msg.get("device_id", "")
         if t == "ssh_status":
-            debug_log._debug_write(f"SSH [{did}] → {msg.get('state', '')}")
+            tag = debug_tag or did
+            state = msg.get("state", "")
+            suffix = f" ({reason or 'unknown'})" if state == "idle" else ""
+            debug_log._debug_write(f"SSH [{tag}] → {state}{suffix}")
     owner = msg.pop("_owner", None)
     still_current = msg.pop("_still_current", None)
     if owner:
@@ -274,7 +280,7 @@ async def lifespan(app: FastAPI):
     metrics_task.cancel()
     idle_task.cancel()
     ssh_mgr.shutdown_delivery()
-    ssh_mgr.disconnect_all()
+    ssh_mgr.disconnect_all(reason="server shutdown")
     debug_log.close_on_shutdown()
 
 
@@ -579,9 +585,9 @@ async def logout(request: Request):
         owner = _session_owner(token)
         _cancel_pending_release(owner)
         try:
-            await asyncio.to_thread(ssh_mgr.release_owner, owner)
+            await asyncio.to_thread(ssh_mgr.release_owner, owner, reason="signed out")
         except Exception as error:  # noqa: BLE001 - release failure must not block sign-out
-            msg = f"SIGN-OUT SSH RELEASE FAILED: {type(error).__name__}: {error}"
+            msg = f"SIGN-OUT SSH RELEASE FAILED: {type(error).__name__}"
             debug_log._debug_write(msg)
             print(msg, flush=True)
     response = JSONResponse({"ok": True})
@@ -814,7 +820,7 @@ async def delete_device(device_id: str):
     if not persistence._save(devices):
         return {"ok": False, "error": _SAVE_ERROR}
     ws_mgr.unselect_device_everywhere(device_id)
-    ssh_mgr.disconnect(device_id)
+    ssh_mgr.disconnect(device_id, reason="device deleted")
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
 
@@ -881,12 +887,12 @@ class CancelIn(DeviceIdIn):
 
 @app.post("/api/ssh/disconnect")
 async def ssh_disconnect(body: DeviceIdIn, request: Request):
-    return ssh_mgr.disconnect(body.device_id, _request_session_owner(request))
+    return ssh_mgr.disconnect(body.device_id, _request_session_owner(request), reason="user disconnected")
 
 
 @app.post("/api/ssh/disconnect_all")
 async def ssh_disconnect_all(request: Request):
-    ssh_mgr.release_owner(_request_session_owner(request))
+    ssh_mgr.release_owner(_request_session_owner(request), reason="user disconnected")
     return {"ok": True}
 
 
@@ -975,7 +981,10 @@ async def check_update():
     except Exception as e:
         reason = _update_error_reason(e)
         try:
-            debug_log._debug_write(f"check_update failed: {type(e).__name__}: {e}")
+            # Type names only: the reason can quote raw error text.
+            cause = getattr(e, "reason", None)
+            cause_name = f" ({type(cause).__name__})" if isinstance(cause, BaseException) else ""
+            debug_log._debug_write(f"check_update failed: {type(e).__name__}{cause_name}")
         except Exception:
             pass
         return {"ok": False, "reason": reason}

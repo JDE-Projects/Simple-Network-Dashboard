@@ -35,7 +35,17 @@ def _mgr():
 
 
 def _device(device_id="d1"):
-    return {"id": device_id, "host": "10.0.0.9", "username": "pi"}
+    return {"id": device_id, "name": "Pi", "host": "10.0.0.9", "username": "pi"}
+
+
+def test_device_tag_cleans_controls_limits_name_and_falls_back_to_id():
+    mgr = _mgr()
+    control_name = {"name": " Pi\n\t\x1b Rack ", "host": "10.0.0.9\n"}
+    long_name = {"name": "x" * 60, "host": "host.example"}
+
+    assert mgr._device_tag("d1", ssh_manager._Session(control_name, "pw", device_id="d1")) == 'd1 "Pi    Rack" 10.0.0.9'
+    assert mgr._device_tag("d2", ssh_manager._Session(long_name, "pw", device_id="d2")) == f'd2 "{"x" * 39}…" host.example'
+    assert mgr._device_tag("d3") == "d3"
 
 
 def test_concurrent_connects_from_different_owners_leave_one_live_session(monkeypatch):
@@ -220,7 +230,7 @@ def test_stale_close_does_not_broadcast_idle_or_unlock(monkeypatch):
 
     statuses = []
     locks = []
-    monkeypatch.setattr(mgr, "_status", lambda did, state, owner=None: statuses.append((did, state)))
+    monkeypatch.setattr(mgr, "_status", lambda did, state, *_args, **_kwargs: statuses.append((did, state)))
     monkeypatch.setattr(mgr, "_lock", lambda did, locked: locks.append((did, locked)))
 
     # Stale close against a replaced session: the newer session stays live and
@@ -284,7 +294,7 @@ def test_reconnect_failure_after_retiring_a_live_session_unlocks_and_goes_idle(m
 
     statuses = []
     locks = []
-    monkeypatch.setattr(mgr, "_status", lambda did, state, owner=None, gen=None: statuses.append((did, state)))
+    monkeypatch.setattr(mgr, "_status", lambda did, state, *_args, **_kwargs: statuses.append((did, state)))
     monkeypatch.setattr(mgr, "_lock", lambda did, locked, gen=None: locks.append((did, locked)))
 
     # Same owner reconnects, retiring the live session, but the replacement
@@ -301,13 +311,48 @@ def test_reconnect_failure_after_retiring_a_live_session_unlocks_and_goes_idle(m
     assert ("d1", False) in locks
 
 
+def test_reconnect_failure_reports_reason_and_device_label(monkeypatch):
+    mgr = _mgr()
+    device = _device()
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", lambda self: setattr(self, "client", _FakeClient()))
+    assert mgr.connect("d1", "pw", device, "owner-1") == {"ok": True}
+
+    statuses = []
+    monkeypatch.setattr(mgr, "_status", lambda did, state, owner, **kwargs: statuses.append((did, state, owner, kwargs)))
+    monkeypatch.setattr(mgr, "_lock", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ssh_manager._Session, "connect", lambda self: (_ for _ in ()).throw(RuntimeError("network unreachable")))
+
+    result = mgr.connect("d1", "pw", device, "owner-1")
+
+    assert result["ok"] is False
+    assert statuses == [("d1", "idle", "owner-1", {
+        "debug_tag": 'd1 "Pi" 10.0.0.9', "reason": "connect failed"})]
+
+
+def test_disconnect_all_reports_server_shutdown_reason(monkeypatch):
+    mgr = _mgr()
+    sess = ssh_manager._Session(_device(), "pw", "owner-1", "d1")
+    sess.state = "connected"
+    sess.client = _FakeClient()
+    mgr.sessions["d1"] = sess
+    statuses = []
+    monkeypatch.setattr(mgr, "_status", lambda did, state, owner, **kwargs: statuses.append((did, state, owner, kwargs)))
+    monkeypatch.setattr(mgr, "_lock", lambda *args, **kwargs: None)
+
+    assert mgr.disconnect_all(reason="server shutdown") == {"ok": True}
+
+    assert statuses == [("d1", "idle", "owner-1", {
+        "debug_tag": 'd1 "Pi" 10.0.0.9', "reason": "server shutdown"})]
+
+
 def test_fresh_failed_connect_with_no_prior_session_does_not_unlock(monkeypatch):
     mgr = _mgr()
     device = _device()
 
     statuses = []
     locks = []
-    monkeypatch.setattr(mgr, "_status", lambda did, state, owner=None, gen=None: statuses.append((did, state)))
+    monkeypatch.setattr(mgr, "_status", lambda did, state, *_args, **_kwargs: statuses.append((did, state)))
     monkeypatch.setattr(mgr, "_lock", lambda did, locked, gen=None: locks.append((did, locked)))
 
     def boom(self):
