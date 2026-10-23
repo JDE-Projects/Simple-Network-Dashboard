@@ -74,7 +74,7 @@ from ws_manager import _WSManager
 # The release tooling reads the shipped version from a plain string assignment
 # in the entry script, so APP_VERSION lives here rather than in config. Modules
 # that need it (update_check) receive it by argument to avoid importing main.
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 
 
 # ---------------------------------------------------------------------------

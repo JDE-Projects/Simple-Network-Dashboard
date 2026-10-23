@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Regenerate screenshots/network-dashboard-light-dark.png.
 
-Runs the dashboard from a throwaway copy in a temp folder, pointed at invented
-devices and a fake Node Exporter, photographs it in light and dark, and
-stitches the two halves together.
+Runs the dashboard from a throwaway copy in a temp folder, seeds its sign-in
+state, injects invented Node Exporter metrics, photographs it in light and
+dark, and stitches the two halves together.
 
 Nothing here touches the working copy or a real install: the app runs from a
 copy, on a spare port, with its own devices.json. The real devices.json is
@@ -16,8 +16,10 @@ Options:
     --build-tools P   path to the build-tools repo (default: sibling folder)
 """
 
+import importlib.util
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -27,13 +29,18 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import scene  # noqa: E402
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 
-APP_FILES = ["main.py", "metrics_poller.py", "ssh_manager.py"]
+# The scene files sit beside this script; the app's own metrics parser sits
+# in the repo root.
+sys.path.insert(0, HERE)
+sys.path.insert(1, REPO_ROOT)
+import fake_exporter  # noqa: E402
+import scene  # noqa: E402
+
+import metrics_poller  # noqa: E402
+
 APP_DIRS = ["static"]
 
 OUT_IMAGE = os.path.join(REPO_ROOT, "screenshots",
@@ -82,12 +89,37 @@ def wait_for_http(url: str, timeout: float, label: str,
     fail(f"{label} did not answer at {url} within {timeout}s ({last})")
 
 
-def stage_app(temp_dir: str, exporter_port: int) -> None:
-    """Copy the app into temp_dir and give it the invented device list."""
-    for name in APP_FILES:
-        src = os.path.join(REPO_ROOT, name)
-        if not os.path.exists(src):
+def root_modules() -> list[str]:
+    """Return the root modules required by the flat dashboard application."""
+    for name in ("main.py", "auth.py"):
+        if not os.path.isfile(os.path.join(REPO_ROOT, name)):
             fail(f"expected to find {name} in {REPO_ROOT}")
+    return sorted(
+        name for name in os.listdir(REPO_ROOT)
+        if name.endswith(".py") and name != "conftest.py"
+    )
+
+
+def seed_auth_state(temp_dir: str, data_dir: str) -> str:
+    """Create throwaway authentication state through the staged auth module."""
+    auth_path = os.path.join(temp_dir, "auth.py")
+    spec = importlib.util.spec_from_file_location("screenshot_staged_auth", auth_path)
+    if spec is None or spec.loader is None:
+        fail(f"could not load staged authentication module from {auth_path}")
+    staged_auth = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(staged_auth)
+    password = secrets.token_urlsafe(24)
+    staged_auth.publish_auth_state(
+        os.path.join(data_dir, "auth.json"),
+        staged_auth.create_auth_state(password),
+    )
+    return password
+
+
+def stage_app(temp_dir: str) -> str:
+    """Copy the dashboard, runtime folders, devices, and sign-in state."""
+    for name in root_modules():
+        src = os.path.join(REPO_ROOT, name)
         shutil.copy2(src, os.path.join(temp_dir, name))
     for name in APP_DIRS:
         src = os.path.join(REPO_ROOT, name)
@@ -95,27 +127,49 @@ def stage_app(temp_dir: str, exporter_port: int) -> None:
             fail(f"expected to find the {name} folder in {REPO_ROOT}")
         shutil.copytree(src, os.path.join(temp_dir, name))
 
-    devices = [dict(d, metrics_port=exporter_port) for d in scene.DEVICES]
-    with open(os.path.join(temp_dir, "devices.json"), "w",
+    data_dir = os.path.join(temp_dir, "data")
+    os.mkdir(data_dir)
+    os.mkdir(os.path.join(temp_dir, "logs"))
+    with open(os.path.join(data_dir, "devices.json"), "w",
               encoding="utf-8") as f:
-        json.dump({"_app": "Simple Network Dashboard", "devices": devices},
+        json.dump({"_app": "Simple Network Dashboard", "devices": scene.DEVICES},
                   f, indent=2)
+    return seed_auth_state(temp_dir, data_dir)
 
 
-def build_setup_script() -> str:
+def build_stats() -> dict:
+    """Extract public metrics from two invented readings about two seconds apart."""
+    previous = metrics_poller.extract_metrics(
+        metrics_poller._parse(fake_exporter._render()), None
+    )
+    time.sleep(2)
+    current = metrics_poller.extract_metrics(
+        metrics_poller._parse(fake_exporter._render()), previous
+    )
+    return {key: value for key, value in current.items() if not key.startswith("_")}
+
+
+def build_setup_script(stats: dict) -> str:
     """JavaScript that dresses the page: an open SSH session with output, a
-    fixed console clock, and (optionally) tidied addresses.
+    fixed console clock, injected metrics, and (optionally) tidied addresses.
 
     It calls the page's own functions, the same ones the WebSocket calls when
     a real session runs, so nothing about the app is bypassed or stubbed.
     """
     device_id = json.dumps(scene.FEATURED["id"])
-    parts = []
+    parts = [
+        f"window.__screenshotDeviceId = {device_id};",
+        f"window.__screenshotMetrics = {json.dumps(stats)};",
+        (
+            "window.__restoreScreenshotMetrics = () => {"
+            "  METRICS[window.__screenshotDeviceId] = window.__screenshotMetrics;"
+            "};"
+        ),
+    ]
 
     if scene.PRETTY_ADDRESSES:
         # The stats panel and device cards redraw every time metrics arrive,
-        # which would undo a one-off text swap. Wrap the render functions so
-        # the swap is reapplied after every redraw.
+        # so the address replacement must run after each redraw.
         parts.append(
             "window.__tidyAddresses = () => {"
             f"  const from = {json.dumps(scene.REAL_PREFIX)};"
@@ -129,39 +183,45 @@ def build_setup_script() -> str:
             "    }"
             "  }"
             "};"
-            "for (const name of ['renderStats', 'renderDevices']) {"
-            "  const original = window[name];"
-            "  window[name] = function (...args) {"
-            "    const result = original.apply(this, args);"
-            "    window.__tidyAddresses();"
-            "    return result;"
-            "  };"
-            "}"
         )
 
     parts += [
+        # The poller rejects this tool's loopback addresses and broadcasts an
+        # error every two seconds. Reinstall the generated metrics before each
+        # page render, just as address tidying is reapplied after a redraw.
+        (
+            "for (const name of ['renderStats', 'renderDevices']) {"
+            "  const original = window[name];"
+            "  window[name] = function (...args) {"
+            "    window.__restoreScreenshotMetrics();"
+            "    const result = original.apply(this, args);"
+            "    if (window.__tidyAddresses) window.__tidyAddresses();"
+            "    return result;"
+            "  };"
+            "}"
+        ),
         f"selectDevice({device_id});",
         f"handleSSHStatus({device_id}, 'connected');",
         # Brings the console tab forward and hides the "connect to begin"
         # placeholder, the same call clicking the tab makes.
         f"setActiveTab({device_id});",
-        f"for (const [text, level] of {json.dumps(scene.CONSOLE)}) "
-        f"  addLine({device_id}, text, level);",
-        # Replace the wall clock with a fixed one, so two runs of this tool
-        # produce the same image.
-        "(() => {"
-        f"  const start = {json.dumps(scene.CONSOLE_START)}"
-        "    .split(':').map(Number);"
-        "  let seconds = start[0] * 3600 + start[1] * 60 + start[2];"
-        "  for (const tag of document.querySelectorAll('.ln .tag')) {"
-        "    const h = String(Math.floor(seconds / 3600) % 24)"
-        "      .padStart(2, '0');"
-        "    const m = String(Math.floor(seconds / 60) % 60).padStart(2, '0');"
-        "    const s = String(seconds % 60).padStart(2, '0');"
-        "    tag.textContent = h + ':' + m + ':' + s;"
-        "    seconds += 1;"
-        "  }"
-        "})();",
+        (
+            f"for (const [text, level] of {json.dumps(scene.CONSOLE)}) "
+            f"  addLine({device_id}, text, level);"
+        ),
+        # Use the page's formatter with fixed Date values, so locale-specific
+        # 12-hour and 24-hour rendering stays faithful and deterministic.
+        (
+            "(() => {"
+            f"  const start = {json.dumps(scene.CONSOLE_START)}"
+            "    .split(':').map(Number);"
+            "  const stamp = new Date(2000, 0, 1, start[0], start[1], start[2]);"
+            "  for (const tag of document.querySelectorAll('.ln .tag')) {"
+            "    tag.textContent = consoleTime(stamp);"
+            "    stamp.setSeconds(stamp.getSeconds() + 1);"
+            "  }"
+            "})();"
+        ),
     ]
 
     if scene.PRETTY_ADDRESSES:
@@ -169,23 +229,31 @@ def build_setup_script() -> str:
     return " ".join(parts)
 
 
-def write_capture_config(temp_dir: str, app_port: int) -> str:
+def write_capture_config(temp_dir: str, app_port: int, password: str, stats: dict) -> str:
     config = {
         "url": f"http://127.0.0.1:{app_port}/",
         "width": LAYOUT_WIDTH,
         "height": LAYOUT_HEIGHT,
         "scale": CAPTURE_SCALE,
         "outDir": "shots",
+        "signIn": {
+            "url": f"http://127.0.0.1:{app_port}/login",
+            "passwordSelector": "#password",
+            "password": password,
+            "submitSelector": "#loginForm button",
+            "doneWhen": "location.pathname === '/'",
+        },
         "waitFor": "document.querySelector('#deviceList').children.length > 0",
-        # CPU usage needs two polls before it can be worked out, so wait for
-        # it specifically. Waiting on any percentage would catch RAM on the
-        # first poll and photograph CPU still reading "Calculating".
+        # Wait for the injected CPU result rather than a transient poller
+        # error, and reject the page's first-poll placeholder explicitly.
         "waitForData":
+            # Built in the page, so the number reads the way the page prints
+            # it (27, not Python's 27.0).
             "document.querySelector('#statsPanel').textContent"
-            "  .includes('%') && "
+            "  .includes(window.__screenshotMetrics.cpu_percent + '%') && "
             "!document.querySelector('#statsPanel').textContent"
             "  .includes('Calculating')",
-        "setup": build_setup_script(),
+        "setup": build_setup_script(stats),
         "settleMs": 600,
         "shots": [
             {"name": "light", "script": "applyTheme('light')"},
@@ -199,7 +267,7 @@ def write_capture_config(temp_dir: str, app_port: int) -> str:
 
 
 def run(cmd: list, label: str) -> None:
-    result = subprocess.run(cmd, cwd=REPO_ROOT)
+    result = subprocess.run(cmd, cwd=REPO_ROOT, check=False)
     if result.returncode != 0:
         fail(f"{label} failed with exit code {result.returncode}")
 
@@ -219,32 +287,29 @@ def main(argv: list) -> None:
         if not os.path.exists(path):
             fail(f"missing {path}. Pass --build-tools with the repo path.")
 
-    exporter_address = scene.FEATURED["host"]
-    exporter_port = free_port(exporter_address)
     app_port = free_port()
     temp_dir = tempfile.mkdtemp(prefix="snd-screenshot-")
     processes = []
 
     try:
-        stage_app(temp_dir, exporter_port)
+        password = stage_app(temp_dir)
+        stats = build_stats()
 
-        exporter = subprocess.Popen(
-            [sys.executable, os.path.join(HERE, "fake_exporter.py"),
-             exporter_address, str(exporter_port)])
-        processes.append(exporter)
-        wait_for_http(
-            f"http://{exporter_address}:{exporter_port}/metrics", 15,
-            "fake exporter", exporter)
-
-        env = dict(os.environ, PYTHONUNBUFFERED="1")
+        env = dict(
+            os.environ,
+            PYTHONUNBUFFERED="1",
+            SND_DATA_DIR=os.path.join(temp_dir, "data"),
+            SND_LOG_DIR=os.path.join(temp_dir, "logs"),
+            SND_PUBLIC_ORIGIN=f"http://127.0.0.1:{app_port}",
+        )
         dashboard = subprocess.Popen(
             [sys.executable, "main.py", "--port", str(app_port)],
             cwd=temp_dir, env=env)
         processes.append(dashboard)
-        wait_for_http(f"http://127.0.0.1:{app_port}/", 30, "dashboard",
+        wait_for_http(f"http://127.0.0.1:{app_port}/login", 30, "dashboard",
                       dashboard)
 
-        config_path = write_capture_config(temp_dir, app_port)
+        config_path = write_capture_config(temp_dir, app_port, password, stats)
         run(["node", capture_script, config_path], "capture")
 
         shots_dir = os.path.join(temp_dir, "shots")

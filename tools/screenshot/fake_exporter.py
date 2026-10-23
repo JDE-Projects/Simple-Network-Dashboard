@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """A stand-in for Node Exporter, used only when generating README screenshots.
 
-Serves Prometheus text on /metrics for an invented machine. The cumulative
-counters are derived from elapsed time rather than request count, so the
-delta-based CPU and network rates in metrics_poller.py work out to exactly the
-intended figures no matter how the poll timing drifts.
+Renders Prometheus text for an invented machine. The cumulative counters are
+derived from elapsed time rather than render count, so the delta-based CPU and
+network rates in metrics_poller.py work out to exactly the intended figures no
+matter how the timing drifts. It can also serve that text on /metrics for
+standalone inspection.
 
 Everything here is made up. No real host, address or hardware appears in the
 screenshots this produces.
