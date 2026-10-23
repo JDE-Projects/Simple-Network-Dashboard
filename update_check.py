@@ -77,10 +77,7 @@ def _update_error_reason(exc: BaseException) -> str:
     if is_url_error:
         return "Couldn't reach GitHub. Check the internet connection."
 
-    text = f"{type(exc).__name__}: {exc}"
-    if len(text) > 120:
-        text = text[:117] + "..."
-    return text
+    return "The update check failed unexpectedly. Try again later."
 
 
 def _version_tuple(v: str) -> tuple:

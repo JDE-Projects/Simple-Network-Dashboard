@@ -361,6 +361,25 @@ def test_exec_forced_stop_exception_end_line(monkeypatch):
     assert debug[-1] == 'SSH [d1 "" host] command stopped: did not respond to Ctrl+C'
 
 
+def test_exec_failure_shows_fixed_line_and_logs_type_only(monkeypatch):
+    manager = _manager()
+    channel = _FakeChannel([("out", b"ready")])
+    session = _exec_session(manager, channel)
+    debug = []
+    manager._debug_write = debug.append
+    marker = "raw-remote-error-marker"
+
+    def raise_marker(*_args):
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(ssh_manager, "read_channel", raise_marker)
+    logs = _exec(manager, session)
+    assert ("err", "✗ Label stopped because of an unexpected error.") in logs
+    assert debug[-1] == 'SSH [d1 "" host] command failed (RuntimeError)'
+    assert not any(marker in text for _level, text in logs)
+    assert not any(marker in line for line in debug)
+
+
 def test_writer_deadline_stops_exec_and_writer_threads_end(monkeypatch):
     manager = _manager()
     channel = _FakeChannel([("out", b"ready")])
