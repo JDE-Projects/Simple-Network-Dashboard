@@ -5,10 +5,12 @@ Passwords are held in memory only; never written anywhere.
 
 import asyncio
 import base64
+import errno
 import hashlib
 import hmac
 import os
 import secrets
+import socket
 import tempfile
 import threading
 import time
@@ -26,6 +28,31 @@ IDLE_TIMEOUT_SECONDS = 300   # disconnect after 5 minutes idle
 HOST_KEY_PENDING_SECONDS = 300   # a host-key prompt expires 5 minutes after it is raised
 
 _EXPIRED_ERROR = "This host-key prompt expired or was already used. Reconnect to try again."
+
+
+def _connect_error_message(exc: BaseException) -> str:
+    """Turn a connect failure into a fixed, plain-language message for the
+    browser. The exception's own text is never shown: it can quote the remote
+    device or the SSH library's internals.
+
+    socket.gaierror and TimeoutError are OSError subclasses, so they are
+    checked before the refused cases. paramiko raises NoValidConnectionsError
+    when every address refused the connection or was unreachable; it counts
+    as refused only when every address refused."""
+    if isinstance(exc, socket.gaierror):
+        return "Could not connect: the device's address could not be found. Check the host name."
+    if isinstance(exc, TimeoutError):
+        return "Could not connect: the device did not respond in time. Check that it is on and reachable."
+    refused = isinstance(exc, ConnectionRefusedError)
+    if isinstance(exc, paramiko.ssh_exception.NoValidConnectionsError):
+        refused = bool(exc.errors) and all(
+            getattr(e, "errno", None) == errno.ECONNREFUSED for e in exc.errors.values())
+    if refused:
+        return "Could not connect: the device refused the connection. Check that SSH is running on it."
+    if isinstance(exc, paramiko.SSHException):
+        return "Could not connect: the SSH handshake with the device failed."
+    return "Could not connect. Check that the device is on and reachable."
+
 
 # Shares SND_DATA_DIR with main.py so known_hosts stays with the rest of the data.
 DATA_DIR         = os.environ.get("SND_DATA_DIR", "/var/lib/simple-network-dashboard")
@@ -558,7 +585,8 @@ class SSHManager:
                 self._status(device_id, "idle", owner, debug_tag=self._device_tag(device_id, sess),
                              reason="connect failed")
                 self._lock(device_id, False)
-            return {"ok": False, "error": f"Could not connect: {e}"}
+            self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] connect failed ({type(e).__name__})")
+            return {"ok": False, "error": _connect_error_message(e)}
 
         with self._device_lock(device_id):
             if self.sessions.get(device_id) is not sess:
@@ -952,7 +980,7 @@ class SSHManager:
                     self._log(device_id, f"■ {label} cancelled.", "warn", gen=gen)
                 debug_end = self._cancelled_debug_end(device_id, sess)
             else:
-                self._log(device_id, f"Error: {e}", "err", gen=gen)
+                self._log(device_id, f"✗ {label} stopped because of an unexpected error.", "err", gen=gen)
                 debug_end = f"SSH [{self._device_tag(device_id, sess)}] command failed ({type(e).__name__})"
         finally:
             if debug_end is None:
