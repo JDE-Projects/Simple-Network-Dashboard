@@ -60,15 +60,18 @@ def _http_error(code: int) -> urllib.error.HTTPError:
         ),
         (urllib.error.URLError(OSError(errno.ENETUNREACH, "unreachable")), "No network connection."),
         (urllib.error.URLError("other network problem"), "Couldn't reach GitHub. Check the internet connection."),
-        (RuntimeError("unexpected"), "RuntimeError: unexpected"),
+        (RuntimeError("unexpected"), "The update check failed unexpectedly. Try again later."),
     ],
 )
 def test_update_error_reason_classifies_failures(exc, expected):
     assert main._update_error_reason(exc) == expected
 
 
-def test_update_error_reason_truncates_unknown_error():
-    assert main._update_error_reason(RuntimeError("x" * 200)) == "RuntimeError: " + "x" * 103 + "..."
+def test_update_error_reason_never_shows_unknown_error_text():
+    marker = "raw-update-error-marker"
+    reason = main._update_error_reason(ValueError(marker))
+    assert marker not in reason
+    assert "ValueError" not in reason
 
 
 def test_check_update_returns_reason_and_logs_failure(monkeypatch):
