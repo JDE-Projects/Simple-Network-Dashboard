@@ -123,6 +123,43 @@ def test_response_over_size_cap_is_rejected_with_content_length(monkeypatch):
     assert result == {"error": "response too large"}
 
 
+def test_invalid_content_length_returns_bad_response_without_echoing_it(monkeypatch):
+    marker = "abc<secret>"
+
+    def handler(request):
+        return httpx.Response(200, headers={"Content-Length": marker}, text=NODE_EXPORTER_SAMPLE)
+
+    _install_mock_transport(monkeypatch, handler)
+
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert result == {"error": "bad response"}
+    assert marker not in result["error"]
+
+
+def test_http_status_error_returns_status_without_response_text(monkeypatch):
+    def handler(request):
+        return httpx.Response(404, text="marker response text")
+
+    _install_mock_transport(monkeypatch, handler)
+
+    assert asyncio.run(fetch_metrics("10.0.0.4")) == {"error": "http status 404"}
+
+
+def test_unexpected_fetch_error_does_not_echo_message(monkeypatch):
+    marker = "unexpected-marker"
+
+    def handler(request):
+        raise RuntimeError(marker)
+
+    _install_mock_transport(monkeypatch, handler)
+
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert result == {"error": "failed (RuntimeError)"}
+    assert marker not in result["error"]
+
+
 def test_response_over_size_cap_is_rejected_without_content_length(monkeypatch):
     async def body():
         yield b"x" * (METRICS_MAX_RESPONSE_BYTES + 1)

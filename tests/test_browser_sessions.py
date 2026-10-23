@@ -217,15 +217,18 @@ def test_logout_logs_ssh_release_failure_but_still_completes(tmp_path: Path, mon
     client = TestClient(main.app, base_url="https://testserver")
     assert client.post("/api/auth/login", json={"password": "a" * 15, "remembered": False}, headers=_csrf_headers(client)).status_code == 200
     debug_lines: list[str] = []
-    monkeypatch.setattr(main.ssh_mgr, "release_owner", lambda _owner: (_ for _ in ()).throw(RuntimeError("close failed")))
+    marker = "release-marker"
+    monkeypatch.setattr(main.ssh_mgr, "release_owner", lambda _owner: (_ for _ in ()).throw(RuntimeError(marker)))
     monkeypatch.setattr(main.debug_log, "_debug_write", debug_lines.append)
 
     response = client.post("/api/auth/logout", headers=_csrf_headers(client))
 
     assert response.status_code == 200
-    expected = "SIGN-OUT SSH RELEASE FAILED: RuntimeError: close failed"
+    expected = "SIGN-OUT SSH RELEASE FAILED: RuntimeError"
     assert debug_lines == [expected]
-    assert expected in capsys.readouterr().out
+    stdout = capsys.readouterr().out
+    assert expected in stdout
+    assert marker not in stdout
 
 
 def test_ssh_routes_use_the_signed_in_session_owner_and_ignore_legacy_header(tmp_path: Path, monkeypatch) -> None:

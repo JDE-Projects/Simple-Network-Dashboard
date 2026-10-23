@@ -72,7 +72,8 @@ def test_update_error_reason_truncates_unknown_error():
 
 
 def test_check_update_returns_reason_and_logs_failure(monkeypatch):
-    failure = urllib.error.URLError(socket.timeout("timed out"))
+    marker = "update-marker"
+    failure = urllib.error.URLError(socket.timeout(marker))
     messages = []
 
     def raise_failure(app_version):
@@ -84,7 +85,24 @@ def test_check_update_returns_reason_and_logs_failure(monkeypatch):
     result = asyncio.run(main.check_update())
 
     assert result == {"ok": False, "reason": "GitHub didn't respond in time."}
-    assert messages == ["check_update failed: URLError: <urlopen error timed out>"]
+    assert messages == ["check_update failed: URLError (TimeoutError)"]
+    assert marker not in messages[0]
+
+
+def test_check_update_log_omits_unknown_error_text(monkeypatch):
+    marker = "unknown-update-marker"
+    messages = []
+
+    def raise_failure(app_version):
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(main, "_fetch_latest_version", raise_failure)
+    monkeypatch.setattr(main.debug_log, "_debug_write", messages.append)
+
+    result = asyncio.run(main.check_update())
+
+    assert result["ok"] is False
+    assert messages == ["check_update failed: RuntimeError"]
 
 
 def test_check_update_returns_reason_when_debug_logging_fails(monkeypatch):

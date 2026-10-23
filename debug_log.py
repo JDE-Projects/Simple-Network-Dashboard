@@ -52,6 +52,28 @@ _debug_logger = logging.getLogger("simple_network_dashboard.debug")
 _debug_logger.setLevel(logging.DEBUG)
 _debug_logger.propagate = False
 
+
+class _SSHLibraryLogHandler(logging.Handler):
+    """Routes Paramiko warnings to the optional debug log without rendering
+    library-provided record content."""
+
+    def emit(self, record):
+        try:
+            _debug_write(f"SSH library: {record.levelname} ({record.name})")
+        except Exception:
+            pass
+
+
+def install_ssh_library_logging() -> None:
+    """Keep Paramiko library records out of stderr and the journal."""
+    logger = logging.getLogger("paramiko")
+    logger.propagate = False
+    if any(isinstance(handler, _SSHLibraryLogHandler) for handler in logger.handlers):
+        return
+    handler = _SSHLibraryLogHandler(level=logging.WARNING)
+    logger.addHandler(handler)
+
+
 # Event loop the debug-failure path can use to reach browser tabs from an
 # SSH worker thread. Set in lifespan(), alongside ssh_mgr.set_loop().
 _debug_loop: Optional[asyncio.AbstractEventLoop] = None

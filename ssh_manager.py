@@ -401,11 +401,11 @@ class SSHManager:
             _save_known_hosts(hk)
             return {"ok": True, "host": host, "fingerprint": _fp(key)}
         except KnownHostsUnreadable as e:
-            self._debug_write(f"trust_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            self._debug_write(f"trust_host_key failed: {type(e.__cause__).__name__}")
             error = ("The approved host keys file could not be read, so nothing was changed. "
                      "Check the server log.")
         except Exception as e:
-            self._debug_write(f"trust_host_key failed: {type(e).__name__}: {e}")
+            self._debug_write(f"trust_host_key failed: {type(e).__name__}")
             error = "Could not save the host key."
 
         self._log(device_id, "Host key approval failed. Password cleared from memory.", "muted", pending.owner)
@@ -432,12 +432,12 @@ class SSHManager:
                 _save_known_hosts(hk)
             return {"ok": True}
         except KnownHostsUnreadable as e:
-            self._debug_write(f"forget_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            self._debug_write(f"forget_host_key failed: {type(e.__cause__).__name__}")
             return {"ok": False,
                     "error": ("The approved host keys file could not be read, so nothing was changed. "
                               "Check the server log.")}
         except Exception as e:
-            self._debug_write(f"forget_host_key failed: {type(e).__name__}: {e}")
+            self._debug_write(f"forget_host_key failed: {type(e).__name__}")
             return {"ok": False, "error": "Could not forget the host key."}
 
     # ---- connection -------------------------------------------------------
@@ -518,7 +518,7 @@ class SSHManager:
             if removed and old_sess is not None:
                 self._status(device_id, "idle", owner)
                 self._lock(device_id, False)
-            self._debug_write(f"connect failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            self._debug_write(f"connect failed: {type(e.__cause__).__name__}")
             return {"ok": False,
                     "error": ("Could not connect: the approved host keys file could not be read. "
                               "Check the server log.")}

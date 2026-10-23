@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import debug_log
 import main
@@ -303,3 +304,45 @@ def test_broadcast_skips_ssh_log_debug_writes_and_preserves_delivery(tmp_path, m
 
     assert delivered == [message]
     assert MARKER not in open(path, encoding="utf-8").read()
+
+
+def test_paramiko_logs_are_sanitized_and_never_reach_stderr(tmp_path, monkeypatch, capsys):
+    root = logging.getLogger("paramiko")
+    debug_log.install_ssh_library_logging()
+    debug_log.install_ssh_library_logging()
+
+    assert sum(isinstance(handler, debug_log._SSHLibraryLogHandler) for handler in root.handlers) == 1
+    assert root.propagate is False
+    logger = logging.getLogger("paramiko.transport")
+
+    def emit(level):
+        try:
+            raise RuntimeError(MARKER)
+        except RuntimeError:
+            logger.log(level, MARKER, exc_info=True)
+
+    emit(logging.WARNING)
+    emit(logging.ERROR)
+    logger.debug(MARKER)
+
+    assert capsys.readouterr().err == ""
+
+    path = _enable(tmp_path, monkeypatch)
+    emit(logging.WARNING)
+    emit(logging.ERROR)
+    logger.debug(MARKER)
+
+    content = open(path, encoding="utf-8").read()
+    assert MARKER not in content
+    assert "SSH library: WARNING (paramiko.transport)" in content
+    assert "SSH library: ERROR (paramiko.transport)" in content
+    assert "SSH library: DEBUG (paramiko.transport)" not in content
+    assert capsys.readouterr().err == ""
+
+    asyncio.run(main.toggle_debug(main.DebugIn(enabled=False)))
+    before = open(path, encoding="utf-8").read()
+    emit(logging.WARNING)
+    emit(logging.ERROR)
+
+    assert open(path, encoding="utf-8").read() == before
+    assert capsys.readouterr().err == ""

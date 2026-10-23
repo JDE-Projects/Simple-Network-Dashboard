@@ -83,6 +83,7 @@ APP_VERSION = "1.8.0"
 
 
 ws_mgr = _WSManager()
+debug_log.install_ssh_library_logging()
 
 # Latest metrics per device (includes _raw fields for delta calculation)
 _metrics_cache: dict[str, dict] = {}
@@ -581,7 +582,7 @@ async def logout(request: Request):
         try:
             await asyncio.to_thread(ssh_mgr.release_owner, owner)
         except Exception as error:  # noqa: BLE001 - release failure must not block sign-out
-            msg = f"SIGN-OUT SSH RELEASE FAILED: {type(error).__name__}: {error}"
+            msg = f"SIGN-OUT SSH RELEASE FAILED: {type(error).__name__}"
             debug_log._debug_write(msg)
             print(msg, flush=True)
     response = JSONResponse({"ok": True})
@@ -975,7 +976,10 @@ async def check_update():
     except Exception as e:
         reason = _update_error_reason(e)
         try:
-            debug_log._debug_write(f"check_update failed: {type(e).__name__}: {e}")
+            # Type names only: the reason can quote raw error text.
+            cause = getattr(e, "reason", None)
+            cause_name = f" ({type(cause).__name__})" if isinstance(cause, BaseException) else ""
+            debug_log._debug_write(f"check_update failed: {type(e).__name__}{cause_name}")
         except Exception:
             pass
         return {"ok": False, "reason": reason}

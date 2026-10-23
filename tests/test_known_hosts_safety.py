@@ -64,8 +64,9 @@ def test_unreadable_existing_file_blocks_trust_without_overwrite(tmp_path, monke
 
     assert result == {"ok": False, "error": _UNREADABLE_MESSAGE}
     assert known_hosts.read_bytes() == b"approved host keys\n"
-    assert debug_lines
+    assert debug_lines == ["trust_host_key failed: PermissionError"]
     assert "secret permission detail" not in result["error"]
+    assert "secret permission detail" not in debug_lines[0]
 
 
 def test_unreadable_existing_file_blocks_forget_without_overwrite(tmp_path, monkeypatch):
@@ -83,8 +84,9 @@ def test_unreadable_existing_file_blocks_forget_without_overwrite(tmp_path, monk
 
     assert result == {"ok": False, "error": _UNREADABLE_MESSAGE}
     assert known_hosts.read_bytes() == b"approved host keys\n"
-    assert debug_lines
+    assert debug_lines == ["forget_host_key failed: PermissionError"]
     assert "secret permission detail" not in result["error"]
+    assert "secret permission detail" not in debug_lines[0]
 
 
 def test_trust_failure_tears_down_pending_session(tmp_path, monkeypatch):
@@ -208,7 +210,8 @@ def test_connect_reports_unreadable_file_without_host_key_prompt(tmp_path, monke
     }
     assert "host_key_unknown" not in result
     assert "secret permission detail" not in result["error"]
-    assert debug_lines
+    assert debug_lines == ["connect failed: PermissionError"]
+    assert "secret permission detail" not in debug_lines[0]
 
 
 def _assert_save_failure_preserves_old_file(tmp_path, monkeypatch, inject_failure):
