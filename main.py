@@ -284,7 +284,9 @@ async def lifespan(app: FastAPI):
     debug_log.close_on_shutdown()
 
 
-app = FastAPI(title=APP_NAME, lifespan=lifespan)
+# FastAPI's automatic OpenTelemetry export stays off even if the environment
+# asks for it, so the app can never send traces, metrics, or logs anywhere.
+app = FastAPI(title=APP_NAME, lifespan=lifespan, telemetry={"auto_configure": False})
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 
