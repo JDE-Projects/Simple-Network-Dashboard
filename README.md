@@ -148,6 +148,7 @@ non-interactive backup and uninstall.
 - `devices.json` contains no credentials, but it maps internal hosts and usernames. Treat it as sensitive and do not share it publicly.
 - The dashboard is intended for use on a private, trusted LAN only. Do not expose or port-forward it to the internet, even with the password in place.
 - **Network use.** Other than the job you ask of it, this app makes one other network call: a check to GitHub for a newer release when you press **Check for updates**, which sends only a version request. It collects and sends no personal data, usage data, or analytics.
+- **Privacy policy.** The full privacy policy for this app and the other JDE-Projects tools is at https://jde-projects.com/privacy.
 
 ## A note on how this was built
 This project was built with AI assistance. The design decisions, feature direction, and real-world testing were directed by me. The code was written and revised with an AI assistant against that direction. Treat it like any community tool: review and test it before relying on it.
@@ -158,4 +159,4 @@ Personal and noncommercial use, modification, and redistribution are
 permitted; commercial use is not. See [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt)
 for notices on bundled dependencies.
 
-For commercial licensing, open a [GitHub issue](https://github.com/JDE-Projects/Simple-Network-Dashboard/issues) with the title "Commercial License Inquiry".
+For commercial licensing, see the [JDE-Projects support page](https://jde-projects.com/support/#commercial-licensing).
