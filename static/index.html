@@ -326,7 +326,7 @@
     padding: 12px 14px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.65;
   }
   .ln { white-space: pre-wrap; word-break: break-word; display: flex; gap: 9px; }
-  .ln .tag { flex: none; color: var(--text-faint); font-size: 10px; width: 64px; text-align: right; opacity: 0.7; padding-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ln .tag { flex: none; color: var(--text-faint); font-size: 10px; width: var(--console-tag-width, 64px); text-align: right; opacity: 0.7; padding-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ln .msg { flex: 1; }
   .ln.cmd  .msg { color: var(--accent); font-weight: 600; }
   .ln.cmd .reveal-toggle { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-decoration: underline; opacity: 0.75; }
@@ -337,7 +337,7 @@
   .ln.muted .msg{ color: var(--text-faint); }
   .ln.out  .msg { color: var(--text-dim); }
   .console-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 13px; text-align: center; padding: 20px; }
-  .live-terminal { margin: 4px 0 10px 73px; max-width: calc(100% - 73px); }
+  .live-terminal { margin: 4px 0 10px calc(var(--console-tag-width, 64px) + 9px); max-width: calc(100% - var(--console-tag-width, 64px) - 9px); }
   .terminal-strip { min-height: 24px; padding: 4px 8px; color: var(--text-faint); font-size: 10px; line-height: 16px; border: 1px solid var(--border); border-bottom: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
   .terminal-frame { overflow: hidden; border: 1px solid var(--border); border-radius: 0 0 var(--radius-sm) var(--radius-sm); background: var(--bg); }
   .live-terminal.terminal-focused .terminal-frame { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -1184,8 +1184,33 @@ function renderCustomCmd(msgEl, entry) {
   msgEl.appendChild(toggle);
 }
 
-function consoleTime() {
-  return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+function consoleTime(date = new Date()) {
+  return date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+// Width of the console's time column. Sized once at load to the widest time
+// the browser's local format produces (a 12-hour clock adds AM/PM), never
+// narrower than 64 px. If measuring fails, the column keeps 64 px.
+let consoleTagWidth = 64;
+
+async function fitConsoleTimeColumn() {
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;font-family:JetBrains Mono, monospace;font-size:10px;white-space:pre;';
+  document.body.appendChild(probe);
+  try {
+    await document.fonts.load("10px 'JetBrains Mono'");
+    let widest = 0;
+    for (let hour = 0; hour < 24; hour++) {
+      probe.textContent = consoleTime(new Date(2000, 0, 1, hour, 58, 58));
+      widest = Math.max(widest, probe.getBoundingClientRect().width);
+    }
+    consoleTagWidth = Math.max(64, Math.ceil(widest) + 2);
+    document.documentElement.style.setProperty('--console-tag-width', consoleTagWidth + 'px');
+  } catch (error) {
+    // Layout only: the 64 px default stays in place.
+  } finally {
+    probe.remove();
+  }
 }
 
 function buildConsoleLine(text, level, cmdId, time = consoleTime()) {
@@ -1269,7 +1294,7 @@ async function terminalRunSize(id) {
     const cell = probe.getBoundingClientRect();
     if (!cell.width || !cell.height) return {cols: 120, rows: 30};
     return {
-      cols: Math.min(500, Math.max(20, Math.floor((con.clientWidth - 111) / cell.width))),
+      cols: Math.min(500, Math.max(20, Math.floor((con.clientWidth - consoleTagWidth - 47) / cell.width))),
       rows: Math.min(200, Math.max(5, Math.floor((con.clientHeight - 52) / cell.height))),
     };
   } catch (error) {
@@ -2666,6 +2691,7 @@ function clearIdleTimer() {
 /* ============================================================
    Boot
    ============================================================ */
+fitConsoleTimeColumn();
 connectWS();
 </script>
 </body>
