@@ -234,7 +234,7 @@ async def _poll_once():
                         _metrics_cache.get(device.get("id")),
                     )
                 except Exception as exc:
-                    result = {"error": str(exc)}
+                    result = {"error": f"failed ({type(exc).__name__})"}
             return device, result
 
         tasks = [asyncio.create_task(fetch_one(device)) for device in devices]

@@ -77,21 +77,24 @@ def test_poll_once_isolates_a_single_failed_fetch(monkeypatch):
 
     async def fake_fetch_metrics(host, port, prev=None):
         if host == "10.0.0.4":
-            raise RuntimeError("boom")
+            raise RuntimeError("raw-fetch-error-marker")
         return {"cpu_percent": 5.0}
     monkeypatch.setattr(main, "fetch_metrics", fake_fetch_metrics)
 
     broadcasts, broadcast = _recorder()
     monkeypatch.setattr(main.ws_mgr, "broadcast", broadcast)
 
-    monkeypatch.setattr(debug_log, "_debug_write", lambda *a, **k: None)
+    debug_lines = []
+    monkeypatch.setattr(debug_log, "_debug_write", lambda text, *a, **k: debug_lines.append(text))
 
     asyncio.run(main._poll_once())  # must not raise
 
     by_id = {msg["device_id"]: msg for msg in broadcasts}
     assert by_id["dev_b"]["data"] == {"cpu_percent": 5.0}
-    assert by_id["dev_a"]["data"] == {"error": "boom"}
-    assert metrics_cache["dev_a"] == {"error": "boom"}
+    assert by_id["dev_a"]["data"] == {"error": "failed (RuntimeError)"}
+    assert metrics_cache["dev_a"] == {"error": "failed (RuntimeError)"}
+    assert debug_lines
+    assert not any("raw-fetch-error-marker" in line for line in debug_lines)
     assert metrics_cache["dev_b"] == {"cpu_percent": 5.0}
 
 
