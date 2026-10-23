@@ -284,7 +284,9 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
     tx_map = {e["labels"].get("device"): e["value"] for e in parsed.get("node_network_transmit_bytes_total", [])}
     ifaces = (set(rx_map) | set(tx_map)) - {None}
     net_raw = {}
-    for iface in ifaces:
+    # Sorted so the stats panel lists interfaces in the same order every time;
+    # a set's order changes from one server start to the next.
+    for iface in sorted(ifaces):
         if _EXCLUDE_IFACE.match(iface):
             continue
         net_raw[iface] = {"rx": rx_map.get(iface, 0), "tx": tx_map.get(iface, 0)}

@@ -234,3 +234,21 @@ node_network_transmit_bytes_total{{device="eth0"}} {500000 + tx_delta}
     assert out["network"]["eth0"]["tx_kbs"] == round(tx_delta / elapsed / 1024, 1)
     assert out["network"]["eth0"]["rx_kbs"] == 10.0
     assert out["network"]["eth0"]["tx_kbs"] == 5.0
+
+
+def test_network_interfaces_listed_in_name_order():
+    # Eight names, so an unsorted result passing by chance is about 1 in 40,000.
+    names = ["wlan0", "eth1", "wg0", "end0", "eth0", "enp1s0", "usb0", "eth2"]
+
+    def sample(offset):
+        return "\n".join(
+            f'node_network_receive_bytes_total{{device="{name}"}} {offset}\n'
+            f'node_network_transmit_bytes_total{{device="{name}"}} {offset}'
+            for name in names
+        )
+
+    prev = extract_metrics(_parse(sample(1000)), None)
+    prev["_timestamp"] -= 1
+    out = extract_metrics(_parse(sample(2000)), prev)
+
+    assert list(out["network"]) == sorted(names)
