@@ -13,9 +13,21 @@ def test_terminal_acknowledges_completed_writes_with_a_trailing_latest_ack(page,
     _start(routes)
     _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 1, "data": "one\r\n"})
     assert _wait_for(page, lambda: _messages(routes, "term_ack"))[0]["seq"] == 1
-    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 2, "data": "two\r\n"})
-    _send(routes, {"type": "term_data", "device_id": SEEDED_DEVICE_ID, "run_id": "run-one", "seq": 3, "data": "three\r\n"})
-    acks = _wait_for(page, lambda: _messages(routes, "term_ack"), lambda values: len(values) == 2)
+    # Batches drawn within 50 ms of the last ack share one trailing ack. Hold
+    # the page clock at that ack and hand both batches over in one step, so a
+    # slow machine cannot push batch 2 outside the window.
+    page.evaluate(
+        """([id, run]) => {
+            const frozen = LIVE_TERMINALS.get(id).ackAt;
+            performance.now = () => frozen;
+            writeTerminalData({type: 'term_data', device_id: id, run_id: run, seq: 2, data: 'two\\r\\n'});
+            writeTerminalData({type: 'term_data', device_id: id, run_id: run, seq: 3, data: 'three\\r\\n'});
+        }""",
+        [SEEDED_DEVICE_ID, "run-one"],
+    )
+    _wait_for(page, lambda: _messages(routes, "term_ack"), lambda values: len(values) >= 2)
+    page.wait_for_timeout(200)  # no extra ack follows the trailing one
+    acks = _messages(routes, "term_ack")
     assert [message["seq"] for message in acks] == [1, 3]
 
 
