@@ -397,7 +397,7 @@ class SSHManager:
         try:
             sub = _load_known_hosts().lookup(host) if host else None
         except KnownHostsUnreadable as e:
-            self._debug_write(f"get_host_key failed: {type(e.__cause__).__name__}: {e.__cause__}")
+            self._debug_write(f"get_host_key failed: {type(e.__cause__).__name__}")
             return {"ok": False,
                     "error": "The approved host keys file could not be read. Check the server log."}
         if not sub:
