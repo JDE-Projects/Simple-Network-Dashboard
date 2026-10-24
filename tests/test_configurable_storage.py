@@ -18,10 +18,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 _PROBE = (
-    "import main, ssh_manager;"
+    "import main, host_keys;"
     "print(main.DATA_DIR);"
     "print(main.LOG_DIR);"
-    "print(ssh_manager.DATA_DIR)"
+    "print(host_keys.DATA_DIR)"
 )
 
 

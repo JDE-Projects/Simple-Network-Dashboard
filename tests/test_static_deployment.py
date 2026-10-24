@@ -45,7 +45,7 @@ APP_DIR="$TEST_ROOT/app"
 mkdir -p "$APP_DIR/static"
 copy_application_files
 diff -qr static "$APP_DIR/static"
-for filename in main.py config.py ws_manager.py delivery_queue.py terminal_run.py terminal_history.py update_check.py runtime_state.py debug_log.py persistence.py metrics_poller.py ssh_manager.py auth.py session_manager.py requirements.txt uninstall.sh; do
+for filename in main.py config.py ws_manager.py delivery_queue.py terminal_run.py terminal_history.py update_check.py runtime_state.py debug_log.py persistence.py metrics_poller.py ssh_manager.py host_keys.py ssh_session.py terminal_control.py auth.py session_manager.py requirements.txt uninstall.sh; do
   cmp -- "$filename" "$APP_DIR/$filename"
 done
 """

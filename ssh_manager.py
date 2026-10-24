@@ -4,21 +4,19 @@ Passwords are held in memory only; never written anywhere.
 """
 
 import asyncio
-import base64
-import errno
-import hashlib
 import hmac
-import os
 import secrets
-import socket
-import tempfile
 import threading
 import time
 
 import paramiko
 
 from delivery_queue import DeliveryQueue
-from terminal_history import TerminalHistory, trim_to_budget
+from host_keys import (KnownHostsUnreadable, UnknownHostKey, _PendingHostKey, _fp,
+                       _load_known_hosts, _save_known_hosts)
+from ssh_session import _Session, _connect_error_message
+from terminal_control import TerminalControlMixin
+from terminal_history import TerminalHistory
 from terminal_run import OutputBatcher, SudoGate, TerminalWriter, build_command, clamp_size, read_channel
 import config
 
@@ -30,200 +28,11 @@ HOST_KEY_PENDING_SECONDS = 300   # a host-key prompt expires 5 minutes after it 
 _EXPIRED_ERROR = "This host-key prompt expired or was already used. Reconnect to try again."
 
 
-def _connect_error_message(exc: BaseException) -> str:
-    """Turn a connect failure into a fixed, plain-language message for the
-    browser. The exception's own text is never shown: it can quote the remote
-    device or the SSH library's internals.
-
-    socket.gaierror and TimeoutError are OSError subclasses, so they are
-    checked before the refused cases. paramiko raises NoValidConnectionsError
-    when every address refused the connection or was unreachable; it counts
-    as refused only when every address refused."""
-    if isinstance(exc, socket.gaierror):
-        return "Could not connect: the device's address could not be found. Check the host name."
-    if isinstance(exc, TimeoutError):
-        return "Could not connect: the device did not respond in time. Check that it is on and reachable."
-    refused = isinstance(exc, ConnectionRefusedError)
-    if isinstance(exc, paramiko.ssh_exception.NoValidConnectionsError):
-        refused = bool(exc.errors) and all(
-            getattr(e, "errno", None) == errno.ECONNREFUSED for e in exc.errors.values())
-    if refused:
-        return "Could not connect: the device refused the connection. Check that SSH is running on it."
-    if isinstance(exc, paramiko.SSHException):
-        return "Could not connect: the SSH handshake with the device failed."
-    return "Could not connect. Check that the device is on and reachable."
-
-
-# Shares SND_DATA_DIR with main.py so known_hosts stays with the rest of the data.
-DATA_DIR         = os.environ.get("SND_DATA_DIR", "/var/lib/simple-network-dashboard")
-KNOWN_HOSTS_FILE = os.path.join(DATA_DIR, "known_hosts")
-
-def _fp(key) -> str:
-    digest = hashlib.sha256(key.asbytes()).digest()
-    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
-
-
-def _load_known_hosts() -> paramiko.HostKeys:
-    hk = paramiko.HostKeys()
-    try:
-        hk.load(KNOWN_HOSTS_FILE)
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        raise KnownHostsUnreadable() from e
-    return hk
-
-
-def _save_known_hosts(host_keys: paramiko.HostKeys) -> None:
-    folder = os.path.dirname(KNOWN_HOSTS_FILE) or "."
-    temp_path = None
-    try:
-        fd, temp_path = tempfile.mkstemp(prefix=".known_hosts-", suffix=".tmp", dir=folder)
-        try:
-            if os.name != "nt" and hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-        finally:
-            os.close(fd)
-        host_keys.save(temp_path)
-        with open(temp_path, "rb+") as f:
-            os.fsync(f.fileno())
-        os.replace(temp_path, KNOWN_HOSTS_FILE)
-        temp_path = None
-        if os.name != "nt":
-            directory_fd = os.open(folder, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-    finally:
-        if temp_path is not None:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-
-
-class KnownHostsUnreadable(Exception):
-    """The existing approved host-key file could not be read safely."""
-
-
-class UnknownHostKey(Exception):
-    def __init__(self, hostname, key):
-        super().__init__("unknown host key")
-        self.hostname = hostname
-        self.key      = key
-
-
-class _TofuPolicy(paramiko.MissingHostKeyPolicy):
-    """Trust-on-first-use: surface the offered key instead of auto-accepting."""
-    def missing_host_key(self, client, hostname, key):
-        raise UnknownHostKey(hostname, key)
-
-
-class _PendingHostKey:
-    """One device's outstanding host-key prompt: the offered key, a one-time
-    code the browser that raised the prompt must echo back, the owner
-    (signed-in session) that raised it, and the reserved session's generation the
-    prompt is bound to, so a later connect/disconnect on the same device can
-    never be resolved by an accept/reject aimed at a stale prompt."""
-
-    def __init__(self, host, key, code: str, owner: str, generation: int):
-        self.host       = host
-        self.key        = key
-        self.code       = code
-        self.owner      = owner
-        self.generation = generation
-        self.created_at = time.monotonic()
-
-
-class _Session:
-    """One SSH session slot for a device.
-
-    `state` is one of "connecting", "connected", "host_key_pending", or
-    "closed" and doubles as the reservation: a session is placed into the
-    manager's `sessions` dict as soon as a connect attempt begins, before the
-    network connect runs, so a second concurrent connect for the same device
-    sees the reservation instead of an empty slot.
-
-    `generation` is a manager-assigned, monotonically increasing number used
-    (from a later phase) to drop stale worker output that was queued for
-    delivery before a disconnect/reconnect replaced this session.
-    """
-
-    def __init__(self, device: dict, password: str, owner: str = None, device_id: str = None):
-        self.device           = device
-        self.device_id         = device_id
-        self.password          = password   # memory-only
-        self.client            = None
-        self.busy              = False
-        self.channel           = None
-        self.run_id            = None
-        self.cancelled         = False
-        self.cancel_requested  = False
-        self.owner             = owner
-        self.state             = "connecting"
-        self.generation        = 0
-        self.last_active       = time.monotonic()
-        self.last_io           = self.last_active
-        self.writer            = None
-        self.controller        = None
-        self.control_rev       = 0
-        self.auth_complete     = False
-        self.cols              = None
-        self.rows              = None
-        self.stop_timer        = None
-        self.forced            = False
-        self.writer_stuck      = False
-        self.history           = None
-        self.label             = None
-        self.sent_seq          = 0
-        self.sent_bytes        = {}
-        self.acked_seq         = 0
-        self.ack_progress_at   = time.monotonic()
-        self.ack_stalled       = False
-        self.term_condition    = threading.Condition()
-
-    def connect(self):
-        c = paramiko.SSHClient()
-        try:
-            c.load_host_keys(KNOWN_HOSTS_FILE)
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            raise KnownHostsUnreadable() from e
-        c.set_missing_host_key_policy(_TofuPolicy())
-        c.connect(
-            hostname=self.device["host"],
-            username=self.device["username"],
-            password=self.password,
-            timeout=12,
-            allow_agent=False,
-            look_for_keys=False,
-        )
-        self.client = c
-        try:
-            t = c.get_transport()
-            if t:
-                t.set_keepalive(30)
-        except Exception:
-            pass
-
-    def close(self):
-        try:
-            if self.client:
-                self.client.close()
-        finally:
-            self.client   = None
-            self.channel  = None
-            self.password = None   # wipe from memory
-            self.history = None
-
-
 # ---------------------------------------------------------------------------
 # Public manager — one instance shared across the whole app
 # ---------------------------------------------------------------------------
 
-class SSHManager:
+class SSHManager(TerminalControlMixin):
     def __init__(self, broadcast_fn, debug_write=None, owner_watching=None):
         """broadcast_fn: async coroutine function that pushes a dict to all WS clients.
         debug_write: optional callable(str) used to log internal exception detail
@@ -672,128 +481,6 @@ class SSHManager:
             self._owner_activity.clear()
         return {"ok": True}
 
-    def claim_terminal(self, device_id: str, run_id: str, owner: str, socket_id: str) -> dict:
-        with self._device_lock(device_id):
-            sess = self.sessions.get(device_id)
-            if not sess or sess.owner != owner or sess.state != "connected" or not sess.busy or sess.run_id != run_id:
-                self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] terminal input refused")
-                return {"ok": False}
-            sess.controller = socket_id
-            sess.control_rev += 1
-            if sess.writer:
-                sess.writer.clear_input()
-            return {"ok": True, "rev": sess.control_rev}
-
-    def terminal_input(self, device_id, run_id, rev, data, owner, socket_id) -> dict:
-        with self._device_lock(device_id):
-            sess = self.sessions.get(device_id)
-            valid = (isinstance(data, str) and len(data) <= config.TERM_INPUT_MAX_CHARS and sess
-                     and sess.owner == owner and sess.state == "connected" and sess.busy
-                     and sess.run_id == run_id and sess.controller == socket_id
-                     and sess.control_rev == rev and sess.auth_complete and sess.writer is not None)
-            if not valid:
-                self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] terminal input refused")
-                return {"ok": False}
-            if not sess.writer.input(data):
-                return {"ok": False, "full": True}
-            sess.last_io = time.monotonic()
-            return {"ok": True}
-
-    def terminal_resize(self, device_id, run_id, rev, cols, rows, owner, socket_id) -> dict:
-        with self._device_lock(device_id):
-            sess = self.sessions.get(device_id)
-            valid = (isinstance(cols, int) and not isinstance(cols, bool) and isinstance(rows, int) and not isinstance(rows, bool)
-                     and sess and sess.owner == owner and sess.state == "connected" and sess.busy
-                     and sess.run_id == run_id and sess.controller == socket_id and sess.control_rev == rev
-                     and sess.auth_complete and sess.writer is not None)
-            if not valid:
-                self._debug_write(f"SSH [{self._device_tag(device_id, sess)}] terminal input refused")
-                return {"ok": False}
-            sess.cols, sess.rows = clamp_size(cols, rows)
-            sess.writer.resize(sess.cols, sess.rows)
-            return {"ok": True}
-
-    def terminal_ack(self, device_id, run_id, seq, owner) -> None:
-        """Record completed browser terminal writes for the current owner run."""
-        if not isinstance(seq, int) or isinstance(seq, bool):
-            return
-        with self._device_lock(device_id):
-            sess = self.sessions.get(device_id)
-            if (sess is None or sess.owner != owner or sess.state != "connected"
-                    or not sess.busy or sess.run_id != run_id):
-                return
-            with sess.term_condition:
-                if seq > sess.sent_seq or seq <= sess.acked_seq:
-                    return
-                sess.acked_seq = seq
-                sess.ack_progress_at = time.monotonic()
-                sess.ack_stalled = False
-                for sent_seq in [item for item in sess.sent_bytes if item <= seq]:
-                    del sess.sent_bytes[sent_seq]
-                sess.term_condition.notify_all()
-
-    def _wait_for_terminal_ack(self, device_id, sess, run_id) -> bool:
-        """Pause SSH reading while the browser has too much unwritten output."""
-        with sess.term_condition:
-            while True:
-                if self.sessions.get(device_id) is not sess or sess.run_id != run_id:
-                    return False
-                if sess.cancelled:
-                    return True
-                if not self._owner_watching(sess.owner) or sess.ack_stalled:
-                    return True
-                if sum(sess.sent_bytes.values()) <= config.TERM_UNACKED_MAX_BYTES:
-                    return True
-                remaining = config.TERM_ACK_STALL_SECONDS - (time.monotonic() - sess.ack_progress_at)
-                if remaining <= 0:
-                    sess.ack_stalled = True
-                    self._debug_write("terminal acknowledgements stalled")
-                    return True
-                sess.term_condition.wait(min(0.25, remaining))
-
-    def cancel(self, device_id: str, run_id: str = None, owner: str = None) -> dict:
-        with self._device_lock(device_id):
-            sess = self.sessions.get(device_id)
-            if not sess or not sess.busy or sess.run_id != run_id:
-                return {"ok": False}
-            if owner is not None and sess.owner != owner:
-                return {"ok": False, "not_owner": True,
-                        "error": "This device is in use by another session."}
-            # `cancel_requested` is honored by _exec even before sess.channel
-            # is wired up, so a cancel arriving in that early window still
-            # takes effect instead of being silently dropped.
-            sess.cancelled = True
-            sess.cancel_requested = True
-            with sess.term_condition:
-                sess.term_condition.notify_all()
-            channel = sess.channel
-            ready = channel is not None and sess.auth_complete and sess.writer is not None
-            if ready and sess.stop_timer is not None:
-                sess.forced = True
-                channel.close()
-                return {"ok": True}
-            if ready:
-                sess.writer.interrupt()
-                timer = threading.Timer(config.TERM_STOP_GRACE_SECONDS, self._force_stop,
-                                        args=(device_id, sess, run_id, channel))
-                timer.daemon = True
-                sess.stop_timer = timer
-                timer.start()
-                return {"ok": True}
-        if channel is not None:
-            try:
-                channel.close()
-            except Exception:
-                pass
-        return {"ok": True}
-
-    def _force_stop(self, device_id, sess, run_id, channel):
-        with self._device_lock(device_id):
-            if self.sessions.get(device_id) is not sess or sess.run_id != run_id or sess.channel is not channel:
-                return
-            sess.forced = True
-            channel.close()
-
     # ---- command execution ------------------------------------------------
 
     def run_command(self, device_id: str, raw_cmd: str, use_sudo: bool,
@@ -1048,43 +735,6 @@ class SSHManager:
             # replace landing between here and delivery is caught at
             # delivery time by the generation stamp.
             self._status(device_id, "connected", gen=sess.generation)
-
-    def owner_terminal_snapshot(self, owner: str) -> list[dict]:
-        """Return recoverable terminal state for this owner's current runs."""
-        terminals = []
-        for device_id in list(self.sessions):
-            with self._device_lock(device_id):
-                sess = self.sessions.get(device_id)
-                if (sess is None or sess.owner != owner or sess.state != "connected"
-                        or not sess.busy or sess.history is None):
-                    continue
-                terminals.append({
-                    "device_id": device_id,
-                    "run_id": sess.run_id,
-                    "cols": sess.cols,
-                    "rows": sess.rows,
-                    "label": sess.label,
-                    **sess.history.snapshot(),
-                })
-                with sess.term_condition:
-                    if sess.sent_seq > sess.acked_seq:
-                        sess.acked_seq = sess.sent_seq
-                        sess.ack_progress_at = time.monotonic()
-                        sess.ack_stalled = False
-                        sess.sent_bytes.clear()
-                        sess.term_condition.notify_all()
-        return trim_to_budget(terminals, config.TERM_INIT_HISTORY_MAX_CHARS)
-
-    def request_terminal_redraw(self, device_id: str, run_id: str, owner: str) -> bool:
-        """Request a full-screen program redraw through its writer thread."""
-        with self._device_lock(device_id):
-            sess = self.sessions.get(device_id)
-            if (sess is None or sess.owner != owner or sess.run_id != run_id
-                    or sess.writer is None or sess.rows is None):
-                return False
-            sess.writer.resize(sess.cols, sess.rows - 1)
-            sess.writer.resize(sess.cols, sess.rows)
-            return True
 
     # ---- idle timeout --------------------------------------------------------
 
