@@ -90,10 +90,8 @@ sha256sum -c simple-network-dashboard-vX.Y.Z.tar.gz.sha256
 ```
 
 Check the build attestation (requires the [GitHub CLI](https://cli.github.com/)):
-```bash
-gh attestation verify simple-network-dashboard-vX.Y.Z.tar.gz \
-  --repo JDE-Projects/Simple-Network-Dashboard \
-  --signer-repo JDE-Projects/Build-Tools
+```
+gh attestation verify simple-network-dashboard-vX.Y.Z.tar.gz --repo JDE-Projects/Simple-Network-Dashboard --signer-repo JDE-Projects/Build-Tools
 ```
 
 This proves the tarball was packaged by the published GitHub Actions pipeline from this public source, not on a personal machine. The `--signer-repo` flag is required because the workflow lives in a separate repository.
