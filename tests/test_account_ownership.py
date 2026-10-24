@@ -394,6 +394,31 @@ printf 'remove=%s userdel=%s groupdel=%s record_exists=%s\\n' "$REMOVE_SND_IDENT
     assert "remove=true userdel=true groupdel=true record_exists=no" in result.stdout
 
 
+def test_safe_uninstall_hides_only_the_group_kept_notice() -> None:
+    result = _run_shell(
+        "uninstall.sh",
+        """
+mkdir -p "$INSTALL_STATE_DIR"
+printf 'SND_UID=999\\nSND_GID=998\\n' > "$INSTALL_STATE"
+MOCK_USER=true
+MOCK_GROUP=true
+userdel() {
+    USERDEL_CALLED=true; MOCK_USER=false
+    echo "userdel: group snd not removed because it has other members." >&2
+    echo "userdel: unrelated warning" >&2
+}
+classify_uninstall_account_state
+if ! remove_snd_identities_if_verified; then exit 10; fi
+printf 'userdel=%s groupdel=%s\\n' "${USERDEL_CALLED:-false}" "${GROUPDEL_CALLED:-false}"
+""",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "userdel=true groupdel=true" in result.stdout
+    assert "not removed because it has other members" not in result.stderr
+    assert "userdel: unrelated warning" in result.stderr
+
+
 def test_uninstall_rechecks_ids_immediately_before_deletion() -> None:
     result = _run_shell(
         "uninstall.sh",

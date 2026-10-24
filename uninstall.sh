@@ -406,8 +406,10 @@ remove_snd_identities_if_verified() {
         return 0
     fi
 
-    # No -r: the account was created with --no-create-home.
-    if ! userdel snd; then
+    # No -r: the account was created with --no-create-home. userdel keeps the
+    # snd group while the invoking administrator is still a member and says so;
+    # groupdel removes it next, so that one notice is filtered out.
+    if ! userdel snd 2> >(grep -v -F 'not removed because it has other members' >&2); then
         echo "Error: could not remove the verified snd user; the installation record was retained."
         return 1
     fi

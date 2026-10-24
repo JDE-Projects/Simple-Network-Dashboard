@@ -66,3 +66,16 @@ def test_installer_requires_hashes_for_runtime_lock() -> None:
     )
 
     assert expected in install_script
+
+
+def test_installer_skips_pip_cache_for_service_account() -> None:
+    # The snd account has no usable home folder, so a pip cache would only
+    # produce a "cache has been disabled" warning mid-install.
+    install_script = (ROOT / "install.sh").read_text(encoding="utf-8")
+    pip_lines = [
+        line for line in install_script.splitlines()
+        if '"$APP_DIR/venv/bin/pip" install' in line
+    ]
+
+    assert pip_lines
+    assert all("--no-cache-dir" in line for line in pip_lines)
