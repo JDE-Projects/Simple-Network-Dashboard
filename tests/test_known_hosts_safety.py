@@ -188,7 +188,7 @@ def test_trust_and_forget_keep_unrelated_host_entries(tmp_path, monkeypatch):
     assert not loaded.lookup("host-one")
 
 
-def test_get_host_key_reports_unreadable_file_and_logs(tmp_path, monkeypatch):
+def test_get_host_key_reports_unreadable_file_and_logs_type_only(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("approved")
     monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
@@ -205,7 +205,8 @@ def test_get_host_key_reports_unreadable_file_and_logs(tmp_path, monkeypatch):
         "ok": False,
         "error": "The approved host keys file could not be read. Check the server log.",
     }
-    assert debug_lines
+    assert debug_lines == ["get_host_key failed: PermissionError"]
+    assert "secret permission detail" not in debug_lines[0]
 
 
 def test_connect_reports_unreadable_file_without_host_key_prompt(tmp_path, monkeypatch):
