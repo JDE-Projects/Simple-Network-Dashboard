@@ -14,30 +14,13 @@ import subprocess
 import tarfile
 import tempfile
 
+from app_files import installer_copy_list
+
 ROOT = Path(__file__).resolve().parents[1]
 
-REQUIRED_FILES = [
-    "main.py",
-    "config.py",
-    "ws_manager.py",
-    "delivery_queue.py",
-    "terminal_run.py",
-    "terminal_history.py",
-    "update_check.py",
-    "runtime_state.py",
-    "debug_log.py",
-    "persistence.py",
-    "metrics_poller.py",
-    "ssh_manager.py",
-    "host_keys.py",
-    "ssh_session.py",
-    "terminal_control.py",
-    "auth.py",
-    "session_manager.py",
-    "snd-reset-password",
+# Everything the installer copies, plus the release files it does not.
+REQUIRED_FILES = installer_copy_list() + [
     "install.sh",
-    "uninstall.sh",
-    "requirements.txt",
     "requirements.in",
     "README.md",
     "LICENSE",
