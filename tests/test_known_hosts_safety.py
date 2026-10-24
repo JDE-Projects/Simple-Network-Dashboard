@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+import host_keys
 import ssh_manager
 
 
@@ -50,7 +51,7 @@ def _write_hosts(path, entries):
 def test_unreadable_existing_file_blocks_trust_without_overwrite(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_bytes(b"approved host keys\n")
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
     monkeypatch.setattr(
         ssh_manager.paramiko.HostKeys,
         "load",
@@ -72,7 +73,7 @@ def test_unreadable_existing_file_blocks_trust_without_overwrite(tmp_path, monke
 def test_unreadable_existing_file_blocks_forget_without_overwrite(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_bytes(b"approved host keys\n")
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
     monkeypatch.setattr(
         ssh_manager.paramiko.HostKeys,
         "load",
@@ -90,7 +91,7 @@ def test_unreadable_existing_file_blocks_forget_without_overwrite(tmp_path, monk
 
 
 def test_trust_failure_tears_down_pending_session(tmp_path, monkeypatch):
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
     monkeypatch.setattr(
         ssh_manager,
         "_save_known_hosts",
@@ -108,7 +109,7 @@ def test_trust_failure_tears_down_pending_session(tmp_path, monkeypatch):
 
 
 def test_trust_failure_reports_host_key_approval_failed_reason(tmp_path, monkeypatch):
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
     monkeypatch.setattr(
         ssh_manager,
         "_save_known_hosts",
@@ -129,7 +130,7 @@ def test_trust_failure_reports_host_key_approval_failed_reason(tmp_path, monkeyp
 
 
 def test_trust_failure_does_not_close_replacement_session(tmp_path, monkeypatch):
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(tmp_path / "known_hosts"))
     manager = _manager()
     device_id, owner, original_session = _pending(manager)
     replacement_key = _key()
@@ -160,7 +161,7 @@ def test_trust_failure_does_not_close_replacement_session(tmp_path, monkeypatch)
 
 def test_trust_missing_file_creates_it_and_success_consumes_pending(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
     manager = _manager()
     device_id, owner, _session = _pending(manager)
 
@@ -176,7 +177,7 @@ def test_trust_and_forget_keep_unrelated_host_entries(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
     unrelated_key = _key()
     _write_hosts(known_hosts, [("unrelated", unrelated_key)])
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
     manager = _manager()
     device_id, owner, _session = _pending(manager)
 
@@ -191,7 +192,7 @@ def test_trust_and_forget_keep_unrelated_host_entries(tmp_path, monkeypatch):
 def test_get_host_key_reports_unreadable_file_and_logs_type_only(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("approved")
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
     monkeypatch.setattr(
         ssh_manager.paramiko.HostKeys,
         "load",
@@ -212,7 +213,7 @@ def test_get_host_key_reports_unreadable_file_and_logs_type_only(tmp_path, monke
 def test_connect_reports_unreadable_file_without_host_key_prompt(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("approved")
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
 
     class Client:
         def load_host_keys(self, _path):
@@ -240,7 +241,7 @@ def _assert_save_failure_preserves_old_file(tmp_path, monkeypatch, inject_failur
     known_hosts = tmp_path / "known_hosts"
     _write_hosts(known_hosts, [("old-host", _key())])
     before = known_hosts.read_bytes()
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
     inject_failure()
 
     with pytest.raises(OSError):
@@ -264,7 +265,7 @@ def test_paramiko_save_failure_leaves_old_file_and_no_temp(tmp_path, monkeypatch
 def test_fsync_failure_leaves_old_file_and_no_temp(tmp_path, monkeypatch):
     def inject_failure():
         monkeypatch.setattr(
-            ssh_manager.os,
+            host_keys.os,
             "fsync",
             lambda _fd: (_ for _ in ()).throw(OSError("fsync failure")),
         )
@@ -275,7 +276,7 @@ def test_fsync_failure_leaves_old_file_and_no_temp(tmp_path, monkeypatch):
 def test_replace_failure_leaves_old_file_and_no_temp(tmp_path, monkeypatch):
     def inject_failure():
         monkeypatch.setattr(
-            ssh_manager.os,
+            host_keys.os,
             "replace",
             lambda *_args: (_ for _ in ()).throw(OSError("replace failure")),
         )
@@ -286,7 +287,7 @@ def test_replace_failure_leaves_old_file_and_no_temp(tmp_path, monkeypatch):
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX file mode")
 def test_saved_known_hosts_file_mode_is_private(tmp_path, monkeypatch):
     known_hosts = tmp_path / "known_hosts"
-    monkeypatch.setattr(ssh_manager, "KNOWN_HOSTS_FILE", str(known_hosts))
+    monkeypatch.setattr(host_keys, "KNOWN_HOSTS_FILE", str(known_hosts))
 
     ssh_manager._save_known_hosts(ssh_manager.paramiko.HostKeys())
 

@@ -12,11 +12,11 @@ import stat
 import subprocess
 
 import debug_log
+import host_keys
 import main
 import persistence
 import runtime_state
 import pytest
-import ssh_manager
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -984,36 +984,36 @@ def test_devices_save_cleans_up_temp_file_before_replacement(monkeypatch, capsys
 def test_known_hosts_file_is_private_when_saved(monkeypatch) -> None:
     calls = []
     real_os_open = os.open
-    temp_path = os.path.join(ssh_manager.DATA_DIR, ".known_hosts-test.tmp")
-    monkeypatch.setattr(ssh_manager.tempfile, "mkstemp", lambda **_kwargs: (11, temp_path))
-    monkeypatch.setattr(ssh_manager.os, "close", lambda fd: calls.append(("close", fd)))
-    monkeypatch.setattr(ssh_manager.os, "fsync", lambda fd: calls.append(("fsync", fd)))
-    monkeypatch.setattr(ssh_manager.os, "replace", lambda *args: calls.append(("replace", *args)))
-    monkeypatch.setattr(ssh_manager, "open", lambda *_args: _AtomicTextFile(calls, 12), raising=False)
+    temp_path = os.path.join(host_keys.DATA_DIR, ".known_hosts-test.tmp")
+    monkeypatch.setattr(host_keys.tempfile, "mkstemp", lambda **_kwargs: (11, temp_path))
+    monkeypatch.setattr(host_keys.os, "close", lambda fd: calls.append(("close", fd)))
+    monkeypatch.setattr(host_keys.os, "fsync", lambda fd: calls.append(("fsync", fd)))
+    monkeypatch.setattr(host_keys.os, "replace", lambda *args: calls.append(("replace", *args)))
+    monkeypatch.setattr(host_keys, "open", lambda *_args: _AtomicTextFile(calls, 12), raising=False)
     if os.name != "nt":
-        monkeypatch.setattr(ssh_manager.os, "fchmod", lambda *args: calls.append(("fchmod", *args)))
+        monkeypatch.setattr(host_keys.os, "fchmod", lambda *args: calls.append(("fchmod", *args)))
         monkeypatch.setattr(
-            ssh_manager.os,
+            host_keys.os,
             "open",
-            lambda path, *_args: 13 if path == ssh_manager.DATA_DIR else real_os_open(path, *_args),
+            lambda path, *_args: 13 if path == host_keys.DATA_DIR else real_os_open(path, *_args),
         )
 
     class HostKeys:
         def save(self, path: str) -> None:
             calls.append(("save", path))
 
-    ssh_manager._save_known_hosts(HostKeys())
+    host_keys._save_known_hosts(HostKeys())
 
     if os.name == "nt":
         assert calls == [
             ("close", 11), ("save", temp_path), ("fsync", 12), ("close-file",),
-            ("replace", temp_path, ssh_manager.KNOWN_HOSTS_FILE),
+            ("replace", temp_path, host_keys.KNOWN_HOSTS_FILE),
         ]
     else:
         assert calls == [
             ("fchmod", 11, 0o600), ("close", 11), ("save", temp_path),
             ("fsync", 12), ("close-file",),
-            ("replace", temp_path, ssh_manager.KNOWN_HOSTS_FILE),
+            ("replace", temp_path, host_keys.KNOWN_HOSTS_FILE),
             ("fsync", 13), ("close", 13),
         ]
 
