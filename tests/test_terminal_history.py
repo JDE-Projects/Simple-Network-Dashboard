@@ -1,7 +1,7 @@
 """Recovery-history behavior for live terminal commands."""
 
-import config
-from terminal_history import TerminalHistory
+from simple_network_dashboard import config
+from simple_network_dashboard.terminal_history import TerminalHistory
 
 
 def _snapshot_after(text, split):
@@ -64,7 +64,7 @@ def test_delete_and_c1_control_characters_are_dropped():
 
 
 def test_trim_keeps_newest_lines_and_partial_within_shared_budget():
-    from terminal_history import trim_to_budget
+    from simple_network_dashboard.terminal_history import trim_to_budget
     terminals = [
         {"lines": ["old", "mid", "new"], "partial": "prompt "},
         {"lines": ["x" * 10] * 5, "partial": ""},
@@ -76,7 +76,7 @@ def test_trim_keeps_newest_lines_and_partial_within_shared_budget():
 
 
 def test_trim_counts_escaped_size_of_non_ascii_text():
-    from terminal_history import trim_to_budget
+    from simple_network_dashboard.terminal_history import trim_to_budget
     terminals = [{"lines": ["é" * 10, "é" * 10], "partial": ""}]
     trim_to_budget(terminals, 100)
     assert terminals[0]["lines"] == ["é" * 10]

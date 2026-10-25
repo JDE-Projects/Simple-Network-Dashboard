@@ -7,9 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import auth
-import main
-from session_manager import LoginThrottle, SessionStore
+from simple_network_dashboard import auth, main
+from simple_network_dashboard.session_manager import LoginThrottle, SessionStore
 
 
 def _csrf_headers(client: TestClient) -> dict[str, str]:

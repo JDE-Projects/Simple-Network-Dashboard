@@ -61,7 +61,7 @@ FORCED_PORT=4123
 select_backend_port
 printf 'forced=%s\n' "$PORT"
 FORCED_PORT=""
-printf 'ExecStart=/app/main.py --port 3008\n' > "$UNIT_DEST"
+printf 'ExecStart=/app/venv/bin/python -m simple_network_dashboard --port 3008\n' > "$UNIT_DEST"
 select_backend_port
 printf 'update=%s\n' "$PORT"
 rm -f "$UNIT_DEST"

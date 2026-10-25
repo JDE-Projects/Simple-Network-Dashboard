@@ -11,11 +11,7 @@ import shutil
 import stat
 import subprocess
 
-import debug_log
-import host_keys
-import main
-import persistence
-import runtime_state
+from simple_network_dashboard import debug_log, host_keys, main, persistence, runtime_state
 import pytest
 
 
@@ -850,7 +846,7 @@ def test_failed_command_save_does_not_mutate_cached_configuration(monkeypatch) -
 
 
 def test_recovery_ui_shows_only_simple_warning_and_restored_notice() -> None:
-    ui = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    ui = (ROOT / "simple_network_dashboard" / "static" / "index.html").read_text(encoding="utf-8")
 
     assert 'id="recoveryBanner"' in ui
     assert "classList.toggle('show', !!msg.recovery_mode)" in ui

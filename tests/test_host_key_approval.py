@@ -6,7 +6,7 @@ cleanup on every teardown path.
 `_Session.connect` and paramiko are never exercised for real. Nothing here
 touches the network."""
 
-import ssh_manager
+from simple_network_dashboard import ssh_manager
 
 
 class _FakeKey:

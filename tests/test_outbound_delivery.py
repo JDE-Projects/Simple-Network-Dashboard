@@ -5,10 +5,9 @@ import json
 import threading
 import time
 
-import config
-import main
-from ssh_manager import SSHManager, _Session
-from ws_manager import _WSManager
+from simple_network_dashboard import config, main
+from simple_network_dashboard.ssh_manager import SSHManager, _Session
+from simple_network_dashboard.ws_manager import _WSManager
 
 
 class _Socket:

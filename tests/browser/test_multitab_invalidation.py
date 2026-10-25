@@ -6,7 +6,7 @@ import re
 
 from playwright.sync_api import expect
 
-from auth import create_auth_state, publish_auth_state
+from simple_network_dashboard.auth import create_auth_state, publish_auth_state
 from tests.browser.conftest import DASHBOARD_PASSWORD
 
 

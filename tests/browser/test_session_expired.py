@@ -2,7 +2,7 @@
 modal (never stacks), offers a Sign In button, and never auto-redirects, so
 anything the user was typing is still there.
 
-See static/index.html's showSessionExpired() (~line 878, latched by the
+See simple_network_dashboard/static/index.html's showSessionExpired() (~line 878, latched by the
 _sessionExpiredShown flag so a second 401 is a no-op) and api()'s 401/403
 branch (~line 921).
 """

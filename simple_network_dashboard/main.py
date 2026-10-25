@@ -27,15 +27,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-import debug_log
-import persistence
-import runtime_state
-from metrics_poller import fetch_metrics
-from ssh_manager import SSHManager
-from auth import load_auth_state, verify_password
-from session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageError, SessionStore
-from update_check import _update_error_reason, _version_tuple, _fetch_latest_version
-from config import (
+from simple_network_dashboard import APP_VERSION, debug_log, persistence, runtime_state
+from simple_network_dashboard.auth import load_auth_state, verify_password
+from simple_network_dashboard.config import (
     APP_NAME,
     AUTH_FILE,
     BASE_DIR,
@@ -68,13 +62,11 @@ from config import (
     _PUBLIC_PATHS,
     _UNSAFE_METHODS,
 )
-from ws_manager import _WSManager
-
-
-# The release tooling reads the shipped version from a plain string assignment
-# in the entry script, so APP_VERSION lives here rather than in config. Modules
-# that need it (update_check) receive it by argument to avoid importing main.
-APP_VERSION = "1.8.3"
+from simple_network_dashboard.metrics_poller import fetch_metrics
+from simple_network_dashboard.session_manager import LoginThrottle, REMEMBERED_SECONDS, SessionStorageError, SessionStore
+from simple_network_dashboard.ssh_manager import SSHManager
+from simple_network_dashboard.update_check import _update_error_reason, _version_tuple, _fetch_latest_version
+from simple_network_dashboard.ws_manager import _WSManager
 
 
 # ---------------------------------------------------------------------------
@@ -1023,6 +1015,3 @@ def _parse_port(argv: list) -> int:
     return port
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=_parse_port(sys.argv[1:]), reload=False)

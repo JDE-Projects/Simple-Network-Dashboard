@@ -10,7 +10,7 @@ import time
 import paramiko
 
 
-# Shares SND_DATA_DIR with main.py so known_hosts stays with the rest of the data.
+# Shares SND_DATA_DIR with the application so known_hosts stays with the rest of the data.
 DATA_DIR         = os.environ.get("SND_DATA_DIR", "/var/lib/simple-network-dashboard")
 KNOWN_HOSTS_FILE = os.path.join(DATA_DIR, "known_hosts")
 

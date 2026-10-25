@@ -1,6 +1,6 @@
 """Server-owned device IDs.
 
-main.py keeps device IDs server-generated.
+The application keeps device IDs server-generated.
 POST /api/devices with an ``id`` that matches an existing device updates it,
 but an ``id`` that matches nothing is rejected and must not create a new
 device with the caller's chosen ID. A request with no ``id`` still creates a
@@ -16,11 +16,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import auth
-import main
-import persistence
-import runtime_state
-from session_manager import LoginThrottle, SessionStore
+from simple_network_dashboard import auth, main, persistence, runtime_state
+from simple_network_dashboard.session_manager import LoginThrottle, SessionStore
 
 
 def _csrf_headers(client: TestClient) -> dict[str, str]:

@@ -11,8 +11,8 @@ import sys
 
 import pytest
 
-import config
-from terminal_run import OutputBatcher, SudoGate, build_command, clamp_size, read_channel
+from simple_network_dashboard import config
+from simple_network_dashboard.terminal_run import OutputBatcher, SudoGate, build_command, clamp_size, read_channel
 from tests.test_session_enforcement import _FakeChannel
 
 

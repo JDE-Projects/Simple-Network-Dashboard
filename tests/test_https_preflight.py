@@ -577,5 +577,5 @@ def test_https_preflight_precedes_the_first_mutating_install_step() -> None:
     assert preflight < installer.index(
         'if [ "$ACCOUNT_STATE" = "fresh" ]; then\n    create_managed_snd_account'
     )
-    assert preflight < installer.index('mkdir -p "$APP_DIR/static"')
+    assert preflight < installer.index('mkdir -p "$APP_DIR/simple_network_dashboard"')
     assert preflight < installer.index('systemctl stop "$SERVICE_NAME"')

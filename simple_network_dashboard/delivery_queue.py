@@ -10,7 +10,7 @@ import collections
 import json
 import threading
 
-import config
+from simple_network_dashboard import config
 
 
 class DeliveryQueue:

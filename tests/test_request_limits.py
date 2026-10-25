@@ -1,7 +1,7 @@
 """Request validation guardrails: unknown fields, oversized bodies, and the
 app's own error shape for validation failures.
 
-main.py provides three guardrails:
+The application provides three guardrails:
 strict request models that reject unexpected fields, a 1 MB request-body
 limit enforced at the HTTP middleware level, and a reshaped validation-error
 body that matches the app's ``{"ok": false, "error": ...}`` convention
@@ -14,11 +14,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import auth
-import main
-import persistence
-import runtime_state
-from session_manager import LoginThrottle, SessionStore
+from simple_network_dashboard import auth, main, persistence, runtime_state
+from simple_network_dashboard.session_manager import LoginThrottle, SessionStore
 
 
 def _csrf_headers(client: TestClient) -> dict[str, str]:

@@ -4,7 +4,7 @@ Sample lines mirror what a Synology DSM Node Exporter actually exposes:
 a /dev/loop0 service mount under /tmp and a sit0 tunnel interface.
 """
 
-from metrics_poller import _parse, extract_metrics
+from simple_network_dashboard.metrics_poller import _parse, extract_metrics
 
 
 DISK_SAMPLE = """

@@ -1,4 +1,4 @@
-"""Tests for the size-based debug log rotation added in main.py.
+"""Tests for the size-based debug log rotation in the application.
 
 Exercises _PrivateRotatingFileHandler and the /api/debug toggle (called
 directly as a coroutine, the same pattern test_private_storage.py uses)
@@ -12,8 +12,7 @@ import asyncio
 import os
 import stat
 
-import debug_log
-import main
+from simple_network_dashboard import debug_log, main
 import pytest
 
 

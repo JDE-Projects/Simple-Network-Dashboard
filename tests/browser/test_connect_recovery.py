@@ -1,7 +1,7 @@
 """The Connect button on a device card recovers from every
 kind of API failure instead of getting stuck disabled or on 'Connecting…'.
 
-See static/index.html's tryConnect() (~line 1450), which resets the button in
+See simple_network_dashboard/static/index.html's tryConnect() (~line 1450), which resets the button in
 a `finally` block, and api()/apiFailure() (~line 874) for how each failure
 kind is turned into a message.
 """

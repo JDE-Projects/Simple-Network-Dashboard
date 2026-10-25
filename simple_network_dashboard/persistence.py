@@ -2,9 +2,8 @@ import json
 import os
 import tempfile
 
-from config import APP_NAME, DATA_DIR, DEVICES_FILE
-import runtime_state
-import debug_log
+from simple_network_dashboard import debug_log, runtime_state
+from simple_network_dashboard.config import APP_NAME, DATA_DIR, DEVICES_FILE
 
 
 def _parse_devices(contents: str) -> list:

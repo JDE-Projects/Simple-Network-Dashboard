@@ -5,7 +5,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-import config
+from simple_network_dashboard import config
 from fastapi import WebSocket
 
 

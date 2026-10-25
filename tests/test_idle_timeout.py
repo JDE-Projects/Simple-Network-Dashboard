@@ -5,7 +5,7 @@ monkeypatched to capture messages synchronously."""
 
 import time
 
-import ssh_manager
+from simple_network_dashboard import ssh_manager
 
 
 class _FakeClient:

@@ -7,7 +7,7 @@ wiring into the polling loop; that lands in a later phase.
 
 import pytest
 
-from metrics_poller import is_allowed_metrics_target, is_valid_host_string
+from simple_network_dashboard.metrics_poller import is_allowed_metrics_target, is_valid_host_string
 
 
 # --- Rejected address classes (IPv4 and IPv6) -------------------------------

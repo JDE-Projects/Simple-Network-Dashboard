@@ -13,11 +13,9 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from starlette.websockets import WebSocket
 
-import auth
-import main
-import ssh_manager
-from session_manager import SessionStore
-from ws_manager import _WSManager
+from simple_network_dashboard import auth, main, ssh_manager
+from simple_network_dashboard.session_manager import SessionStore
+from simple_network_dashboard.ws_manager import _WSManager
 
 
 async def _async_true() -> bool:

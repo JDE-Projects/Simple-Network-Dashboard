@@ -2,7 +2,7 @@
 broadcast message for custom-command echoes, so the frontend can correlate a
 typed command to its echoed console line without relying on message order."""
 
-import ssh_manager
+from simple_network_dashboard import ssh_manager
 
 
 def _mgr():

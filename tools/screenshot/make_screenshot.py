@@ -39,9 +39,9 @@ sys.path.insert(1, REPO_ROOT)
 import fake_exporter  # noqa: E402
 import scene  # noqa: E402
 
-import metrics_poller  # noqa: E402
+from simple_network_dashboard import metrics_poller  # noqa: E402
 
-APP_DIRS = ["static"]
+APP_DIRS = ["simple_network_dashboard"]
 
 OUT_IMAGE = os.path.join(REPO_ROOT, "screenshots",
                          "network-dashboard-light-dark.png")
@@ -89,20 +89,17 @@ def wait_for_http(url: str, timeout: float, label: str,
     fail(f"{label} did not answer at {url} within {timeout}s ({last})")
 
 
-def root_modules() -> list[str]:
-    """Return the root modules required by the flat dashboard application."""
-    for name in ("main.py", "auth.py"):
-        if not os.path.isfile(os.path.join(REPO_ROOT, name)):
-            fail(f"expected to find {name} in {REPO_ROOT}")
-    return sorted(
-        name for name in os.listdir(REPO_ROOT)
-        if name.endswith(".py") and name != "conftest.py"
-    )
+def package_folder() -> str:
+    """Return the dashboard package folder."""
+    path = os.path.join(REPO_ROOT, "simple_network_dashboard")
+    if not os.path.isfile(os.path.join(path, "__main__.py")):
+        fail(f"expected to find the dashboard package in {REPO_ROOT}")
+    return path
 
 
 def seed_auth_state(temp_dir: str, data_dir: str) -> str:
     """Create throwaway authentication state through the staged auth module."""
-    auth_path = os.path.join(temp_dir, "auth.py")
+    auth_path = os.path.join(temp_dir, "simple_network_dashboard", "auth.py")
     spec = importlib.util.spec_from_file_location("screenshot_staged_auth", auth_path)
     if spec is None or spec.loader is None:
         fail(f"could not load staged authentication module from {auth_path}")
@@ -118,13 +115,8 @@ def seed_auth_state(temp_dir: str, data_dir: str) -> str:
 
 def stage_app(temp_dir: str) -> str:
     """Copy the dashboard, runtime folders, devices, and sign-in state."""
-    for name in root_modules():
-        src = os.path.join(REPO_ROOT, name)
-        shutil.copy2(src, os.path.join(temp_dir, name))
     for name in APP_DIRS:
-        src = os.path.join(REPO_ROOT, name)
-        if not os.path.isdir(src):
-            fail(f"expected to find the {name} folder in {REPO_ROOT}")
+        src = package_folder() if name == "simple_network_dashboard" else os.path.join(REPO_ROOT, name)
         shutil.copytree(src, os.path.join(temp_dir, name))
 
     data_dir = os.path.join(temp_dir, "data")
@@ -303,7 +295,7 @@ def main(argv: list) -> None:
             SND_PUBLIC_ORIGIN=f"http://127.0.0.1:{app_port}",
         )
         dashboard = subprocess.Popen(
-            [sys.executable, "main.py", "--port", str(app_port)],
+            [sys.executable, "-m", "simple_network_dashboard", "--port", str(app_port)],
             cwd=temp_dir, env=env)
         processes.append(dashboard)
         wait_for_http(f"http://127.0.0.1:{app_port}/login", 30, "dashboard",

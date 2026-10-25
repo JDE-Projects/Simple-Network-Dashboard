@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import debug_log
-import main
+from simple_network_dashboard import debug_log, main, ssh_manager
 import pytest
-import ssh_manager
-from terminal_history import TerminalHistory
+from simple_network_dashboard.terminal_history import TerminalHistory
 from tests.test_session_enforcement import _FakeChannel, _FakeClient
 
 

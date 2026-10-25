@@ -1,7 +1,7 @@
 """Field-level character and range limits on saved devices, saved commands,
 and run requests.
 
-main.py sets maximum lengths (and a port range) on the fields the browser
+The application sets maximum lengths (and a port range) on the fields the browser
 sends, so an over-limit value is rejected
 by Pydantic validation instead of being silently truncated.
 """
@@ -13,11 +13,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import auth
-import main
-import persistence
-import runtime_state
-from session_manager import LoginThrottle, SessionStore
+from simple_network_dashboard import auth, main, persistence, runtime_state
+from simple_network_dashboard.session_manager import LoginThrottle, SessionStore
 
 
 def _csrf_headers(client: TestClient) -> dict[str, str]:

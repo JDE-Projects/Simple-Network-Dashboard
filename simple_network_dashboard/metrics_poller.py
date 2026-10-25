@@ -11,7 +11,7 @@ import time
 import httpx
 from typing import Optional
 
-from config import METRICS_FETCH_DEADLINE, METRICS_MAX_RESPONSE_BYTES
+from simple_network_dashboard.config import METRICS_FETCH_DEADLINE, METRICS_MAX_RESPONSE_BYTES
 
 # Filesystem types that are virtual/pseudo — not worth showing on disk panel
 _EXCLUDE_FS = {
@@ -308,7 +308,7 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Public entry point called by the background polling loop in main.py
+# Public entry point called by the background polling loop in the application.
 # ---------------------------------------------------------------------------
 
 async def _resolve_metrics_hostname(host: str, port: int) -> Optional[str]:

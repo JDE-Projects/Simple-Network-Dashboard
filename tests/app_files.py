@@ -1,10 +1,4 @@
-"""Shared view of the files the installed app needs.
-
-The installer's copy line in `copy_application_files` is the one list of
-application files. Tests read it from install.sh instead of keeping their own
-copies; test_installer_file_list.py checks that list against the modules the
-app actually imports.
-"""
+"""Shared checks for the application's installed file layout."""
 
 from __future__ import annotations
 
@@ -14,22 +8,20 @@ import re
 import shlex
 
 ROOT = Path(__file__).resolve().parents[1]
-
-# Files the installed system runs directly: systemd runs `python main.py`, and
-# the installer and snd-reset-password run `auth.py`. A new directly run
-# script must be added here.
-ENTRY_POINTS = ("main.py", "auth.py")
+PACKAGE = "simple_network_dashboard"
+PACKAGE_DIR = ROOT / PACKAGE
+ENTRY_POINTS = ("__main__.py", "auth.py")
+LOOSE_RUNTIME_FILES = ("snd-reset-password", "requirements.txt", "uninstall.sh")
 
 _FUNCTION = re.compile(r"^copy_application_files\(\) \{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
 _DESTINATION = "$APP_DIR/"
 
 
-def parse_copy_line(installer_text: str) -> list[str]:
-    """Return the file names on the installer's application copy line.
+def parse_copy_lines(installer_text: str) -> tuple[list[str], list[str]]:
+    """Return the loose files and package folder copied by the installer.
 
-    Only the plain form `cp <file> ... "$APP_DIR/"` is accepted. Anything
-    this parser could misread (line continuations, options, variables, or
-    wildcards among the files) fails loudly instead of being guessed at.
+    The parser accepts only plain ``cp`` commands with exact source names and
+    destinations. Unsupported shell forms fail rather than being guessed.
     """
     installer_text = installer_text.replace("\r\n", "\n")
     match = _FUNCTION.search(installer_text)
@@ -42,28 +34,25 @@ def parse_copy_line(installer_text: str) -> list[str]:
         tokens = shlex.split(line, comments=True)
         if tokens and tokens[0] == "cp" and tokens[-1] == _DESTINATION:
             copy_lines.append(tokens)
-    assert len(copy_lines) == 1, (
-        f'expected one `cp ... "{_DESTINATION}"` line in copy_application_files, found {len(copy_lines)}')
+    assert len(copy_lines) == 2, f'expected two `cp ... "{_DESTINATION}"` lines in copy_application_files, found {len(copy_lines)}'
 
-    files = copy_lines[0][1:-1]
-    unsupported = [name for name in files if name.startswith("-") or any(c in name for c in "$*?[")]
-    assert not unsupported, f"copy line has options, variables, or wildcards this test does not parse: {unsupported}"
-    return files
+    loose_line = next((line for line in copy_lines if PACKAGE not in line), None)
+    package_line = next((line for line in copy_lines if PACKAGE in line), None)
+    assert loose_line and package_line, "copy_application_files must copy loose runtime files and the package folder"
+    assert loose_line[1:-1] == list(LOOSE_RUNTIME_FILES), "loose runtime copy line does not match the installed runtime files"
+    assert package_line[1:-1] == ["-R", "--no-preserve=ownership", PACKAGE], "package copy line must use cp -R --no-preserve=ownership"
+    return loose_line[1:-1], package_line[1:-1]
 
 
 def installer_copy_list() -> list[str]:
-    """The application files install.sh copies into the install folder."""
-    return parse_copy_line((ROOT / "install.sh").read_text(encoding="utf-8"))
+    """The loose runtime files install.sh copies into the install folder."""
+    loose_files, _ = parse_copy_lines((ROOT / "install.sh").read_text(encoding="utf-8"))
+    return loose_files
 
 
 def app_modules() -> set[str]:
-    """Repo-root modules reachable by import from the entry points.
-
-    Follows plain `import x` and `from x import y` statements anywhere in a
-    file, including inside functions. Imports made at run time from a string
-    (importlib, __import__) are not followed.
-    """
-    root_modules = {path.stem for path in ROOT.glob("*.py")}
+    """Return package modules reachable from the installed entry points."""
+    package_modules = {path.stem for path in PACKAGE_DIR.glob("*.py")}
     found: set[str] = set()
     pending = list(ENTRY_POINTS)
     while pending:
@@ -71,7 +60,7 @@ def app_modules() -> set[str]:
         if filename in found:
             continue
         found.add(filename)
-        tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"), filename=filename)
+        tree = ast.parse((PACKAGE_DIR / filename).read_text(encoding="utf-8"), filename=filename)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
@@ -81,7 +70,10 @@ def app_modules() -> set[str]:
             else:
                 continue
             for name in names:
-                top = name.split(".")[0]
-                if top in root_modules:
-                    pending.append(f"{top}.py")
+                assert name is not None, f"{filename} has an import without a module name"
+                parts = name.split(".")
+                if parts[0] == PACKAGE and len(parts) > 1:
+                    module = parts[1]
+                    assert module in package_modules, f"{filename} imports missing package module {name}"
+                    pending.append(f"{module}.py")
     return found

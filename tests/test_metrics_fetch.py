@@ -18,9 +18,9 @@ import socket
 
 import httpx
 
-import metrics_poller
-from config import METRICS_MAX_RESPONSE_BYTES
-from metrics_poller import fetch_metrics
+from simple_network_dashboard import metrics_poller
+from simple_network_dashboard.config import METRICS_MAX_RESPONSE_BYTES
+from simple_network_dashboard.metrics_poller import fetch_metrics
 
 
 NODE_EXPORTER_SAMPLE = 'node_load1 0.5\n'

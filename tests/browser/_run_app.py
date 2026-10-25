@@ -25,7 +25,7 @@ def main() -> None:
     host = os.environ["SND_TEST_HOST"]
     port = int(os.environ["SND_TEST_PORT"])
     uvicorn.run(
-        "main:app",
+        "simple_network_dashboard.main:app",
         host=host,
         port=port,
         ssl_certfile=os.environ["SND_TEST_CERT"],

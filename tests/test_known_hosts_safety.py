@@ -4,8 +4,7 @@ import os
 
 import pytest
 
-import host_keys
-import ssh_manager
+from simple_network_dashboard import host_keys, ssh_manager
 
 
 _UNREADABLE_MESSAGE = (

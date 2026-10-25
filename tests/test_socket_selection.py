@@ -7,7 +7,7 @@ cleanup (drop), and the delete_device prune helper
 _WSManager instance; no real WebSocket connections are involved.
 """
 
-from main import _WSManager
+from simple_network_dashboard.main import _WSManager
 
 
 def _fresh_manager() -> _WSManager:

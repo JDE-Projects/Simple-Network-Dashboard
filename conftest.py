@@ -1,6 +1,5 @@
-# Its presence at the repo root makes pytest add the repo root to sys.path, so
-# `from main import ...` in tests/ resolves without relying on the working
-# directory pytest happened to be launched from.
+# Its presence at the repo root makes pytest add the package to sys.path
+# without relying on the working directory pytest happened to be launched from.
 
 import importlib.util
 

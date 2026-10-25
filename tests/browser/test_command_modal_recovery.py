@@ -1,6 +1,6 @@
 """The Add/Edit Command modal recovers from API failures.
 
-See static/index.html's persistCommands() (~line 1635) and #cmdSave handler
+See simple_network_dashboard/static/index.html's persistCommands() (~line 1635) and #cmdSave handler
 (~line 1682): it disables the button and shows 'Saving…', shows an inline
 error in #cmdErr on failure without closing the modal, rolls the optimistic
 local edit back from the server, and restores the button label in a

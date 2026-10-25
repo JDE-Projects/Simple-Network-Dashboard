@@ -6,7 +6,7 @@ import re
 
 from playwright.sync_api import expect
 
-import main
+from simple_network_dashboard import main
 
 
 def test_revoked_live_socket_shows_session_expired_modal(

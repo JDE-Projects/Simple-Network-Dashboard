@@ -1,7 +1,7 @@
 """Collection size caps: at most 250 saved commands per device, per request,
 and at most 250 devices total.
 
-main.py enforces two limits:
+The application enforces two limits:
 a Pydantic field cap on the ``commands`` list carried by POST /api/devices
 and PUT /api/devices/{id}/commands, and a device-count cap enforced in the
 upsert_device handler that only blocks creating a brand-new device once the
@@ -15,11 +15,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-import auth
-import main
-import persistence
-import runtime_state
-from session_manager import LoginThrottle, SessionStore
+from simple_network_dashboard import auth, main, persistence, runtime_state
+from simple_network_dashboard.session_manager import LoginThrottle, SessionStore
 
 
 def _csrf_headers(client: TestClient) -> dict[str, str]:

@@ -15,9 +15,8 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-import auth
-import main
-from session_manager import LoginThrottle, REMEMBERED_SECONDS, SESSION_ONLY_SECONDS, SessionStorageError, SessionStore
+from simple_network_dashboard import auth, main
+from simple_network_dashboard.session_manager import LoginThrottle, REMEMBERED_SECONDS, SESSION_ONLY_SECONDS, SessionStorageError, SessionStore
 
 
 def _csrf_headers(client: TestClient) -> dict[str, str]:

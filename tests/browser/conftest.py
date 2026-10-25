@@ -101,14 +101,14 @@ def _write_self_signed_cert(cert_path: Path, key_path: Path) -> None:
 def _seed_auth_state(data_dir: Path) -> None:
     """Write a valid auth.json so the harness can log in."""
     sys.path.insert(0, str(REPO_ROOT))
-    from auth import create_auth_state, publish_auth_state
+    from simple_network_dashboard.auth import create_auth_state, publish_auth_state
 
     publish_auth_state(data_dir / "auth.json", create_auth_state(DASHBOARD_PASSWORD))
 
 
 # A single seeded device for tests that need one already present (connect,
 # host-key view, custom-command run, command-save). Mirrors the on-disk shape
-# main.py writes: {"_app": ..., "devices": [...]} (see main.py's _save()).
+# The application writes: {"_app": ..., "devices": [...]} (see its _save()).
 SEEDED_DEVICE_ID = "dev_browsertest01"
 SEEDED_DEVICE_HOST = "10.0.0.99"
 SEEDED_DEVICE_NAME = "Seeded Test Device"
