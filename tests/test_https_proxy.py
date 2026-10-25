@@ -92,14 +92,15 @@ HTTPS_BIND=10.0.0.4
 HTTPS_PORT=8443
 PORT=3007
 printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
-caddy() { echo validated; }
+caddy() { echo validated >> "$tmp/calls"; }
 systemctl() {
     [ "$1" = is-active ] && return 0
-    [ "$1" = reload ] && echo reloaded
+    [ "$1" = reload ] && echo reloaded >> "$tmp/calls"
 }
 write_caddy_proxy_config
 cat "$CADDY_CONFIG_PATH"
 cat "$CADDY_APP_CONFIG"
+cat "$tmp/calls"
 rm -rf "$tmp"
 '''
     )
@@ -111,6 +112,68 @@ rm -rf "$tmp"
     assert "bind " not in result.stdout
     assert "reverse_proxy 127.0.0.1:3007" in result.stdout
     assert result.stdout.index("validated") < result.stdout.index("reloaded")
+
+
+def test_successful_caddy_check_hides_caddy_output() -> None:
+    result = _run_install(
+        r'''
+tmp=$(mktemp -d)
+CADDY_CONFIG_PATH="$tmp/Caddyfile"
+CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
+CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
+CADDY_BINARY=caddy
+HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
+HTTPS_PORT=8443
+PORT=3007
+printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
+caddy() {
+    echo "Valid configuration"
+    echo '{"level":"warn","msg":"Caddyfile input is not formatted"}' >&2
+}
+systemctl() { :; }
+write_caddy_proxy_config
+rm -rf "$tmp"
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Valid configuration" not in result.stdout
+    assert "not formatted" not in result.stdout + result.stderr
+
+
+def test_failed_caddy_check_shows_caddy_output_and_does_not_publish() -> None:
+    result = _run_install(
+        r'''
+tmp=$(mktemp -d)
+CADDY_CONFIG_PATH="$tmp/Caddyfile"
+CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
+CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
+CADDY_BINARY=caddy
+HTTPS_HOST=dashboard.lan
+HTTPS_BIND=10.0.0.4
+HTTPS_PORT=8443
+PORT=3007
+printf ':80 { respond "shared" }\n' > "$CADDY_CONFIG_PATH"
+cp "$CADDY_CONFIG_PATH" "$tmp/original-caddy"
+caddy() {
+    echo "Error: validating config: invalid directive"
+    echo "Error: adapting config: unrecognized directive: bogus" >&2
+    return 1
+}
+if write_caddy_proxy_config; then exit 10; fi
+cmp "$CADDY_CONFIG_PATH" "$tmp/original-caddy"
+[ ! -e "$CADDY_APP_CONFIG" ]
+rm -rf "$tmp"
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Error: validating config: invalid directive" in result.stdout
+    assert "unrecognized directive: bogus" in result.stdout
+    assert result.stdout.index("unrecognized directive") < result.stdout.index(
+        "staged Caddy configuration is invalid"
+    )
 
 
 def test_reload_or_start_caddy_reloads_a_running_caddy() -> None:
