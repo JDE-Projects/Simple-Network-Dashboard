@@ -1173,12 +1173,77 @@ repair_runtime_storage() {
 }
 
 copy_application_files() {
-    local legacy_file legacy_path
+    local staged_package old_package previous_package
 
     if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
         echo "Error: APP_DIR is empty or unsafe. Refusing to replace application files."
         return 1
     fi
+
+    staged_package="$APP_DIR/.simple_network_dashboard.new"
+    old_package="$APP_DIR/simple_network_dashboard"
+    previous_package="$APP_DIR/.simple_network_dashboard.previous"
+
+    if [ -e "$staged_package" ] || [ -L "$staged_package" ]; then
+        if [ ! -d "$staged_package" ] || [ -L "$staged_package" ]; then
+            echo "Error: staged application path $staged_package is not a directory."
+            return 1
+        fi
+        if ! rm -rf -- "$staged_package"; then
+            echo "Error: could not remove leftover staged application path $staged_package."
+            return 1
+        fi
+    fi
+
+    if ! cp snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"; then
+        rm -rf -- "$staged_package"
+        return 1
+    fi
+    if ! cp -R --no-preserve=ownership simple_network_dashboard "$staged_package"; then
+        rm -rf -- "$staged_package"
+        return 1
+    fi
+    if ! chown snd:snd "$staged_package" || ! chmod 2775 "$staged_package"; then
+        rm -rf -- "$staged_package"
+        return 1
+    fi
+
+    if [ -e "$old_package" ] || [ -L "$old_package" ]; then
+        if [ ! -d "$old_package" ] || [ -L "$old_package" ]; then
+            echo "Error: installed application path $old_package is not a directory."
+            rm -rf -- "$staged_package"
+            return 1
+        fi
+        # A leftover from an interrupted earlier run is stale while the
+        # installed package is still in place.
+        if [ -e "$previous_package" ] || [ -L "$previous_package" ]; then
+            if [ ! -d "$previous_package" ] || [ -L "$previous_package" ] || ! rm -rf -- "$previous_package"; then
+                echo "Error: could not remove leftover application path $previous_package."
+                rm -rf -- "$staged_package"
+                return 1
+            fi
+        fi
+        if ! mv -T -- "$old_package" "$previous_package"; then
+            rm -rf -- "$staged_package"
+            return 1
+        fi
+    fi
+
+    if ! mv -T -- "$staged_package" "$old_package"; then
+        if [ -d "$previous_package" ] && [ ! -L "$previous_package" ]; then
+            mv -T -- "$previous_package" "$old_package" || true
+        fi
+        rm -rf -- "$staged_package"
+        return 1
+    fi
+
+    if [ -d "$previous_package" ] && [ ! -L "$previous_package" ]; then
+        rm -rf -- "$previous_package"
+    fi
+}
+
+remove_legacy_application_files() {
+    local legacy_file legacy_path
 
     for legacy_file in auth.py config.py debug_log.py delivery_queue.py host_keys.py main.py metrics_poller.py persistence.py runtime_state.py session_manager.py ssh_manager.py ssh_session.py terminal_control.py terminal_history.py terminal_run.py update_check.py ws_manager.py; do
         legacy_path="$APP_DIR/$legacy_file"
@@ -1194,7 +1259,7 @@ copy_application_files() {
         fi
     done
 
-    for legacy_path in "$APP_DIR/static" "$APP_DIR/__pycache__" "$APP_DIR/simple_network_dashboard"; do
+    for legacy_path in "$APP_DIR/static" "$APP_DIR/__pycache__"; do
         if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
             if [ ! -d "$legacy_path" ] || [ -L "$legacy_path" ]; then
                 echo "Error: old application path $legacy_path is not a directory."
@@ -1206,11 +1271,6 @@ copy_application_files() {
             fi
         fi
     done
-
-    cp snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
-    cp -R --no-preserve=ownership simple_network_dashboard "$APP_DIR/"
-    chown snd:snd "$APP_DIR/simple_network_dashboard"
-    chmod 2775 "$APP_DIR/simple_network_dashboard"
 }
 
 is_owned_reset_command() {
@@ -1250,7 +1310,7 @@ restore_previously_active_service() {
     if [ "$DASHBOARD_WAS_ACTIVE" != true ]; then
         return 0
     fi
-    echo "Authentication setup failed after stopping the active dashboard service. Attempting restoration."
+    echo "Installation failed after stopping the active dashboard service. Attempting restoration."
     if systemctl start "$SERVICE_NAME" \
         && systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "Dashboard service restoration succeeded."
@@ -1391,14 +1451,24 @@ fi
 # Keep private runtime state outside the replaceable application directory.
 repair_runtime_storage
 
-# Copy app files
-copy_application_files
+# Copy app files before removing the legacy layout so the previous service can recover.
+if ! copy_application_files; then
+    echo "Error: application files could not be copied."
+    restore_previously_active_service
+    exit 1
+fi
 
 # Create venv if it doesn't exist, then install/update requirements
-if [ ! -d "$APP_DIR/venv" ]; then
-    sudo -u snd python3 -m venv "$APP_DIR/venv"
+if [ ! -d "$APP_DIR/venv" ] && ! sudo -u snd python3 -m venv "$APP_DIR/venv"; then
+    echo "Error: the Python virtual environment could not be created."
+    restore_previously_active_service
+    exit 1
 fi
-sudo -u snd "$APP_DIR/venv/bin/pip" install --require-hashes -r "$APP_DIR/requirements.txt" --quiet --no-cache-dir
+if ! sudo -u snd "$APP_DIR/venv/bin/pip" install --require-hashes -r "$APP_DIR/requirements.txt" --quiet --no-cache-dir; then
+    echo "Error: the dashboard's Python packages could not be installed."
+    restore_previously_active_service
+    exit 1
+fi
 
 if ! initialize_authentication; then
     restore_previously_active_service
@@ -1430,6 +1500,10 @@ EOF
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" --quiet
+if ! remove_legacy_application_files; then
+    echo "Error: legacy application cleanup failed."
+    exit 1
+fi
 if ! start_dashboard_backend; then
     exit 1
 fi
