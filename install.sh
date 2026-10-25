@@ -204,7 +204,7 @@ listeners_for_port() {
 }
 
 inspect_caddy_state() {
-    local load_state
+    local load_state dpkg_status
 
     CADDY_STATE="fresh"
     CADDY_BINARY=$(command -v caddy 2>/dev/null || true)
@@ -227,6 +227,15 @@ inspect_caddy_state() {
         return 0
     fi
     if [ -z "$CADDY_BINARY" ]; then
+        if dpkg_status=$(dpkg-query -W -f='${db:Status-Abbrev}' caddy 2>/dev/null) \
+            && [ "$dpkg_status" = "rc " ]; then
+            echo "Error: Caddy was removed but its configuration was kept."
+            echo "Optional: back up /etc/caddy and /var/lib/caddy (the second holds Caddy's certificates)."
+            echo "Run sudo apt-get install caddy to restore Caddy while keeping its existing configuration."
+            echo "Run this installer again."
+            echo "Destructive alternative for a clean start: sudo apt-get purge caddy deletes /etc/caddy and /var/lib/caddy, including Caddy's certificates. Every device that trusts the dashboard's certificate would have to trust a new one."
+            return 1
+        fi
         echo "Error: a caddy systemd service exists but its Caddy binary could not be found."
         echo "Refusing to modify an unsupported Caddy setup."
         return 1

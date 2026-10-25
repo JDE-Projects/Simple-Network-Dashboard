@@ -33,6 +33,8 @@ MOCK_LAN_IPS='10.0.0.4 127.0.0.1'
 MOCK_LOAD_STATE=not-found
 MOCK_EXEC_START=''
 MOCK_SS=''
+MOCK_DPKG_STATUS=''
+MOCK_DPKG_QUERY_RC=0
 hostname() {{ printf '%s\\n' "$MOCK_LAN_IPS"; }}
 systemctl() {{
     if [ "$1" = show ] && [ "$2" = --property=LoadState ]; then
@@ -46,6 +48,10 @@ systemctl() {{
     return 1
 }}
 ss() {{ printf '%s\\n' "$MOCK_SS"; }}
+dpkg-query() {{
+    printf '%s' "$MOCK_DPKG_STATUS"
+    return "$MOCK_DPKG_QUERY_RC"
+}}
 {body}
 """
     return subprocess.run(
@@ -288,6 +294,50 @@ if preflight_https; then exit 10; fi
 
     assert result.returncode == 0, result.stderr
     assert expected in result.stdout
+
+
+def test_removed_caddy_configuration_is_guided_to_reinstall() -> None:
+    result = _run_installer(
+        """
+MOCK_LOAD_STATE=masked
+MOCK_DPKG_STATUS='rc '
+parse_install_arguments --https-host 10.0.0.4
+if preflight_https; then exit 10; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "sudo apt-get install caddy" in result.stdout
+    assert "/etc/caddy" in result.stdout
+    assert "/var/lib/caddy" in result.stdout
+    assert "sudo apt-get purge caddy" in result.stdout
+    assert "would have to trust a new one" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "dpkg_mock",
+    [
+        "MOCK_DPKG_STATUS='ii '",
+        "MOCK_DPKG_QUERY_RC=1",
+        "unset -f dpkg-query",
+    ],
+)
+def test_unconfirmed_removed_caddy_configuration_uses_generic_refusal(
+    dpkg_mock: str,
+) -> None:
+    result = _run_installer(
+        f"""
+MOCK_LOAD_STATE=masked
+{dpkg_mock}
+parse_install_arguments --https-host 10.0.0.4
+if preflight_https; then exit 10; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "a caddy systemd service exists but its Caddy binary could not be found" in result.stdout
+    assert "Refusing to modify an unsupported Caddy setup." in result.stdout
+    assert "sudo apt-get install caddy" not in result.stdout
 
 
 def test_free_ports_leave_redirects_enabled() -> None:
