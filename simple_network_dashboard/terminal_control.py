@@ -5,9 +5,9 @@ whose sessions and per-device locks these methods use."""
 import threading
 import time
 
-from terminal_history import trim_to_budget
-from terminal_run import clamp_size
-import config
+from simple_network_dashboard import config
+from simple_network_dashboard.terminal_history import trim_to_budget
+from simple_network_dashboard.terminal_run import clamp_size
 
 
 class TerminalControlMixin:

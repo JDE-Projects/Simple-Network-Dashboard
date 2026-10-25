@@ -9,8 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-import debug_log
-import main
+from simple_network_dashboard import debug_log, main
 import pytest
 
 

@@ -7,7 +7,7 @@ cpu count, temperatures, uptime formatting) and the two-sample delta paths
 
 import math
 
-from metrics_poller import _parse, extract_metrics
+from simple_network_dashboard.metrics_poller import _parse, extract_metrics
 
 
 GB = 1024 ** 3
@@ -166,7 +166,7 @@ def test_temperatures_normal_zero_and_max_sensor():
 
 def test_uptime_days_hours_minutes(monkeypatch):
     fixed = 1_700_000_000.0
-    monkeypatch.setattr("metrics_poller.time.time", lambda: fixed)
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller.time.time", lambda: fixed)
     elapsed = 2 * 86400 + 3 * 3600 + 4 * 60
     text = f"node_boot_time_seconds {fixed - elapsed}"
     out = extract_metrics(_parse(text), None)
@@ -175,7 +175,7 @@ def test_uptime_days_hours_minutes(monkeypatch):
 
 def test_uptime_hours_minutes(monkeypatch):
     fixed = 1_700_000_000.0
-    monkeypatch.setattr("metrics_poller.time.time", lambda: fixed)
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller.time.time", lambda: fixed)
     elapsed = 5 * 3600 + 6 * 60
     text = f"node_boot_time_seconds {fixed - elapsed}"
     out = extract_metrics(_parse(text), None)
@@ -184,7 +184,7 @@ def test_uptime_hours_minutes(monkeypatch):
 
 def test_uptime_minutes_only(monkeypatch):
     fixed = 1_700_000_000.0
-    monkeypatch.setattr("metrics_poller.time.time", lambda: fixed)
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller.time.time", lambda: fixed)
     elapsed = 7 * 60
     text = f"node_boot_time_seconds {fixed - elapsed}"
     out = extract_metrics(_parse(text), None)
@@ -214,7 +214,7 @@ node_cpu_seconds_total{cpu="1",mode="user"} 350
 
 def test_network_rates_from_two_samples(monkeypatch):
     times = iter([1000.0, 1010.0])
-    monkeypatch.setattr("metrics_poller.time.time", lambda: next(times))
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller.time.time", lambda: next(times))
 
     sample1 = """
 node_network_receive_bytes_total{device="eth0"} 1000000

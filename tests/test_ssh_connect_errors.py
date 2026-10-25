@@ -10,7 +10,7 @@ import socket
 import paramiko
 import pytest
 
-import ssh_manager
+from simple_network_dashboard import ssh_manager
 
 MARKER = "raw-remote-error-marker"
 

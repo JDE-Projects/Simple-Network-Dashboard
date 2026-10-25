@@ -7,8 +7,8 @@ import time
 
 import paramiko
 
-import host_keys
-from host_keys import KnownHostsUnreadable, _TofuPolicy
+from simple_network_dashboard import host_keys
+from simple_network_dashboard.host_keys import KnownHostsUnreadable, _TofuPolicy
 
 
 def _connect_error_message(exc: BaseException) -> str:

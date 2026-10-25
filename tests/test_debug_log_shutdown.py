@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import debug_log
-import main
-import persistence
+from simple_network_dashboard import debug_log, main, persistence
 import pytest
 
 

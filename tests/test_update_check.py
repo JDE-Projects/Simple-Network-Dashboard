@@ -9,8 +9,7 @@ import urllib.error
 
 import pytest
 
-import debug_log
-import main
+from simple_network_dashboard import debug_log, main
 
 
 def _http_error(code: int) -> urllib.error.HTTPError:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 import json
 
-import config
+from simple_network_dashboard import config
 
 
 def trim_to_budget(terminals: list[dict], budget: int) -> list[dict]:

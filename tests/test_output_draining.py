@@ -1,6 +1,6 @@
 """Terminal event ordering and raw channel draining through ``_exec``."""
 
-import ssh_manager
+from simple_network_dashboard import ssh_manager
 from tests.test_session_enforcement import _FakeChannel, _FakeClient
 
 

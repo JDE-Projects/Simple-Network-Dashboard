@@ -1173,8 +1173,44 @@ repair_runtime_storage() {
 }
 
 copy_application_files() {
-    cp main.py config.py ws_manager.py delivery_queue.py terminal_run.py terminal_history.py update_check.py runtime_state.py debug_log.py persistence.py metrics_poller.py ssh_manager.py host_keys.py ssh_session.py terminal_control.py auth.py session_manager.py snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
-    cp -R --no-preserve=ownership static/. "$APP_DIR/static/"
+    local legacy_file legacy_path
+
+    if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
+        echo "Error: APP_DIR is empty or unsafe. Refusing to replace application files."
+        return 1
+    fi
+
+    for legacy_file in auth.py config.py debug_log.py delivery_queue.py host_keys.py main.py metrics_poller.py persistence.py runtime_state.py session_manager.py ssh_manager.py ssh_session.py terminal_control.py terminal_history.py terminal_run.py update_check.py ws_manager.py; do
+        legacy_path="$APP_DIR/$legacy_file"
+        if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
+            if [ ! -f "$legacy_path" ] || [ -L "$legacy_path" ]; then
+                echo "Error: old application module $legacy_path is not a regular file."
+                return 1
+            fi
+            if ! rm -- "$legacy_path"; then
+                echo "Error: could not remove old application module $legacy_path."
+                return 1
+            fi
+        fi
+    done
+
+    for legacy_path in "$APP_DIR/static" "$APP_DIR/__pycache__" "$APP_DIR/simple_network_dashboard"; do
+        if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
+            if [ ! -d "$legacy_path" ] || [ -L "$legacy_path" ]; then
+                echo "Error: old application path $legacy_path is not a directory."
+                return 1
+            fi
+            if ! rm -rf -- "$legacy_path"; then
+                echo "Error: could not remove old application path $legacy_path."
+                return 1
+            fi
+        fi
+    done
+
+    cp snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
+    cp -R --no-preserve=ownership simple_network_dashboard "$APP_DIR/"
+    chown snd:snd "$APP_DIR/simple_network_dashboard"
+    chmod 2775 "$APP_DIR/simple_network_dashboard"
 }
 
 is_owned_reset_command() {
@@ -1225,7 +1261,7 @@ restore_previously_active_service() {
 
 initialize_authentication() {
     if [ -e "$AUTH_FILE" ]; then
-        if ! "$APP_DIR/venv/bin/python" "$APP_DIR/auth.py" validate --auth-file "$AUTH_FILE"; then
+        if ! (cd "$APP_DIR" && "$APP_DIR/venv/bin/python" -m simple_network_dashboard.auth validate --auth-file "$AUTH_FILE"); then
             echo "Error: existing authentication state is malformed or unsafe. It was not changed."
             echo "Inspect $AUTH_FILE and restore a valid state before re-running the installer."
             return 1
@@ -1234,7 +1270,7 @@ initialize_authentication() {
         return 0
     fi
 
-    if ! "$APP_DIR/venv/bin/python" "$APP_DIR/auth.py" initialize --auth-file "$AUTH_FILE"; then
+    if ! (cd "$APP_DIR" && "$APP_DIR/venv/bin/python" -m simple_network_dashboard.auth initialize --auth-file "$AUTH_FILE"); then
         echo "Error: dashboard password initialization did not complete. See the error above before continuing."
         return 1
     fi
@@ -1342,9 +1378,9 @@ if ! groups "$INSTALL_USER" | grep -qw snd; then
 fi
 
 # Create app directory with setgid so copied files inherit the snd group
-mkdir -p "$APP_DIR/static"
-chown snd:snd "$APP_DIR" "$APP_DIR/static"
-chmod 2775 "$APP_DIR" "$APP_DIR/static"
+mkdir -p "$APP_DIR/simple_network_dashboard"
+chown snd:snd "$APP_DIR" "$APP_DIR/simple_network_dashboard"
+chmod 2775 "$APP_DIR" "$APP_DIR/simple_network_dashboard"
 
 # Stop service if already running (handles re-runs for updates)
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
@@ -1383,7 +1419,7 @@ After=network.target
 [Service]
 User=snd
 WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/venv/bin/python main.py --port ${PORT}
+ExecStart=$APP_DIR/venv/bin/python -m simple_network_dashboard --port ${PORT}
 Environment=SND_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
 Restart=always
 UMask=0077

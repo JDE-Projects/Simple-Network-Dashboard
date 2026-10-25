@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import main
+from simple_network_dashboard import main
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PAGE = ROOT / "static" / "certificate-setup.html"
+PAGE = ROOT / "simple_network_dashboard" / "static" / "certificate-setup.html"
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def test_certificate_setup_route_serves_the_standalone_page(client: TestClient) 
 
 
 def test_root_certificate_download_has_safe_attachment_headers(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    certificate = ROOT / "static" / "favicon.svg"
+    certificate = ROOT / "simple_network_dashboard" / "static" / "favicon.svg"
     monkeypatch.setattr(main, "DASHBOARD_ROOT_CERT", str(certificate))
 
     response = client.get("/certificate-setup/caddy-root-ca.crt")
@@ -38,7 +38,7 @@ def test_root_certificate_download_has_safe_attachment_headers(client: TestClien
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
-@pytest.mark.parametrize("certificate", [ROOT / "missing-caddy-root-ca.crt", ROOT / "static"])
+@pytest.mark.parametrize("certificate", [ROOT / "missing-caddy-root-ca.crt", ROOT / "simple_network_dashboard" / "static"])
 def test_root_certificate_download_rejects_missing_or_non_regular_files(client: TestClient, monkeypatch: pytest.MonkeyPatch, certificate: Path) -> None:
     monkeypatch.setattr(main, "DASHBOARD_ROOT_CERT", str(certificate))
 

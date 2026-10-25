@@ -15,7 +15,7 @@ tests/test_output_draining.py."""
 
 import asyncio
 
-import ssh_manager
+from simple_network_dashboard import ssh_manager
 
 
 class _FakeChannel:

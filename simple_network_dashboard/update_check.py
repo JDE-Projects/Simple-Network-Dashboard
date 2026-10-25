@@ -5,7 +5,8 @@ import errno
 import urllib.error
 import urllib.request
 
-from config import APP_NAME
+from simple_network_dashboard import APP_VERSION
+from simple_network_dashboard.config import APP_NAME
 
 
 GITHUB_RELEASES_URL = (
@@ -91,11 +92,11 @@ def _version_tuple(v: str) -> tuple:
     return tuple(parts)
 
 
-def _fetch_latest_version(app_version: str) -> str:
+def _fetch_latest_version(app_version: str = APP_VERSION) -> str:
     """Blocking call — must be run in an executor.  Returns the latest release version (no leading 'v').
 
-    The running app's version is passed in (main owns APP_VERSION) rather than
-    imported, so this module never imports main and stays free of a cycle."""
+    The package version is used by default. Callers can pass a version for a
+    targeted check without importing the application module."""
     req = urllib.request.Request(
         GITHUB_RELEASES_URL,
         headers={

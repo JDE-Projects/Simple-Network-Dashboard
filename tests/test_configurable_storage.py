@@ -18,7 +18,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 _PROBE = (
-    "import main, host_keys;"
+    "from simple_network_dashboard import host_keys, main;"
     "print(main.DATA_DIR);"
     "print(main.LOG_DIR);"
     "print(host_keys.DATA_DIR)"
@@ -44,7 +44,7 @@ def test_env_override_redirects_all_storage_roots() -> None:
     main_data, main_log, ssh_data = _probe(env)
     assert main_data == "/tmp/snd-test-data"
     assert main_log == "/tmp/snd-test-log"
-    # main.py and ssh_manager.py must resolve the same data root so known_hosts
+    # The application and SSH manager must resolve the same data root so known_hosts
     # stays with devices.json and the rest of the private data.
     assert ssh_data == "/tmp/snd-test-data"
 

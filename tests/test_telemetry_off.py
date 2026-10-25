@@ -8,7 +8,7 @@ environment can make the dashboard send telemetry.
 
 from __future__ import annotations
 
-import main
+from simple_network_dashboard import main
 
 
 def test_app_turns_off_automatic_telemetry_export():

@@ -1,6 +1,6 @@
 """The Add/Edit Device modal recovers from API failures.
 
-See static/index.html's #devSave handler (~line 1755): it disables the
+See simple_network_dashboard/static/index.html's #devSave handler (~line 1755): it disables the
 button and shows 'Saving…', shows an inline error in #devErr on failure
 without closing the modal, and restores the button label in a `finally`.
 This does not need a pre-existing device: it drives the Add Device flow.

@@ -1,7 +1,7 @@
 """The 'Check for updates' button recovers from API
 failures instead of getting stuck disabled or on 'Checking…'.
 
-See static/index.html's #updateBtn handler (~line 1939): it disables the
+See simple_network_dashboard/static/index.html's #updateBtn handler (~line 1939): it disables the
 button and shows 'Checking…', shows a notice plus an error modal on
 failure, and restores the button label in a `finally`.
 """

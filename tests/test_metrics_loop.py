@@ -14,9 +14,7 @@ inspect exactly what was sent without a real WebSocket.
 
 import asyncio
 
-import debug_log
-import main
-import runtime_state
+from simple_network_dashboard import debug_log, main, runtime_state
 
 
 def _fake_devices():

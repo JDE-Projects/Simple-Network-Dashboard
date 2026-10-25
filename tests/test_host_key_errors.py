@@ -2,7 +2,7 @@
 keep the raw exception text out of the browser reply, routing it to the debug
 log writer instead."""
 
-import ssh_manager
+from simple_network_dashboard import ssh_manager
 
 
 def _mgr(debug=None):

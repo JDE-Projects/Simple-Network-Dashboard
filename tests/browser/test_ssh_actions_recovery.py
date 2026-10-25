@@ -1,7 +1,7 @@
 """Custom-command run and host-key view recover from API
 failures.
 
-Custom command: static/index.html's runCustom() (~line 1522) clears the
+Custom command: simple_network_dashboard/static/index.html's runCustom() (~line 1522) clears the
 input immediately (optimistic), then restores the typed text on failure.
 Uses connected_device_page because the custom-command input only appears on
 a card once it looks SSH-connected (see conftest.py for how that's faked

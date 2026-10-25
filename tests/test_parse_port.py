@@ -2,8 +2,8 @@
 
 import pytest
 
-import main
-from main import _parse_port
+import simple_network_dashboard.main as main
+from simple_network_dashboard.main import _parse_port
 
 
 def test_default_when_no_args():
@@ -44,5 +44,7 @@ def test_unrelated_args_ignored_alongside_port():
 def test_uvicorn_entry_point_is_loopback_only():
     source = open(main.__file__, encoding="utf-8").read()
 
-    assert 'uvicorn.run("main:app", host="127.0.0.1"' in source
-    assert 'uvicorn.run("main:app", host="0.0.0.0"' not in source
+    source = open(main.__file__.replace("main.py", "__main__.py"), encoding="utf-8").read()
+
+    assert 'uvicorn.run(\n    "simple_network_dashboard.main:app",\n    host="127.0.0.1"' in source
+    assert 'uvicorn.run(\n    "simple_network_dashboard.main:app",\n    host="0.0.0.0"' not in source

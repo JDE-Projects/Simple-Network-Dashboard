@@ -15,7 +15,7 @@ from argon2 import Type
 from argon2.exceptions import HashingError, VerifyMismatchError
 
 from app_files import installer_copy_list
-import auth
+from simple_network_dashboard import auth
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -311,7 +311,7 @@ def test_installer_and_uninstaller_contracts_include_only_the_approved_auth_file
     assert 'AUTH_FILE="${DATA_DIR}/auth.json"' in installer
     assert 'SESSIONS_FILE="${DATA_DIR}/sessions.json"' in installer
     assert 'install -o root -g root -m 0755 "$APP_DIR/snd-reset-password" "$RESET_COMMAND"' in installer
-    assert {"auth.py", "session_manager.py", "snd-reset-password"} <= set(installer_copy_list())
+    assert {"snd-reset-password", "requirements.txt", "uninstall.sh"} <= set(installer_copy_list())
     assert 'RESET_COMMAND="/usr/local/sbin/snd-reset-password"' in uninstaller
     assert 'remove_owned_reset_command()' in uninstaller
     assert 'auth.json' not in uninstaller.split("backup_private_config()", 1)[1].split("finalize_private_backup_dir", 1)[0]

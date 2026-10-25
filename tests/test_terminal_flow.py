@@ -3,9 +3,8 @@
 import threading
 import time
 
-import config
-import ssh_manager
-from terminal_history import TerminalHistory
+from simple_network_dashboard import config, ssh_manager
+from simple_network_dashboard.terminal_history import TerminalHistory
 from tests.test_session_enforcement import _FakeChannel, _FakeClient
 
 

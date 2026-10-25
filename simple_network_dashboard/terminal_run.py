@@ -12,7 +12,7 @@ import threading
 import time
 from threading import Thread as _Thread
 
-import config
+from simple_network_dashboard import config
 
 
 def clamp_size(cols, rows) -> tuple[int, int]:

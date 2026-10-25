@@ -11,14 +11,14 @@ import time
 
 import paramiko
 
-from delivery_queue import DeliveryQueue
-from host_keys import (KnownHostsUnreadable, UnknownHostKey, _PendingHostKey, _fp,
+from simple_network_dashboard import config
+from simple_network_dashboard.delivery_queue import DeliveryQueue
+from simple_network_dashboard.host_keys import (KnownHostsUnreadable, UnknownHostKey, _PendingHostKey, _fp,
                        _load_known_hosts, _save_known_hosts)
-from ssh_session import _Session, _connect_error_message
-from terminal_control import TerminalControlMixin
-from terminal_history import TerminalHistory
-from terminal_run import OutputBatcher, SudoGate, TerminalWriter, build_command, clamp_size, read_channel
-import config
+from simple_network_dashboard.ssh_session import _Session, _connect_error_message
+from simple_network_dashboard.terminal_control import TerminalControlMixin
+from simple_network_dashboard.terminal_history import TerminalHistory
+from simple_network_dashboard.terminal_run import OutputBatcher, SudoGate, TerminalWriter, build_command, clamp_size, read_channel
 
 IDLE_WARN_SECONDS    = 270   # send warning after 4.5 minutes idle
 IDLE_TIMEOUT_SECONDS = 300   # disconnect after 5 minutes idle

@@ -5,11 +5,11 @@ on:
     branches: [main]
 jobs:
   ci:
-    uses: JDE-Projects/Build-Tools/.github/workflows/ci.yml@1d4a3410cface7851db0d1b8da35d0c71b22cd3d # Build-Tools (ruff, import check, pytest, dev-pins, runtime-lock, shellcheck)
+    uses: JDE-Projects/Build-Tools/.github/workflows/ci.yml@c6d32f95dc283db8a0d753f0e2e5b87f4565fc6c # Build-Tools (ruff, import check, pytest, dev-pins, runtime-lock, shellcheck)
     permissions:
       contents: read
     with:
-      entry_script: "main.py"
+      entry_script: "simple_network_dashboard"
       verify_dev_pins: true
       verify_runtime_lock: true
       shellcheck: true

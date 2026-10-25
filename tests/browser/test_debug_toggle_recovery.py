@@ -1,6 +1,6 @@
 """The server debug-log toggle reverts on API failures.
 
-See static/index.html's #debugChk change handler (~line 1920): on a failed
+See simple_network_dashboard/static/index.html's #debugChk change handler (~line 1920): on a failed
 POST /api/debug it flips the checkbox back to its prior state and raises a
 red error banner. The checkbox is visually a switch (a styled <span> sits on
 top of it), so tests click the switch track rather than the hidden input.

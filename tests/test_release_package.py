@@ -25,14 +25,16 @@ REQUIRED_FILES = installer_copy_list() + [
     "README.md",
     "LICENSE",
     "THIRD-PARTY-LICENSES.txt",
-    "static/index.html",
-    "static/favicon.svg",
-    "static/fonts/OFL.txt",
-    "static/vendor/xterm/xterm.js",
-    "static/vendor/xterm/xterm.css",
-    "static/vendor/xterm/addon-fit.js",
-    "static/vendor/xterm/LICENSE-xterm.txt",
-    "static/vendor/xterm/LICENSE-addon-fit.txt",
+    "simple_network_dashboard/__init__.py",
+    "simple_network_dashboard/__main__.py",
+    "simple_network_dashboard/static/index.html",
+    "simple_network_dashboard/static/favicon.svg",
+    "simple_network_dashboard/static/fonts/OFL.txt",
+    "simple_network_dashboard/static/vendor/xterm/xterm.js",
+    "simple_network_dashboard/static/vendor/xterm/xterm.css",
+    "simple_network_dashboard/static/vendor/xterm/addon-fit.js",
+    "simple_network_dashboard/static/vendor/xterm/LICENSE-xterm.txt",
+    "simple_network_dashboard/static/vendor/xterm/LICENSE-addon-fit.txt",
 ]
 
 FORBIDDEN_FILES = [
@@ -73,7 +75,7 @@ def test_required_files_are_present():
 
 
 def test_static_fonts_directory_present():
-    font_members = [m for m in MEMBERS if m.startswith("static/fonts/") and not m.endswith("/")]
+    font_members = [m for m in MEMBERS if m.startswith("simple_network_dashboard/static/fonts/") and not m.endswith("/")]
     assert font_members, "No files found under static/fonts/ in release archive"
 
 

@@ -1,6 +1,6 @@
 """Regression coverage: a JSON 500 body in FastAPI's generic error shape
-({"detail": "Internal server error."}, from main.py's global 500 handler)
-must not be forwarded verbatim to the caller. api() (static/index.html,
+({"detail": "Internal server error."}, from the application's global 500 handler)
+must not be forwarded verbatim to the caller. api() (simple_network_dashboard/static/index.html,
 ~line 886) only treats a parsed non-2xx object as the app's own error shape
 when it has a string `error` field; anything else falls through to the
 friendly "server hit an error" message, matching the plain-text 500 case

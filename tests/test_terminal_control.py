@@ -3,12 +3,10 @@
 import socket
 import threading
 
-import config
-import main
+from simple_network_dashboard import config, main, ssh_manager
 import pytest
-import ssh_manager
-from terminal_history import TerminalHistory
-from terminal_run import TerminalWriter
+from simple_network_dashboard.terminal_history import TerminalHistory
+from simple_network_dashboard.terminal_run import TerminalWriter
 from tests.test_session_enforcement import _FakeChannel, _FakeClient
 from tests.test_websocket_protection import _authenticated_client
 
