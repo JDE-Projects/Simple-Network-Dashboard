@@ -5,7 +5,7 @@ on:
     tags: ['v*']
 jobs:
   release:
-    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@dab38e7708a346d2eb455bae0b99ee5aadbae05b # Build-Tools (CI checks + dev-pins, runtime-lock, release-version, shellcheck; RC tags auto-marked prerelease)
+    uses: JDE-Projects/Build-Tools/.github/workflows/release-tarball.yml@1d4a3410cface7851db0d1b8da35d0c71b22cd3d # Build-Tools (CI checks + dev-pins, runtime-lock, release-version, shellcheck; RC tags kept as draft prereleases)
     permissions:
       id-token: write
       attestations: write
