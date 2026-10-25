@@ -625,7 +625,7 @@ is_owned_caddy_app_config() {
 }
 
 write_caddy_proxy_config() {
-    local config_dir staged_caddyfile validation_caddyfile staged_app_config backup_caddyfile backup_app_config had_app_config=false import_counts import_count managed_import_count
+    local config_dir staged_caddyfile validation_caddyfile staged_app_config backup_caddyfile backup_app_config had_app_config=false import_counts import_count managed_import_count validate_output
 
     config_dir=$(dirname "$CADDY_CONFIG_PATH")
     if [ ! -f "$CADDY_CONFIG_PATH" ] || [ -L "$CADDY_CONFIG_PATH" ]; then
@@ -659,6 +659,10 @@ write_caddy_proxy_config() {
     if ! reconcile_caddy_global_block "$staged_caddyfile"; then
         return 1
     fi
+    # Caddy calls the X-Forwarded-For header_up unnecessary, but it stays: a
+    # shared Caddy whose global options set trusted_proxies would otherwise
+    # forward a client-supplied value, and the dashboard trusts the header's
+    # first entry from a loopback peer.
     if ! cat > "$staged_app_config" <<EOF
 ${CADDY_APP_MARKER}
 ${HTTPS_HOST}:${HTTPS_PORT} {
@@ -675,7 +679,10 @@ EOF
     # The validation copy alone points at the staged app snippet; the published
     # Caddyfile retains the stable app-owned import path.
     sed "s|^import ${CADDY_APP_CONFIG}$|import ${staged_app_config}|" "$staged_caddyfile" > "$validation_caddyfile" || return 1
-    if ! "$CADDY_BINARY" validate --config "$validation_caddyfile" --adapter caddyfile; then
+    # Caddy's output is shown only when the check fails; successful validation
+    # otherwise emits routine log chatter and a temporary-file formatting warning.
+    if ! validate_output=$("$CADDY_BINARY" validate --config "$validation_caddyfile" --adapter caddyfile 2>&1); then
+        printf '%s\n' "$validate_output"
         echo "Error: staged Caddy configuration is invalid; no Caddy configuration was changed."
         return 1
     fi
