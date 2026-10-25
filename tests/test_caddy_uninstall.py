@@ -200,6 +200,31 @@ printf 'status=%s\\n' "$CADDY_REMOVAL_STATUS"
     assert result.stdout.endswith("status=failed\n")
 
 
+def test_caddy_purge_hides_only_the_mail_spool_notice() -> None:
+    # The purge script's userdel reports a missing mail spool for the caddy
+    # account. That one line is dropped; all other package output still shows.
+    result = _run_shell(
+        """
+systemctl() { return 1; }
+apt-get() {
+    echo "Purging configuration files for caddy (2.11.7)"
+    printf 'userdel: caddy mail spool (/var/mail/caddy) not found\\r\\n'
+    echo "userdel: caddy mail spool (/var/spool/mail/caddy) not found" >&2
+    echo "dpkg: warning: something else" >&2
+}
+rm() { return 0; }
+remove_dashboard_caddy
+printf 'status=%s\\n' "$CADDY_REMOVAL_STATUS"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "mail spool" not in result.stdout + result.stderr
+    assert "Purging configuration files for caddy" in result.stdout
+    assert "dpkg: warning: something else" in result.stdout
+    assert "status=removed\n" in result.stdout
+
+
 def test_caddy_removal_treats_already_removed_store_as_success() -> None:
     # apt-get purge deletes /var/lib/caddy and /etc/caddy via package hooks
     # before this code runs. An already-absent path must count as success, not a

@@ -66,7 +66,7 @@ inspect_caddy_for_cleanup() {
 }
 
 remove_dashboard_caddy_integration() {
-    local config_dir staged_caddyfile backup_caddyfile backup_app_config had_app_config=false import_counts import_count managed_import_count
+    local config_dir staged_caddyfile backup_caddyfile backup_app_config had_app_config=false import_counts import_count managed_import_count validate_output
 
     if { [ -e "$CADDY_APP_CONFIG" ] || [ -L "$CADDY_APP_CONFIG" ]; } && ! is_owned_caddy_app_config; then
         echo "Error: dashboard Caddy proxy config is not a root-owned marked regular file; refusing to remove it."
@@ -106,7 +106,11 @@ remove_dashboard_caddy_integration() {
         $0 != import_line { print }
         END { if (pending) print comment }
     ' "$CADDY_CONFIG_PATH" > "$staged_caddyfile" || return 1
-    if ! "$CADDY_BINARY" validate --config "$staged_caddyfile" --adapter caddyfile; then
+    # Caddy's output is shown only when the check fails. On success it is
+    # routine log chatter, plus a "not formatted" warning about the temporary
+    # staged copy that the user has no reason to act on.
+    if ! validate_output=$("$CADDY_BINARY" validate --config "$staged_caddyfile" --adapter caddyfile 2>&1); then
+        printf '%s\n' "$validate_output"
         echo "Error: remaining Caddy configuration is invalid; no dashboard proxy configuration was removed."
         return 1
     fi
@@ -240,7 +244,7 @@ remove_caddy_owned_dir() {
 }
 
 remove_dashboard_caddy() {
-    local failures=""
+    local failures="" purge_status
 
     CADDY_REMOVAL_STATUS=failed
 
@@ -257,7 +261,14 @@ remove_dashboard_caddy() {
     # clears those masks and deletes the caddy service account, /var/lib/caddy,
     # /var/log/caddy, and /etc/caddy. Reinstalling Caddy recreates the account.
     # The directory removals below are a backstop for anything purge left.
-    if ! apt-get purge -y caddy; then
+    # The purge script's userdel reports that the caddy account never had a
+    # mail spool; that one harmless notice is filtered out. apt relays package
+    # script output through a pseudo-terminal, so the line ends in a carriage
+    # return.
+    apt-get purge -y caddy 2>&1 \
+        | { grep -v -E '^userdel: caddy mail spool \(.*\) not found[[:space:]]*$' || true; }
+    purge_status=${PIPESTATUS[0]}
+    if [ "$purge_status" -ne 0 ]; then
         echo "Error: Caddy cleanup incomplete: the Caddy package was not removed; its certificate store at $CADDY_HOME and Caddy apt source files were left in place."
         return 1
     fi

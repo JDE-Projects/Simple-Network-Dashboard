@@ -675,11 +675,16 @@ CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
 printf ':80 { respond "shared" }\nimport /etc/caddy/other.caddy\n%s\n%s\n' "$CADDY_IMPORT_COMMENT" "$CADDY_IMPORT_LINE" > "$CADDY_CONFIG_PATH"
 printf '%s\nlocalhost { respond "dashboard" }\n' "$CADDY_APP_MARKER" > "$CADDY_APP_CONFIG"
 stat() { printf '0:0:644\n'; }
-caddy() { echo validated; }
+caddy() {
+    echo validate-called >> "$tmp/calls"
+    echo "Valid configuration"
+    echo '{"level":"warn","msg":"Caddyfile input is not formatted"}' >&2
+}
 inspect_caddy_for_cleanup() { CADDY_BINARY=caddy; }
-systemctl() { echo reloaded; }
+systemctl() { echo reloaded >> "$tmp/calls"; }
 remove_dashboard_caddy_integration
 cat "$CADDY_CONFIG_PATH"
+cat "$tmp/calls"
 [ ! -e "$CADDY_APP_CONFIG" ]
 rm -rf "$tmp"
 '''
@@ -689,9 +694,37 @@ rm -rf "$tmp"
     assert ':80 { respond "shared" }' in result.stdout
     assert "import /etc/caddy/other.caddy" in result.stdout
     assert "managed Caddy import" not in result.stdout
-    assert "validated" in result.stdout
-    assert "reloaded" in result.stdout
-    assert result.stdout.index("validated") < result.stdout.index("reloaded")
+    # A passing check prints none of Caddy's own output.
+    assert "Valid configuration" not in result.stdout
+    assert "not formatted" not in result.stdout + result.stderr
+    assert result.stdout.index("validate-called") < result.stdout.index("reloaded")
+
+
+def test_uninstall_failed_caddy_check_shows_caddy_output() -> None:
+    result = _run_uninstall(
+        r'''
+tmp=$(mktemp -d)
+CADDY_CONFIG_PATH="$tmp/Caddyfile"
+CADDY_APP_CONFIG="$tmp/simple-network-dashboard.caddy"
+CADDY_IMPORT_LINE="import $CADDY_APP_CONFIG"
+printf ':80 { respond "shared" }\n%s\n%s\n' "$CADDY_IMPORT_COMMENT" "$CADDY_IMPORT_LINE" > "$CADDY_CONFIG_PATH"
+printf '%s\nlocalhost { respond "dashboard" }\n' "$CADDY_APP_MARKER" > "$CADDY_APP_CONFIG"
+cp "$CADDY_CONFIG_PATH" "$tmp/original-caddy"
+stat() { printf '0:0:644\n'; }
+caddy() { echo 'Error: adapting config: unrecognized directive: bogus' >&2; return 1; }
+inspect_caddy_for_cleanup() { CADDY_BINARY=caddy; }
+if remove_dashboard_caddy_integration; then exit 10; fi
+cmp "$CADDY_CONFIG_PATH" "$tmp/original-caddy"
+[ -f "$CADDY_APP_CONFIG" ]
+rm -rf "$tmp"
+'''
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "unrecognized directive: bogus" in result.stdout
+    assert result.stdout.index("unrecognized directive") < result.stdout.index(
+        "remaining Caddy configuration is invalid"
+    )
 
 
 @pytest.mark.parametrize("failure", ["publish", "reload"])
