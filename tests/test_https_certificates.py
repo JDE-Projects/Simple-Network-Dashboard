@@ -227,13 +227,13 @@ rm -rf "$tmp"
     assert "unexpected-openssl" not in result.stdout
 
 
-def test_uninstall_preserves_caddy_account_and_uses_remove_not_purge() -> None:
+def test_uninstall_purges_dashboard_installed_caddy() -> None:
     uninstaller = (ROOT / "uninstall.sh").read_text(encoding="utf-8")
 
     assert 'CADDY_HOME="/var/lib/caddy"' in uninstaller
     # A pre-existing or unknown-origin Caddy is preserved with this message.
     assert "Caddy package and persistent CA storage" in uninstaller
-    # A dashboard-installed Caddy is removed with apt-get remove, never purge, so
-    # the caddy service account is left in place.
-    assert "apt-get remove -y caddy" in uninstaller
-    assert "apt-get purge" not in uninstaller
+    # A dashboard-installed Caddy is purged, never plain-removed, so its masked
+    # services do not block a later install.
+    assert "apt-get purge -y caddy" in uninstaller
+    assert "apt-get remove" not in uninstaller

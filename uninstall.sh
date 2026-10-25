@@ -251,11 +251,13 @@ remove_dashboard_caddy() {
         systemctl disable caddy --quiet || echo "Error: could not disable the Caddy service before removal."
     fi
 
-    # Plain remove, not purge: a purge runs the package's own account cleanup,
-    # which deletes the caddy service account. This uninstaller intentionally
-    # leaves that account in place, so it removes the package's data directories
-    # itself below.
-    if ! apt-get remove -y caddy; then
+    # Purge, not plain remove: the package's own removal script masks
+    # caddy.service and caddy-api.service on a plain remove, and a later
+    # install.sh refuses a masked service with no Caddy binary. The purge script
+    # clears those masks and deletes the caddy service account, /var/lib/caddy,
+    # /var/log/caddy, and /etc/caddy. Reinstalling Caddy recreates the account.
+    # The directory removals below are a backstop for anything purge left.
+    if ! apt-get purge -y caddy; then
         echo "Error: Caddy cleanup incomplete: the Caddy package was not removed; its certificate store at $CADDY_HOME and Caddy apt source files were left in place."
         return 1
     fi
@@ -277,7 +279,7 @@ remove_dashboard_caddy() {
     fi
 
     CADDY_REMOVAL_STATUS=removed
-    echo "Caddy and its certificate store were removed. The caddy service account and group were intentionally left in place."
+    echo "Caddy, its certificate store, and its caddy service account were removed."
 }
 
 remove_dashboard_ufw_rules() {
@@ -695,7 +697,7 @@ echo ""
 echo "Simple Network Dashboard has been removed."
 case "$CADDY_REMOVAL_STATUS" in
     removed)
-        echo "Caddy and its certificate store at $CADDY_HOME were removed. The caddy service account and group were left in place."
+        echo "Caddy, its certificate store at $CADDY_HOME, and its caddy service account were removed."
         ;;
     kept)
         if [ "$CADDY_REMOVAL_ELIGIBLE" != true ]; then

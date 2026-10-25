@@ -658,9 +658,10 @@ def test_uninstall_removes_only_owned_caddy_and_ufw_integration() -> None:
     assert 'awk -v comment="$CADDY_IMPORT_COMMENT" -v import_line="$CADDY_IMPORT_LINE"' in uninstaller
     assert 'validate --config "$staged_caddyfile" --adapter caddyfile' in uninstaller
     # The dashboard-owned proxy import is removed here; a dashboard-installed
-    # Caddy package is removed with apt-get remove, never purge (which would also
-    # delete the caddy service account).
-    assert "apt-get purge" not in uninstaller
+    # Caddy package is purged, never plain-removed (which leaves its services
+    # masked and blocks a later install).
+    assert "apt-get purge -y caddy" in uninstaller
+    assert "apt-get remove" not in uninstaller
     assert 'CADDY_HOME="/var/lib/caddy"' in uninstaller
 
 
