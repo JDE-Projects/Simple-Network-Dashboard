@@ -216,3 +216,19 @@ def test_main_flow_cleans_legacy_files_after_unit_reload_before_starting_backend
     cleanup = installer.index("if ! remove_legacy_application_files; then", reload)
     start = installer.index("if ! start_dashboard_backend; then", cleanup)
     assert unit_write < reload < cleanup < start
+
+
+def test_main_flow_restores_previous_service_when_python_setup_fails() -> None:
+    installer = (ROOT / "install.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    for command, error in (
+        ('sudo -u snd python3 -m venv "$APP_DIR/venv"; then', "Error: the Python virtual environment could not be created."),
+        ('sudo -u snd "$APP_DIR/venv/bin/pip" install', "Error: the dashboard's Python packages could not be installed."),
+    ):
+        step = installer.index(command)
+        line_start = installer.rindex("\n", 0, step) + 1
+        assert installer[line_start:step].startswith("if "), f"{command} is not guarded by an if"
+        block = installer[step:installer.index("\nfi\n", step)]
+        assert error in block
+        assert "restore_previously_active_service" in block
+        assert "exit 1" in block

@@ -1461,10 +1461,16 @@ if ! copy_application_files; then
 fi
 
 # Create venv if it doesn't exist, then install/update requirements
-if [ ! -d "$APP_DIR/venv" ]; then
-    sudo -u snd python3 -m venv "$APP_DIR/venv"
+if [ ! -d "$APP_DIR/venv" ] && ! sudo -u snd python3 -m venv "$APP_DIR/venv"; then
+    echo "Error: the Python virtual environment could not be created."
+    restore_previously_active_service
+    exit 1
 fi
-sudo -u snd "$APP_DIR/venv/bin/pip" install --require-hashes -r "$APP_DIR/requirements.txt" --quiet --no-cache-dir
+if ! sudo -u snd "$APP_DIR/venv/bin/pip" install --require-hashes -r "$APP_DIR/requirements.txt" --quiet --no-cache-dir; then
+    echo "Error: the dashboard's Python packages could not be installed."
+    restore_previously_active_service
+    exit 1
+fi
 
 if ! initialize_authentication; then
     restore_previously_active_service
