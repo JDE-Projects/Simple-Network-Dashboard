@@ -14,7 +14,8 @@ ENTRY_POINTS = ("__main__.py", "auth.py")
 LOOSE_RUNTIME_FILES = ("snd-reset-password", "requirements.txt", "uninstall.sh")
 
 _FUNCTION = re.compile(r"^copy_application_files\(\) \{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
-_DESTINATION = "$APP_DIR/"
+_APP_DESTINATION = "$APP_DIR/"
+_STAGING_DESTINATION = "$staged_package"
 
 
 def parse_copy_lines(installer_text: str) -> tuple[list[str], list[str]]:
@@ -32,13 +33,15 @@ def parse_copy_lines(installer_text: str) -> tuple[list[str], list[str]]:
     copy_lines = []
     for line in body.splitlines():
         tokens = shlex.split(line, comments=True)
-        if tokens and tokens[0] == "cp" and tokens[-1] == _DESTINATION:
+        if tokens and tokens[0] == "cp":
             copy_lines.append(tokens)
-    assert len(copy_lines) == 2, f'expected two `cp ... "{_DESTINATION}"` lines in copy_application_files, found {len(copy_lines)}'
+    assert len(copy_lines) == 2, f"expected exactly two cp lines in copy_application_files, found {len(copy_lines)}"
 
-    loose_line = next((line for line in copy_lines if PACKAGE not in line), None)
-    package_line = next((line for line in copy_lines if PACKAGE in line), None)
+    loose_line = next((line for line in copy_lines if line[-1] == _APP_DESTINATION), None)
+    package_line = next((line for line in copy_lines if line[-1] == _STAGING_DESTINATION), None)
     assert loose_line and package_line, "copy_application_files must copy loose runtime files and the package folder"
+    assert sum(line[-1] == _APP_DESTINATION for line in copy_lines) == 1, "copy_application_files must have one loose-file copy to APP_DIR"
+    assert sum(line[-1] == _STAGING_DESTINATION for line in copy_lines) == 1, "copy_application_files must have one staged package copy"
     assert loose_line[1:-1] == list(LOOSE_RUNTIME_FILES), "loose runtime copy line does not match the installed runtime files"
     assert package_line[1:-1] == ["-R", "--no-preserve=ownership", PACKAGE], "package copy line must use cp -R --no-preserve=ownership"
     return loose_line[1:-1], package_line[1:-1]

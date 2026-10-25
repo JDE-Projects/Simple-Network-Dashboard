@@ -38,6 +38,7 @@ def _installer(copy_body: str) -> str:
     '    cp snd-reset-password $EXTRA "$APP_DIR/"\n    cp -R --no-preserve=ownership simple_network_dashboard "$APP_DIR/"',
     '    cp snd-reset-password requirements.txt "$APP_DIR/"\n    cp -R simple_network_dashboard "$APP_DIR/"',
     '    cp snd-reset-password requirements.txt "$APP_DIR/"\n    cp -R --no-preserve=ownership simple_network_dashboard "$OTHER/"',
+    '    cp snd-reset-password requirements.txt "$APP_DIR/"\n    cp -R --no-preserve=ownership simple_network_dashboard "$staged_package"\n    cp unexpected "$APP_DIR/"',
 ])
 def test_parser_refuses_forms_it_cannot_read(copy_body):
     with pytest.raises(AssertionError):
