@@ -134,7 +134,10 @@ printf 'interactive_intent=%s\\n' "$CADDY_INTENT"
     assert result.stdout == "yes_intent=keep\ninteractive_intent=keep\n"
 
 
-def test_caddy_removal_uses_remove_not_purge_and_leaves_identity() -> None:
+def test_caddy_removal_uses_purge_and_leaves_account_cleanup_to_package() -> None:
+    # Purge clears the service masks a plain remove leaves, which would make a
+    # later install.sh refuse. The caddy account is deleted by the package's own
+    # purge script, never by the uninstaller directly.
     result = _run_shell(
         """
 CALLS="$TEST_ROOT/calls"
@@ -158,14 +161,14 @@ cat "$CALLS"
     )
 
     assert result.returncode == 0, result.stderr
-    assert "apt-get:remove -y caddy" in result.stdout
-    assert "purge" not in result.stdout
+    assert "apt-get:purge -y caddy" in result.stdout
+    assert "apt-get:remove" not in result.stdout
     assert "autoremove" not in result.stdout
     assert "rm:-rf -- /var/lib/caddy" in result.stdout
     assert "rm:-f -- /etc/apt/sources.list.d/caddy-stable.list /usr/share/keyrings/caddy-stable-archive-keyring.gpg" in result.stdout
     assert "userdel:" not in result.stdout
     assert "groupdel:" not in result.stdout
-    assert "caddy service account and group were intentionally left in place" in result.stdout
+    assert "Caddy, its certificate store, and its caddy service account were removed." in result.stdout
 
 
 @pytest.mark.parametrize("failure", ["remove", "home"])
@@ -193,12 +196,12 @@ printf 'status=%s\\n' "$CADDY_REMOVAL_STATUS"
 
     assert result.returncode == 0, result.stderr
     assert "Error: Caddy cleanup incomplete:" in result.stdout
-    assert "Caddy and its certificate store were removed." not in result.stdout
+    assert "were removed." not in result.stdout
     assert result.stdout.endswith("status=failed\n")
 
 
 def test_caddy_removal_treats_already_removed_store_as_success() -> None:
-    # apt-get remove may delete /var/lib/caddy and /etc/caddy via package hooks
+    # apt-get purge deletes /var/lib/caddy and /etc/caddy via package hooks
     # before this code runs. An already-absent path must count as success, not a
     # false failure, and the apt source files must still be removed.
     result = _run_shell(
