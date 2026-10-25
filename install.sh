@@ -1195,13 +1195,11 @@ copy_application_files() {
         fi
     fi
 
-    cp snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"
-    if [ $? -ne 0 ]; then
+    if ! cp snd-reset-password requirements.txt uninstall.sh "$APP_DIR/"; then
         rm -rf -- "$staged_package"
         return 1
     fi
-    cp -R --no-preserve=ownership simple_network_dashboard "$staged_package"
-    if [ $? -ne 0 ]; then
+    if ! cp -R --no-preserve=ownership simple_network_dashboard "$staged_package"; then
         rm -rf -- "$staged_package"
         return 1
     fi

@@ -21,8 +21,9 @@ _STAGING_DESTINATION = "$staged_package"
 def parse_copy_lines(installer_text: str) -> tuple[list[str], list[str]]:
     """Return the loose files and package folder copied by the installer.
 
-    The parser accepts only plain ``cp`` commands with exact source names and
-    destinations. Unsupported shell forms fail rather than being guessed.
+    The parser accepts only ``cp`` commands with exact source names and
+    destinations, written either plainly or as ``if ! cp ...; then``.
+    Unsupported shell forms fail rather than being guessed.
     """
     installer_text = installer_text.replace("\r\n", "\n")
     match = _FUNCTION.search(installer_text)
@@ -33,6 +34,10 @@ def parse_copy_lines(installer_text: str) -> tuple[list[str], list[str]]:
     copy_lines = []
     for line in body.splitlines():
         tokens = shlex.split(line, comments=True)
+        if tokens[:3] == ["if", "!", "cp"]:
+            assert tokens[-1] == "then" and tokens[-2].endswith(";"), f"unsupported guarded cp line: {line.strip()}"
+            tokens = tokens[2:-1]
+            tokens[-1] = tokens[-1].removesuffix(";")
         if tokens and tokens[0] == "cp":
             copy_lines.append(tokens)
     assert len(copy_lines) == 2, f"expected exactly two cp lines in copy_application_files, found {len(copy_lines)}"
