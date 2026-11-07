@@ -527,6 +527,30 @@ remove_owned_reset_command() {
     rm -- "$RESET_COMMAND"
 }
 
+# An unfinished update can leave a saved copy of the old version beside the
+# application folder. It is a root-owned directory the installer creates; a
+# symbolic link or other file at that path is never followed or deleted.
+rollback_folder_is_safe_to_remove() {
+    local rollback_dir="${APP_DIR}.rollback"
+
+    if [ ! -e "$rollback_dir" ] && [ ! -L "$rollback_dir" ]; then
+        return 0
+    fi
+    [ -d "$rollback_dir" ] && [ ! -L "$rollback_dir" ]
+}
+
+remove_rollback_folder() {
+    local rollback_dir="${APP_DIR}.rollback"
+
+    if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
+        return 1
+    fi
+    if [ -d "$rollback_dir" ] && [ ! -L "$rollback_dir" ]; then
+        rm -rf -- "$rollback_dir" || return 1
+        echo "Removed the leftover update rollback folder: $rollback_dir"
+    fi
+}
+
 main() {
 if ! require_root; then
     return 1
@@ -547,6 +571,14 @@ parse_uninstall_flags "$@"
 resolve_caddy_removal_eligibility
 resolve_caddy_removal_intent
 
+# Checked before the summary so an unsafe path stops the run before anything
+# is removed.
+if ! rollback_folder_is_safe_to_remove; then
+    echo "Error: ${APP_DIR}.rollback is not a normal folder, so it was not touched. Nothing was removed."
+    echo "Inspect it, remove it yourself, and run the uninstaller again."
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
@@ -555,6 +587,9 @@ echo ""
 echo "This will remove:"
 echo "  - systemd service: $SERVICE_NAME"
 echo "  - application directory: $APP_DIR (including venv)"
+if [ -e "${APP_DIR}.rollback" ] || [ -L "${APP_DIR}.rollback" ]; then
+    echo "  - leftover update rollback folder: ${APP_DIR}.rollback"
+fi
 echo "  - private runtime data: $DATA_DIR"
 echo "  - debug logs: $LOG_DIR"
 if [ "$REMOVE_SND_IDENTITIES" = true ]; then
@@ -676,6 +711,10 @@ fi
 
 if [ -d "$APP_DIR" ]; then
     rm -rf "$APP_DIR"
+fi
+if ! remove_rollback_folder; then
+    echo "Error: could not remove ${APP_DIR}.rollback. Remove it yourself."
+    exit 1
 fi
 
 # Remove private state only after the optional backup above completes.

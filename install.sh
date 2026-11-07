@@ -42,6 +42,41 @@ CADDY_ROLLBACK_APP_CONFIG=""
 CADDY_ROLLBACK_HAD_APP_CONFIG=false
 DASHBOARD_WAS_ACTIVE=false
 DASHBOARD_INSTALLED_CADDY=false
+# An update is rolled back only when an application and its venv are already
+# installed. These are set by detect_existing_installation and
+# create_rollback_point.
+UPDATE_ELIGIBLE=false
+PACKAGE_WAS_INSTALLED=false
+ROLLBACK_ACTIVE=false
+ROLLBACK_PACKAGE_MOVED=false
+ROLLBACK_VENV_MOVED=false
+# Free space required beyond the size of the current venv, in KiB (200 MiB).
+# The old venv is moved by rename, so the extra space covers the new venv (about
+# the old venv's size) plus the new package, pip's temporary files and logs.
+DISK_MARGIN_KB=204800
+# Readiness check timings, in seconds. Tests shrink them.
+READY_TIMEOUT_SECONDS=30
+READY_POLL_SECONDS=1
+READY_CONFIRMATIONS=3
+READY_REQUEST_TIMEOUT_SECONDS=2
+READY_PROBE_SCRIPT=$(cat <<'PY'
+import sys
+import urllib.request
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+try:
+    with opener.open(sys.argv[1], timeout=float(sys.argv[2])) as response:
+        sys.exit(0 if response.status == 200 else 1)
+except Exception:
+    sys.exit(1)
+PY
+)
 
 usage() {
     echo "Usage: $0 [--port N] [--https-host HOST] [--https-port N]"
@@ -831,8 +866,12 @@ select_backend_port() {
 }
 
 start_dashboard_backend() {
-    if ! systemctl start "$SERVICE_NAME" || ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    if ! systemctl start "$SERVICE_NAME"; then
         echo "Error: dashboard service did not start on its loopback backend; HTTPS proxy was not published."
+        return 1
+    fi
+    if ! wait_for_dashboard_ready "$PORT"; then
+        echo "Error: dashboard service did not become ready on its loopback backend; HTTPS proxy was not published."
         return 1
     fi
 }
@@ -1173,7 +1212,7 @@ repair_runtime_storage() {
 }
 
 copy_application_files() {
-    local staged_package old_package previous_package
+    local staged_package old_package
 
     if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
         echo "Error: APP_DIR is empty or unsafe. Refusing to replace application files."
@@ -1182,7 +1221,6 @@ copy_application_files() {
 
     staged_package="$APP_DIR/.simple_network_dashboard.new"
     old_package="$APP_DIR/simple_network_dashboard"
-    previous_package="$APP_DIR/.simple_network_dashboard.previous"
 
     if [ -e "$staged_package" ] || [ -L "$staged_package" ]; then
         if [ ! -d "$staged_package" ] || [ -L "$staged_package" ]; then
@@ -1208,37 +1246,24 @@ copy_application_files() {
         return 1
     fi
 
+    # On an update the previous package is already saved in the rollback
+    # folder, so only an empty or unusable leftover can be in the way here.
     if [ -e "$old_package" ] || [ -L "$old_package" ]; then
         if [ ! -d "$old_package" ] || [ -L "$old_package" ]; then
             echo "Error: installed application path $old_package is not a directory."
             rm -rf -- "$staged_package"
             return 1
         fi
-        # A leftover from an interrupted earlier run is stale while the
-        # installed package is still in place.
-        if [ -e "$previous_package" ] || [ -L "$previous_package" ]; then
-            if [ ! -d "$previous_package" ] || [ -L "$previous_package" ] || ! rm -rf -- "$previous_package"; then
-                echo "Error: could not remove leftover application path $previous_package."
-                rm -rf -- "$staged_package"
-                return 1
-            fi
-        fi
-        if ! mv -T -- "$old_package" "$previous_package"; then
+        if ! rm -rf -- "$old_package"; then
+            echo "Error: could not remove the old application path $old_package."
             rm -rf -- "$staged_package"
             return 1
         fi
     fi
 
     if ! mv -T -- "$staged_package" "$old_package"; then
-        if [ -d "$previous_package" ] && [ ! -L "$previous_package" ]; then
-            mv -T -- "$previous_package" "$old_package" || true
-        fi
         rm -rf -- "$staged_package"
         return 1
-    fi
-
-    if [ -d "$previous_package" ] && [ ! -L "$previous_package" ]; then
-        rm -rf -- "$previous_package"
     fi
 }
 
@@ -1306,17 +1331,454 @@ install_reset_command() {
     install -o root -g root -m 0755 "$APP_DIR/snd-reset-password" "$RESET_COMMAND"
 }
 
-restore_previously_active_service() {
-    if [ "$DASHBOARD_WAS_ACTIVE" != true ]; then
+rollback_dir_path() {
+    printf '%s\n' "${APP_DIR}.rollback"
+}
+
+# Delete one exact directory: it must sit directly under APP_DIR (or be the
+# rollback folder) and must be a real directory, never a symlink.
+remove_checked_directory() {
+    local path="$1" rollback_dir
+
+    if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
+        echo "Error: APP_DIR is empty or unsafe. Refusing to delete $path."
+        return 1
+    fi
+    rollback_dir=$(rollback_dir_path)
+    case "$path" in
+        "$APP_DIR"/?*|"$rollback_dir") ;;
+        *)
+            echo "Error: refusing to delete unexpected path $path."
+            return 1
+            ;;
+    esac
+    if [ -L "$path" ]; then
+        echo "Error: $path is a symbolic link, not a directory. It was not removed."
+        return 1
+    fi
+    if [ ! -e "$path" ]; then
         return 0
     fi
-    echo "Installation failed after stopping the active dashboard service. Attempting restoration."
-    if systemctl start "$SERVICE_NAME" \
-        && systemctl is-active --quiet "$SERVICE_NAME"; then
-        echo "Dashboard service restoration succeeded."
-    else
-        echo "Error: dashboard service restoration failed. Run: sudo systemctl status $SERVICE_NAME"
+    if [ ! -d "$path" ]; then
+        echo "Error: $path is not a directory. It was not removed."
+        return 1
     fi
+    rm -rf -- "$path"
+}
+
+# Print the commands that put a saved copy back by hand.
+print_rollback_restore_help() {
+    local rollback_dir="$1"
+
+    echo "To restore the previous version by hand:"
+    echo "  sudo systemctl stop $SERVICE_NAME"
+    echo "  sudo rm -r -- \"$APP_DIR/venv\" \"$APP_DIR/simple_network_dashboard\""
+    echo "  sudo mv -T -- \"$rollback_dir/venv\" \"$APP_DIR/venv\""
+    echo "  sudo mv -T -- \"$rollback_dir/simple_network_dashboard\" \"$APP_DIR/simple_network_dashboard\""
+    echo "  (skip the last mv if the folder has no simple_network_dashboard; the file manifest lists what existed)"
+    echo "  Then copy each saved file in $rollback_dir/files back with sudo cp -p, using these destinations"
+    echo "  (remove the destination instead when the manifest marks it absent):"
+    echo "    requirements -> $APP_DIR/requirements.txt"
+    echo "    app-reset -> $APP_DIR/snd-reset-password"
+    echo "    uninstall -> $APP_DIR/uninstall.sh"
+    echo "    reset-command -> $RESET_COMMAND"
+    echo "    unit -> $UNIT_DEST"
+    echo "  sudo systemctl daemon-reload"
+    echo "  sudo systemctl reset-failed $SERVICE_NAME"
+    echo "  sudo systemctl start $SERVICE_NAME"
+    echo "Once the restored dashboard is confirmed working, remove the saved copy:"
+    echo "  sudo rm -r -- \"$rollback_dir\""
+}
+
+# Runs before anything is changed. A folder left by an unfinished update holds
+# the only copy of the previous version, so it is never overwritten or deleted.
+refuse_leftover_rollback_folder() {
+    local rollback_dir
+
+    rollback_dir=$(rollback_dir_path)
+    if [ ! -e "$rollback_dir" ] && [ ! -L "$rollback_dir" ]; then
+        return 0
+    fi
+    echo "Error: a previous update did not finish. Its saved copy of the old version is still at:"
+    echo "  $rollback_dir"
+    echo "Nothing was changed, and the installer will not overwrite or delete that folder."
+    if [ -d "$rollback_dir" ] && [ ! -L "$rollback_dir" ]; then
+        echo "It contains:"
+        find "$rollback_dir" -mindepth 1 -maxdepth 1 -printf '  %M %u:%g %s %f\n' || true
+    else
+        echo "It is not a normal folder. Inspect it with: ls -la -- \"$rollback_dir\""
+    fi
+    print_rollback_restore_help "$rollback_dir"
+    return 1
+}
+
+check_disk_space_for_update() {
+    local venv_kb free_kb needed_kb
+
+    if ! venv_kb=$(du -sk -- "$APP_DIR/venv" | awk 'NR == 1 { print $1 }') \
+        || [[ ! "$venv_kb" =~ ^[0-9]+$ ]]; then
+        echo "Error: could not measure the size of $APP_DIR/venv. Nothing was changed."
+        return 1
+    fi
+    if ! free_kb=$(df -Pk -- "$APP_DIR" | awk 'NR == 2 { print $4 }') \
+        || [[ ! "$free_kb" =~ ^[0-9]+$ ]]; then
+        echo "Error: could not read the free disk space for $APP_DIR. Nothing was changed."
+        return 1
+    fi
+    needed_kb=$((venv_kb + DISK_MARGIN_KB))
+    if [ "$free_kb" -lt "$needed_kb" ]; then
+        echo "Error: not enough free disk space to update safely."
+        echo "The filesystem holding $APP_DIR has $((free_kb / 1024)) MB free; $((needed_kb / 1024)) MB is needed."
+        echo "Free some space and run the installer again. Nothing was changed."
+        return 1
+    fi
+}
+
+detect_existing_installation() {
+    local legacy_file has_application=false
+
+    UPDATE_ELIGIBLE=false
+    PACKAGE_WAS_INSTALLED=false
+    if [ -d "$APP_DIR/simple_network_dashboard" ] && [ ! -L "$APP_DIR/simple_network_dashboard" ]; then
+        PACKAGE_WAS_INSTALLED=true
+        has_application=true
+    else
+        for legacy_file in main.py ws_manager.py; do
+            if [ -f "$APP_DIR/$legacy_file" ] && [ ! -L "$APP_DIR/$legacy_file" ]; then
+                has_application=true
+            fi
+        done
+    fi
+    if [ "$has_application" = true ] && [ -d "$APP_DIR/venv" ] && [ ! -L "$APP_DIR/venv" ]; then
+        UPDATE_ELIGIBLE=true
+    fi
+}
+
+rollback_small_file_path() {
+    case "$1" in
+        requirements) printf '%s\n' "$APP_DIR/requirements.txt" ;;
+        app-reset) printf '%s\n' "$APP_DIR/snd-reset-password" ;;
+        uninstall) printf '%s\n' "$APP_DIR/uninstall.sh" ;;
+        reset-command) printf '%s\n' "$RESET_COMMAND" ;;
+        unit) printf '%s\n' "$UNIT_DEST" ;;
+        *) return 1 ;;
+    esac
+}
+
+# The backend port the currently installed unit uses, empty when no unit exists.
+read_unit_backend_port() {
+    local port
+
+    if [ ! -f "$UNIT_DEST" ]; then
+        return 0
+    fi
+    port=$(grep -o -- '--port [0-9]*' "$UNIT_DEST" | awk '{print $2}' | head -n 1)
+    # Units installed before --port support always used port 3000.
+    printf '%s\n' "${port:-3000}"
+}
+
+# Put back whatever a half-built rollback point already took, then delete the
+# folder only if everything went back. Always returns 1.
+abandon_rollback_point_build() {
+    local rollback_dir="$1" put_back_failed=false
+
+    if [ "$ROLLBACK_VENV_MOVED" = true ]; then
+        if mv -T -- "$rollback_dir/venv" "$APP_DIR/venv"; then
+            ROLLBACK_VENV_MOVED=false
+        else
+            put_back_failed=true
+        fi
+    fi
+    if [ "$ROLLBACK_PACKAGE_MOVED" = true ]; then
+        if mv -T -- "$rollback_dir/simple_network_dashboard" "$APP_DIR/simple_network_dashboard"; then
+            ROLLBACK_PACKAGE_MOVED=false
+        else
+            put_back_failed=true
+        fi
+    fi
+    if [ "$put_back_failed" = true ]; then
+        echo "Error: the saved copy could not be put back completely. The old files are in:"
+        echo "  $rollback_dir"
+        print_rollback_restore_help "$rollback_dir"
+        return 1
+    fi
+    if ! remove_checked_directory "$rollback_dir"; then
+        echo "Error: could not remove the unfinished rollback folder $rollback_dir."
+        echo "The installed files are in place. Remove the folder once you have checked them."
+    fi
+    return 1
+}
+
+create_rollback_point() {
+    local rollback_dir key source_path port
+
+    ROLLBACK_ACTIVE=false
+    ROLLBACK_PACKAGE_MOVED=false
+    ROLLBACK_VENV_MOVED=false
+    if [ -z "${APP_DIR:-}" ] || [ "$APP_DIR" = "/" ]; then
+        echo "Error: APP_DIR is empty or unsafe. Refusing to build a rollback point."
+        return 1
+    fi
+    rollback_dir=$(rollback_dir_path)
+    if [ -e "$rollback_dir" ] || [ -L "$rollback_dir" ]; then
+        echo "Error: $rollback_dir already exists. Nothing was changed."
+        return 1
+    fi
+    if ! mkdir -m 0700 -- "$rollback_dir"; then
+        echo "Error: could not create the rollback folder $rollback_dir. Nothing was changed."
+        return 1
+    fi
+    if ! chown root:root -- "$rollback_dir" || ! chmod 0700 -- "$rollback_dir" \
+        || ! mkdir -m 0700 -- "$rollback_dir/files"; then
+        echo "Error: could not secure the rollback folder $rollback_dir."
+        abandon_rollback_point_build "$rollback_dir"
+        return 1
+    fi
+
+    : > "$rollback_dir/manifest" || { abandon_rollback_point_build "$rollback_dir"; return 1; }
+    for key in requirements app-reset uninstall reset-command unit; do
+        source_path=$(rollback_small_file_path "$key") || { abandon_rollback_point_build "$rollback_dir"; return 1; }
+        if [ -L "$source_path" ] || { [ -e "$source_path" ] && [ ! -f "$source_path" ]; }; then
+            echo "Error: $source_path is not a regular file. Nothing was changed."
+            abandon_rollback_point_build "$rollback_dir"
+            return 1
+        fi
+        if [ -e "$source_path" ]; then
+            if ! cp -p -- "$source_path" "$rollback_dir/files/$key" \
+                || ! cmp -s -- "$source_path" "$rollback_dir/files/$key" \
+                || ! printf '%s present\n' "$key" >> "$rollback_dir/manifest"; then
+                echo "Error: could not save a verified copy of $source_path. Nothing was changed."
+                abandon_rollback_point_build "$rollback_dir"
+                return 1
+            fi
+        elif ! printf '%s absent\n' "$key" >> "$rollback_dir/manifest"; then
+            echo "Error: could not write the rollback manifest. Nothing was changed."
+            abandon_rollback_point_build "$rollback_dir"
+            return 1
+        fi
+    done
+
+    if ! port=$(read_unit_backend_port) || ! printf '%s\n' "$port" > "$rollback_dir/port"; then
+        echo "Error: could not record the current backend port. Nothing was changed."
+        abandon_rollback_point_build "$rollback_dir"
+        return 1
+    fi
+    if ! printf 'package %s\n' "$([ "$PACKAGE_WAS_INSTALLED" = true ] && echo present || echo absent)" \
+        >> "$rollback_dir/manifest"; then
+        echo "Error: could not write the rollback manifest. Nothing was changed."
+        abandon_rollback_point_build "$rollback_dir"
+        return 1
+    fi
+
+    if [ "$PACKAGE_WAS_INSTALLED" = true ]; then
+        if ! mv -T -- "$APP_DIR/simple_network_dashboard" "$rollback_dir/simple_network_dashboard"; then
+            echo "Error: could not move the installed application into the rollback folder."
+            abandon_rollback_point_build "$rollback_dir"
+            return 1
+        fi
+        ROLLBACK_PACKAGE_MOVED=true
+    fi
+    if ! mv -T -- "$APP_DIR/venv" "$rollback_dir/venv"; then
+        echo "Error: could not move the Python environment into the rollback folder."
+        abandon_rollback_point_build "$rollback_dir"
+        return 1
+    fi
+    ROLLBACK_VENV_MOVED=true
+
+    if ! : > "$rollback_dir/complete"; then
+        echo "Error: could not finish the rollback point."
+        abandon_rollback_point_build "$rollback_dir"
+        return 1
+    fi
+    ROLLBACK_ACTIVE=true
+}
+
+discard_rollback_point() {
+    local rollback_dir
+
+    if [ "$ROLLBACK_ACTIVE" != true ]; then
+        return 0
+    fi
+    rollback_dir=$(rollback_dir_path)
+    if ! remove_checked_directory "$rollback_dir"; then
+        echo "Error: could not remove the rollback folder $rollback_dir."
+        echo "Remove it yourself once you have confirmed the dashboard works, or the next update will refuse to run."
+        return 1
+    fi
+    ROLLBACK_ACTIVE=false
+}
+
+restore_rollback_small_file() {
+    local rollback_dir="$1" key="$2" destination state temp_file
+
+    destination=$(rollback_small_file_path "$key") || return 1
+    state=$(awk -v key="$key" '$1 == key { print $2; exit }' "$rollback_dir/manifest") || return 1
+    case "$state" in
+        present)
+            if [ -L "$rollback_dir/files/$key" ] || [ ! -f "$rollback_dir/files/$key" ]; then
+                return 1
+            fi
+            temp_file="${destination}.restore.$$"
+            if ! cp -p -- "$rollback_dir/files/$key" "$temp_file" \
+                || ! cmp -s -- "$rollback_dir/files/$key" "$temp_file" \
+                || ! mv -fT -- "$temp_file" "$destination"; then
+                rm -f -- "$temp_file"
+                return 1
+            fi
+            ;;
+        absent)
+            if [ -d "$destination" ] && [ ! -L "$destination" ]; then
+                return 1
+            fi
+            rm -f -- "$destination"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+service_restart_count() {
+    local count
+
+    count=$(systemctl show -p NRestarts --value "$SERVICE_NAME") || return 1
+    [[ "$count" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$count"
+}
+
+# One GET of /login on the loopback backend: no proxy, no redirects, short
+# timeout. Succeeds only on HTTP 200.
+dashboard_probe() {
+    "$APP_DIR/venv/bin/python" -I -c "$READY_PROBE_SCRIPT" \
+        "http://127.0.0.1:${1}/login" "$READY_REQUEST_TIMEOUT_SECONDS"
+}
+
+# Ready means: after the first HTTP 200, READY_CONFIRMATIONS more in a row,
+# the service still active, and systemd's restart count unchanged since this
+# check began (a crash loop restarts between probes). Gives up after
+# READY_TIMEOUT_SECONDS.
+wait_for_dashboard_ready() {
+    local port="$1" restarts_before restarts_after streak=0 needed deadline
+
+    if ! is_valid_port "$port"; then
+        echo "Error: no valid backend port is known, so the dashboard cannot be checked."
+        return 1
+    fi
+    if ! restarts_before=$(service_restart_count); then
+        echo "Error: could not read the dashboard service restart count."
+        return 1
+    fi
+    needed=$((READY_CONFIRMATIONS + 1))
+    deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+    while true; do
+        if dashboard_probe "$port"; then
+            streak=$((streak + 1))
+        else
+            streak=0
+        fi
+        if [ "$streak" -ge "$needed" ]; then
+            break
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "Error: the dashboard did not answer steadily on http://127.0.0.1:${port}/login within ${READY_TIMEOUT_SECONDS} seconds."
+            return 1
+        fi
+        sleep "$READY_POLL_SECONDS"
+    done
+    if ! restarts_after=$(service_restart_count) || [ "$restarts_before" != "$restarts_after" ]; then
+        echo "Error: the dashboard service restarted while it was being checked."
+        return 1
+    fi
+    if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+        echo "Error: the dashboard service is not running."
+        return 1
+    fi
+}
+
+# Update failures only: put the saved package, environment and small files
+# back, then confirm the old version answers on its old port.
+restore_previous_installation() {
+    local rollback_dir old_port key
+
+    rollback_dir=$(rollback_dir_path)
+    echo "The update failed. Restoring the previous version."
+    if [ ! -f "$rollback_dir/complete" ]; then
+        echo "Error: the rollback point at $rollback_dir is not complete, so it cannot be used automatically."
+        print_rollback_restore_help "$rollback_dir"
+        return 1
+    fi
+    ROLLBACK_ACTIVE=true
+
+    if ! systemctl stop "$SERVICE_NAME"; then
+        echo "Error: could not stop the dashboard service, so the previous version was not put back."
+        echo "The previous version's saved files are in: $rollback_dir"
+        print_rollback_restore_help "$rollback_dir"
+        return 1
+    fi
+    if ! remove_checked_directory "$APP_DIR/simple_network_dashboard" \
+        || ! remove_checked_directory "$APP_DIR/venv"; then
+        echo "Error: could not remove the half-installed new version."
+        echo "The previous version's saved files are in: $rollback_dir"
+        print_rollback_restore_help "$rollback_dir"
+        return 1
+    fi
+    if [ "$(awk '$1 == "package" { print $2; exit }' "$rollback_dir/manifest")" = present ]; then
+        if ! mv -T -- "$rollback_dir/simple_network_dashboard" "$APP_DIR/simple_network_dashboard"; then
+            echo "Error: could not move the previous application back."
+            echo "The previous version's saved files are in: $rollback_dir"
+            print_rollback_restore_help "$rollback_dir"
+            return 1
+        fi
+    fi
+    if ! mv -T -- "$rollback_dir/venv" "$APP_DIR/venv"; then
+        echo "Error: could not move the previous Python environment back."
+        echo "The previous version's saved files are in: $rollback_dir"
+        print_rollback_restore_help "$rollback_dir"
+        return 1
+    fi
+    # The reset command copies are restored back to back so the two always
+    # match, as the uninstaller and the next update require.
+    for key in requirements uninstall app-reset reset-command unit; do
+        if ! restore_rollback_small_file "$rollback_dir" "$key"; then
+            echo "Error: could not restore $(rollback_small_file_path "$key")."
+            echo "The previous version's saved files are in: $rollback_dir"
+            print_rollback_restore_help "$rollback_dir"
+            return 1
+        fi
+    done
+    if ! systemctl daemon-reload; then
+        echo "Error: systemd could not reload the restored service definition."
+        echo "The previous version's saved files are in: $rollback_dir"
+        print_rollback_restore_help "$rollback_dir"
+        return 1
+    fi
+    # A crash loop leaves the unit in a failed state that blocks a new start.
+    systemctl reset-failed "$SERVICE_NAME" || true
+
+    if [ "$DASHBOARD_WAS_ACTIVE" = true ]; then
+        old_port=$(tr -d '[:space:]' < "$rollback_dir/port") || old_port=""
+        if ! systemctl start "$SERVICE_NAME" || ! wait_for_dashboard_ready "$old_port"; then
+            echo "Error: the previous files were put back, but the dashboard is not responding."
+            echo "The saved copy was kept at: $rollback_dir"
+            echo "Check: sudo systemctl status $SERVICE_NAME and sudo journalctl -u $SERVICE_NAME -n 50"
+            return 1
+        fi
+        echo "Previous version restored and responding."
+    else
+        echo "The previous files were put back. The service was left stopped, as it was before the update."
+    fi
+    # The previous version is back; a folder that cannot be deleted is reported
+    # by discard_rollback_point and does not change that.
+    discard_rollback_point || true
+}
+
+# Called when an update step fails. Fresh installs have no rollback point and
+# keep the plain report-and-exit behavior.
+restore_after_failed_update() {
+    if [ "$ROLLBACK_ACTIVE" != true ]; then
+        return 0
+    fi
+    restore_previous_installation
 }
 
 initialize_authentication() {
@@ -1352,6 +1814,112 @@ check_python_version() {
     fi
 }
 
+write_service_unit() {
+    local temp_unit
+
+    temp_unit=$(mktemp "${UNIT_DEST}.XXXXXX") || return 1
+    if ! cat > "$temp_unit" << EOF
+[Unit]
+Description=Simple Network Dashboard
+After=network.target
+
+[Service]
+User=snd
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/venv/bin/python -m simple_network_dashboard --port ${PORT}
+Environment=SND_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
+Restart=always
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    then
+        rm -f -- "$temp_unit"
+        return 1
+    fi
+    if ! chmod 0644 "$temp_unit" || ! mv -fT -- "$temp_unit" "$UNIT_DEST"; then
+        rm -f -- "$temp_unit"
+        return 1
+    fi
+}
+
+# Every step is checked and reports its own error; any failure returns 1 so
+# the caller can restore the previous version.
+apply_new_version() {
+    if ! copy_application_files; then
+        echo "Error: application files could not be copied."
+        return 1
+    fi
+
+    # Virtual environments embed absolute paths in their scripts, so the new one
+    # is built at its final location. The old one only ever moves back to its
+    # original path.
+    if ! sudo -u snd python3 -m venv "$APP_DIR/venv"; then
+        echo "Error: the Python virtual environment could not be created."
+        return 1
+    fi
+    if ! sudo -u snd "$APP_DIR/venv/bin/pip" install --require-hashes -r "$APP_DIR/requirements.txt" --quiet --no-cache-dir; then
+        echo "Error: the dashboard's Python packages could not be installed."
+        return 1
+    fi
+
+    if ! initialize_authentication; then
+        return 1
+    fi
+    if ! install_reset_command; then
+        echo "Error: dashboard password-reset command installation failed."
+        return 1
+    fi
+
+    # Create systemd service file
+    if ! write_service_unit; then
+        echo "Error: the systemd service file could not be written."
+        return 1
+    fi
+    if ! systemctl daemon-reload; then
+        echo "Error: systemd could not reload the service definition."
+        return 1
+    fi
+    if ! systemctl enable "$SERVICE_NAME" --quiet; then
+        echo "Error: the dashboard service could not be enabled."
+        return 1
+    fi
+    if ! start_dashboard_backend; then
+        return 1
+    fi
+}
+
+# Updates save the old package, environment and small files before anything is
+# replaced, so a failed update can put the working version back. The saved copy
+# is deleted only once the new version answers. Returns 1 on any failure, after
+# restoring the previous version when there is one.
+update_application() {
+    if [ "$UPDATE_ELIGIBLE" = true ]; then
+        if ! create_rollback_point; then
+            echo "Error: the rollback point could not be built, so the update was not started."
+            if [ "$DASHBOARD_WAS_ACTIVE" = true ]; then
+                if systemctl start "$SERVICE_NAME"; then
+                    echo "The dashboard service was started again."
+                else
+                    echo "Error: the dashboard service could not be started again. Run: sudo systemctl status $SERVICE_NAME"
+                fi
+            fi
+            return 1
+        fi
+    fi
+
+    if ! apply_new_version; then
+        restore_after_failed_update || true
+        return 1
+    fi
+
+    # The new version answers; the saved copy is no longer needed.
+    if ! discard_rollback_point; then
+        return 1
+    fi
+}
+
 main() {
 if [ "$EUID" -ne 0 ]; then
     echo "Run with sudo: sudo bash install.sh"
@@ -1371,6 +1939,10 @@ if ! parse_install_arguments "$@"; then
     exit 1
 fi
 if ! verify_reset_command_destination; then
+    exit 1
+fi
+# A folder left by an unfinished update is the only copy of the old version.
+if ! refuse_leftover_rollback_folder; then
     exit 1
 fi
 
@@ -1420,6 +1992,13 @@ if ! classify_account_state; then
     exit 1
 fi
 
+# Decide from what is actually installed whether this is an update that can be
+# rolled back, before anything below creates files in the application folder.
+detect_existing_installation
+if [ "$UPDATE_ELIGIBLE" = true ] && ! check_disk_space_for_update; then
+    exit 1
+fi
+
 if [ "$ACCOUNT_STATE" = "managed-update" ] && [ "$DASHBOARD_INSTALLED_CADDY" = true ]; then
     if ! record_install_state; then
         echo "Error: could not record that this dashboard installation installed Caddy."
@@ -1442,69 +2021,34 @@ mkdir -p "$APP_DIR/simple_network_dashboard"
 chown snd:snd "$APP_DIR" "$APP_DIR/simple_network_dashboard"
 chmod 2775 "$APP_DIR" "$APP_DIR/simple_network_dashboard"
 
-# Stop service if already running (handles re-runs for updates)
-if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+# Stop the service (handles re-runs for updates). An update stops it even when
+# it is not active, so a crash-looping service cannot restart over the files
+# being moved. The stop must succeed before any file is touched.
+if [ "$UPDATE_ELIGIBLE" = true ] && [ -e "$UNIT_DEST" ]; then
+    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        DASHBOARD_WAS_ACTIVE=true
+    fi
+    if ! systemctl stop "$SERVICE_NAME"; then
+        echo "Error: could not stop the dashboard service. No files were changed."
+        exit 1
+    fi
+elif systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     DASHBOARD_WAS_ACTIVE=true
-    systemctl stop "$SERVICE_NAME"
+    if ! systemctl stop "$SERVICE_NAME"; then
+        echo "Error: could not stop the dashboard service. No files were changed."
+        exit 1
+    fi
 fi
 
 # Keep private runtime state outside the replaceable application directory.
 repair_runtime_storage
 
-# Copy app files before removing the legacy layout so the previous service can recover.
-if ! copy_application_files; then
-    echo "Error: application files could not be copied."
-    restore_previously_active_service
+if ! update_application; then
     exit 1
 fi
-
-# Create venv if it doesn't exist, then install/update requirements
-if [ ! -d "$APP_DIR/venv" ] && ! sudo -u snd python3 -m venv "$APP_DIR/venv"; then
-    echo "Error: the Python virtual environment could not be created."
-    restore_previously_active_service
-    exit 1
-fi
-if ! sudo -u snd "$APP_DIR/venv/bin/pip" install --require-hashes -r "$APP_DIR/requirements.txt" --quiet --no-cache-dir; then
-    echo "Error: the dashboard's Python packages could not be installed."
-    restore_previously_active_service
-    exit 1
-fi
-
-if ! initialize_authentication; then
-    restore_previously_active_service
-    exit 1
-fi
-if ! install_reset_command; then
-    echo "Error: dashboard password-reset command installation failed."
-    restore_previously_active_service
-    exit 1
-fi
-
-# Create systemd service file
-cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
-[Unit]
-Description=Simple Network Dashboard
-After=network.target
-
-[Service]
-User=snd
-WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/venv/bin/python -m simple_network_dashboard --port ${PORT}
-Environment=SND_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
-Restart=always
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME" --quiet
+# The old flat layout is removed only after the new version is confirmed working.
 if ! remove_legacy_application_files; then
     echo "Error: legacy application cleanup failed."
-    exit 1
-fi
-if ! start_dashboard_backend; then
     exit 1
 fi
 if ! write_caddy_proxy_config; then
