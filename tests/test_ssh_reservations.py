@@ -548,7 +548,8 @@ def test_connect_after_delete_creates_no_session(monkeypatch):
     mgr = _mgr()
     _stub_network_connect(monkeypatch)
     devices = [_device()]
-    lookup = lambda device_id: next((d for d in devices if d["id"] == device_id), None)
+    def lookup(device_id):
+        return next((d for d in devices if d["id"] == device_id), None)
 
     devices.clear()
     result = mgr.connect("d1", "pw", lookup, "owner-1")
