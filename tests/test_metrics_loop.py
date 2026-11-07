@@ -200,3 +200,45 @@ def test_poll_once_skips_selected_id_missing_from_devices_cache(monkeypatch):
     assert fetch_calls == [("10.0.0.4", 9100)]
     assert len(broadcasts) == 1
     assert broadcasts[0]["device_id"] == "dev_a"
+
+
+def test_metrics_loop_survives_failed_cycles_and_logs_once_per_streak(monkeypatch, capsys):
+    """An unexpected cycle failure is logged once, the loop keeps going, and
+    the next good cycle still reaches browsers and logs recovery."""
+    monkeypatch.setattr(runtime_state, "_devices_cache", _fake_devices())
+    monkeypatch.setattr(main, "_metrics_cache", {})
+    monkeypatch.setattr(main, "METRICS_INTERVAL", 0)
+    _select(monkeypatch, {"dev_a"})
+
+    async def fake_fetch_metrics(host, port, prev=None):
+        return {"cpu_percent": 5.0}
+    monkeypatch.setattr(main, "fetch_metrics", fake_fetch_metrics)
+
+    broadcasts, broadcast = _recorder()
+    monkeypatch.setattr(main.ws_mgr, "broadcast", broadcast)
+
+    real_poll_once = main._poll_once
+    calls = []
+
+    async def flaky_poll_once():
+        calls.append(None)
+        if len(calls) <= 2:
+            raise TypeError("unhashable type: 'list'")
+        if len(calls) == 3:
+            return await real_poll_once()
+        raise asyncio.CancelledError
+    monkeypatch.setattr(main, "_poll_once", flaky_poll_once)
+
+    async def run():
+        try:
+            await main._metrics_loop()
+        except asyncio.CancelledError:
+            pass
+    asyncio.run(run())
+
+    assert len(calls) == 4
+    assert [b["device_id"] for b in broadcasts] == ["dev_a"]
+    out = capsys.readouterr().out
+    assert out.count("metrics polling cycle failed") == 1
+    assert "TypeError: unhashable type: 'list'" in out
+    assert out.count("polling recovered") == 1

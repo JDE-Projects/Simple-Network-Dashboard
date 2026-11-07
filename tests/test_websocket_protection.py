@@ -320,6 +320,7 @@ def test_due_revoked_message_is_not_handled_before_policy_close(monkeypatch) -> 
 def test_live_websocket_handles_continuous_messages_across_valid_revalidations(tmp_path: Path, monkeypatch) -> None:
     """A valid busy socket remains usable through multiple deadline windows."""
     monkeypatch.setattr(main, "WS_REVALIDATE_SECONDS", 0.05)
+    monkeypatch.setattr(main.runtime_state, "_devices_cache", [{"id": "device-1", "host": "h"}])
     client = _authenticated_client(tmp_path, monkeypatch)
     selected: list[str | None] = []
     revalidations: list[str] = []
@@ -522,3 +523,34 @@ def test_installer_passes_the_canonical_public_origin_to_systemd() -> None:
     assert 'if [ "$HTTPS_PORT" -ne 443 ]; then' in installer
     assert 'PUBLIC_ORIGIN="${PUBLIC_ORIGIN}:${HTTPS_PORT}"' in installer
     assert "Environment=SND_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}" in installer
+
+
+def test_select_device_accepts_only_known_string_ids_or_a_clear(monkeypatch) -> None:
+    monkeypatch.setattr(main.runtime_state, "_devices_cache", [{"id": "dev_a", "host": "h"}])
+    assert main._is_valid_selection("dev_a")
+    assert main._is_valid_selection(None)
+    assert main._is_valid_selection("")
+    for bad in ("dev_missing", ["dev_a"], {"id": "dev_a"}, 5, True):
+        assert not main._is_valid_selection(bad)
+
+
+def test_malformed_websocket_messages_are_ignored_without_closing(tmp_path: Path, monkeypatch) -> None:
+    """List, object, and unknown selections leave the prior selection in
+    place, and a non-object message does not drop the connection."""
+    monkeypatch.setattr(main.runtime_state, "_devices_cache", [{"id": "dev_a", "host": "h"}])
+    handled = threading.Event()
+    monkeypatch.setattr(main.ssh_mgr, "stay_connected", lambda owner: handled.set())
+    client = _authenticated_client(tmp_path, monkeypatch)
+
+    with client.websocket_connect("/ws", headers={"Origin": "https://dashboard.lan"}) as websocket:
+        assert websocket.receive_json()["type"] == "init"
+        websocket.send_json({"type": "select_device", "id": "dev_a"})
+        websocket.send_json({"type": "select_device", "id": ["dev_a", "dev_b"]})
+        websocket.send_json({"type": "select_device", "id": {"id": "dev_a"}})
+        websocket.send_json({"type": "select_device", "id": "dev_missing"})
+        websocket.send_text("[]")
+        websocket.send_text('"select_device"')
+        # Messages are handled in order, so this marks the ones above done
+        websocket.send_json({"type": "stay_connected"})
+        assert handled.wait(2)
+        assert main.ws_mgr.selected_device_ids() == {"dev_a"}

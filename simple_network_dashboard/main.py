@@ -197,6 +197,16 @@ def _log_metrics_result(did: str, host: str, port: int, metrics: dict):
         state["window_start"] = now
 
 
+def _is_valid_selection(device_id) -> bool:
+    """A select_device id is accepted only if it clears the selection (null
+    or empty) or names a device in the current list."""
+    if device_id is None or device_id == "":
+        return True
+    if not isinstance(device_id, str):
+        return False
+    return any(d.get("id") == device_id for d in runtime_state._devices_cache)
+
+
 async def _poll_once():
     """Run one metrics polling cycle: fetch every currently-selected device
     concurrently, cache and log each result, and broadcast it. Does not
@@ -241,9 +251,32 @@ async def _poll_once():
             await ws_mgr.broadcast({"type": "metrics", "device_id": did, "data": public})
 
 
+def _log_poll_cycle_failure(error: Optional[str], previous: Optional[str]) -> Optional[str]:
+    """Log an unexpected polling-cycle failure to the service log and the
+    debug log once per failure streak, again if the error changes, and once
+    on recovery. Returns the error to remember for the next cycle."""
+    if error is None:
+        if previous is not None:
+            msg = "METRICS polling recovered after an unexpected failure"
+            print(msg, flush=True)
+            debug_log._debug_write(msg)
+        return None
+    if error != previous:
+        msg = f"ERROR: metrics polling cycle failed, retrying next cycle: {error}"
+        print(msg, flush=True)
+        debug_log._debug_write(msg)
+    return error
+
+
 async def _metrics_loop():
+    last_error = None
     while True:
-        await _poll_once()
+        try:
+            await _poll_once()
+            error = None
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        last_error = _log_poll_cycle_failure(error, last_error)
         await asyncio.sleep(METRICS_INTERVAL)
 
 
@@ -678,8 +711,11 @@ async def ws_endpoint(ws: WebSocket):
                 msg = json.loads(raw)
             except ValueError:
                 continue
+            if not isinstance(msg, dict):
+                continue
             if msg.get("type") == "select_device":
-                ws_mgr.set_selected_device(ws, msg.get("id"))
+                if _is_valid_selection(msg.get("id")):
+                    ws_mgr.set_selected_device(ws, msg.get("id"))
             elif msg.get("type") == "stay_connected":
                 ssh_mgr.stay_connected(owner)
             elif msg.get("type") == "term_claim":
