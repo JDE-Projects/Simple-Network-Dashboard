@@ -74,4 +74,4 @@ def test_installer_checks_the_version_before_creating_anything() -> None:
     check = main_body.index("if ! check_python_version; then")
     assert check < main_body.index('python3 -c "import venv"')
     assert check < main_body.index("classify_account_state")
-    assert check < main_body.index('python3 -m venv "$APP_DIR/venv"')
+    assert check < main_body.index("update_application")

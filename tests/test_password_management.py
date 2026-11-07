@@ -428,7 +428,7 @@ def test_load_auth_state_rejects_symlink_and_hard_link_paths(tmp_path: Path) -> 
         auth.load_auth_state(hard_link)
 
 
-def test_installer_restoration_helper_only_starts_a_previously_active_service() -> None:
+def test_installer_restoration_does_nothing_without_a_rollback_point() -> None:
     result = _run_bash_contract(
         """
 source ./install.sh
@@ -436,23 +436,27 @@ TEST_ROOT=$(mktemp -d)
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 systemctl() { printf '%s\\n' "$*" >> "$TEST_ROOT/calls"; return 0; }
 DASHBOARD_WAS_ACTIVE=true
-restore_previously_active_service
-DASHBOARD_WAS_ACTIVE=false
-restore_previously_active_service
-test "$(cat "$TEST_ROOT/calls")" = "start simple-network-dashboard
-is-active --quiet simple-network-dashboard"
+ROLLBACK_ACTIVE=false
+restore_after_failed_update
+test ! -e "$TEST_ROOT/calls"
 """
     )
     assert result.returncode == 0, result.stderr
 
 
 def test_installer_contains_failure_restoration_and_hard_link_guards() -> None:
-    installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+    installer = (ROOT / "install.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
     assert "before.st_nlink != 1" in installer
     assert "opened.st_nlink != 1" in installer
-    assert "restore_previously_active_service" in installer
-    assert "if ! initialize_authentication; then\n    restore_previously_active_service" in installer
-    assert "if ! install_reset_command; then\n    echo \"Error: dashboard password-reset command installation failed.\"\n    restore_previously_active_service" in installer
+    assert "restore_previously_active_service" not in installer
+    apply_new_version = installer[installer.index("apply_new_version() {"):installer.index("update_application() {")]
+    assert "if ! initialize_authentication; then\n        return 1" in apply_new_version
+    assert (
+        "if ! install_reset_command; then\n"
+        "        echo \"Error: dashboard password-reset command installation failed.\"\n"
+        "        return 1"
+    ) in apply_new_version
+    assert "restore_after_failed_update" in installer
 
 
 def test_reset_rejects_successful_start_when_service_is_not_active(
