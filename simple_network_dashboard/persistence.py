@@ -3,14 +3,84 @@ import os
 import tempfile
 
 from simple_network_dashboard import debug_log, runtime_state
-from simple_network_dashboard.config import APP_NAME, DATA_DIR, DEVICES_FILE
+from simple_network_dashboard.config import (
+    APP_NAME,
+    DATA_DIR,
+    DEVICES_FILE,
+    MAX_METRICS_PORT,
+    MIN_METRICS_PORT,
+)
+
+
+class ConfigurationValidationError(ValueError):
+    """The configuration does not match the expected structure.
+
+    The message never includes file contents or field values.
+    """
+
+
+def _invalid(reason: str) -> ConfigurationValidationError:
+    return ConfigurationValidationError(reason)
+
+
+def _validate_command(c) -> None:
+    if not isinstance(c, dict):
+        raise _invalid("command entry is not an object")
+    for key in ("command", "name", "confirm"):
+        value = c.get(key)
+        if value is not None and not isinstance(value, str):
+            raise _invalid(f"command field '{key}' is not text")
+    sudo = c.get("sudo")
+    if sudo is not None and not isinstance(sudo, bool):
+        raise _invalid("command field 'sudo' is not true or false")
+
+
+def _validate_devices(data) -> list:
+    """Check the parsed structure and return the device list, or raise."""
+    if isinstance(data, dict):
+        devices = data.get("devices")
+        if not isinstance(devices, list):
+            raise _invalid("'devices' is missing or is not a list")
+    elif isinstance(data, list):
+        devices = data
+    else:
+        raise _invalid("top level is not an object or a list")
+    seen_ids = set()
+    for d in devices:
+        if not isinstance(d, dict):
+            raise _invalid("device entry is not an object")
+        for key in ("id", "name", "host", "username"):
+            if not isinstance(d.get(key), str):
+                raise _invalid(f"device field '{key}' is missing or is not text")
+        if not d["id"]:
+            raise _invalid("device id is empty")
+        if d["id"] in seen_ids:
+            raise _invalid("device id is duplicated")
+        seen_ids.add(d["id"])
+        cmds = d.get("commands")
+        if cmds is not None:
+            if not isinstance(cmds, list):
+                raise _invalid("device field 'commands' is not a list")
+            for c in cmds:
+                _validate_command(c)
+        port = d.get("metrics_port")
+        if port is not None:
+            if (
+                not isinstance(port, int)
+                or isinstance(port, bool)
+                or not MIN_METRICS_PORT <= port <= MAX_METRICS_PORT
+            ):
+                raise _invalid("device field 'metrics_port' is not a valid port")
+    return devices
 
 
 def _parse_devices(contents: str) -> list:
-    """Parse and normalize a devices.json payload."""
-    data = json.loads(contents)
-    devices = data.get("devices", data) if isinstance(data, dict) else data
-    return [_norm(d) for d in devices if isinstance(d, dict)]
+    """Parse, validate, and normalize a devices.json payload.
+
+    Raises ConfigurationValidationError when the structure is not acceptable.
+    """
+    devices = _validate_devices(json.loads(contents))
+    return [_norm(d) for d in devices]
 
 
 def _load_startup_devices() -> tuple[list, bool, bool]:
@@ -72,6 +142,8 @@ def _configuration_failure_reason(error: Exception) -> str:
         return "the primary configuration is not valid UTF-8"
     if isinstance(error, OSError):
         return f"the primary configuration could not be read ({type(error).__name__})"
+    if isinstance(error, ConfigurationValidationError):
+        return "the primary configuration has an unsupported structure"
     return f"the primary configuration could not be normalized ({type(error).__name__})"
 
 
