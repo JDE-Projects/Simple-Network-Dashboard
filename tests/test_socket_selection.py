@@ -81,3 +81,14 @@ def test_unselect_device_everywhere_removes_it_from_all_sockets():
     mgr.unselect_device_everywhere("dev_a")
 
     assert mgr.selected_device_ids() == {"dev_b"}
+
+
+def test_non_string_selection_is_ignored_and_keeps_prior_selection():
+    mgr = _fresh_manager()
+    ws_a = object()
+    mgr.set_selected_device(ws_a, "dev_a")
+
+    for bad in (["dev_b"], {"id": "dev_b"}, 5, True):
+        mgr.set_selected_device(ws_a, bad)
+
+    assert mgr.selected_device_ids() == {"dev_a"}

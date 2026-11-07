@@ -115,7 +115,11 @@ class _WSManager:
 
     def set_selected_device(self, ws: WebSocket, device_id: Optional[str]):
         """Record (or clear) the device this socket has selected. An empty
-        or missing id removes the socket's entry rather than storing None."""
+        or missing id removes the socket's entry rather than storing None.
+        Any other non-string value is ignored, so the selection set only
+        ever holds string ids."""
+        if device_id is not None and not isinstance(device_id, str):
+            return
         if device_id:
             self._selections[ws] = device_id
         else:
