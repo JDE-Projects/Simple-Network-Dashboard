@@ -1404,7 +1404,7 @@ refuse_leftover_rollback_folder() {
     echo "Nothing was changed, and the installer will not overwrite or delete that folder."
     if [ -d "$rollback_dir" ] && [ ! -L "$rollback_dir" ]; then
         echo "It contains:"
-        ls -la -- "$rollback_dir" | sed 's/^/  /' || true
+        find "$rollback_dir" -mindepth 1 -maxdepth 1 -printf '  %M %u:%g %s %f\n' || true
     else
         echo "It is not a normal folder. Inspect it with: ls -la -- \"$rollback_dir\""
     fi
