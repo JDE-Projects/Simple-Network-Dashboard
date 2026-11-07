@@ -838,7 +838,15 @@ async def delete_device(device_id: str):
     devices = [d for d in runtime_state._devices_cache if d["id"] != device_id]
     if len(devices) == len(runtime_state._devices_cache):
         return {"ok": False, "error": _UNKNOWN_DEVICE_ERROR}
+    cache_before = runtime_state._devices_cache
     if not persistence._save(devices):
+        if runtime_state._devices_cache is not cache_before:
+            # The primary file was replaced before the backup write failed, so
+            # the device is already gone from the live list. Close its session
+            # and update browsers so nothing stays attached to an unlisted device.
+            ws_mgr.unselect_device_everywhere(device_id)
+            ssh_mgr.disconnect(device_id, reason="device deleted")
+            await ws_mgr.broadcast({"type": "devices", "devices": runtime_state._devices_cache})
         return {"ok": False, "error": _SAVE_ERROR}
     ws_mgr.unselect_device_everywhere(device_id)
     ssh_mgr.disconnect(device_id, reason="device deleted")
@@ -864,7 +872,12 @@ async def update_commands(device_id: str, body: CommandsIn):
             break
     else:
         return {"ok": False, "error": _UNKNOWN_DEVICE_ERROR}
+    cache_before = runtime_state._devices_cache
     if not persistence._save(devices):
+        if runtime_state._devices_cache is not cache_before:
+            # The primary file was replaced before the backup write failed, so
+            # the live list changed even though the save reports failure.
+            await ws_mgr.broadcast({"type": "devices", "devices": runtime_state._devices_cache})
         return {"ok": False, "error": _SAVE_ERROR}
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}

@@ -348,3 +348,112 @@ def test_half_failed_save_still_broadcasts_the_replaced_list(tmp_path: Path, mon
     assert result == {"ok": False, "error": main._SAVE_ERROR}
     assert sent == [{"type": "devices", "devices": runtime_state._devices_cache}]
     assert sent[0]["devices"][0]["host"] == "10.0.0.99"
+
+
+# ---------------------------------------------------------------------------
+# Saves that replace the main file but fail the backup write
+# ---------------------------------------------------------------------------
+
+def _real_storage_with_failing_backup(monkeypatch, tmp_path: Path, seed_devices: list) -> None:
+    """Use real persistence in a private folder, seed it, then make every
+    later backup write fail after the main file has been replaced."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(persistence, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(persistence, "DEVICES_FILE", str(data_dir / "devices.json"))
+    monkeypatch.setattr(persistence, "_fsync_data_directory", lambda: None)
+    monkeypatch.setattr(runtime_state, "_recovery_mode", False)
+    monkeypatch.setattr(runtime_state, "_devices_cache", [])
+    assert persistence._save(copy.deepcopy(seed_devices))
+    real_write = persistence._write_private_payload
+
+    def fail_backup(path, contents, on_replaced=None):
+        if path == f"{persistence.DEVICES_FILE}.bak":
+            raise OSError("backup failure")
+        return real_write(path, contents, on_replaced)
+
+    monkeypatch.setattr(persistence, "_write_private_payload", fail_backup)
+
+
+def _capture_side_effects(monkeypatch) -> dict:
+    seen: dict = {"broadcasts": [], "disconnects": [], "unselects": []}
+
+    async def capture(message):
+        seen["broadcasts"].append(message)
+
+    def record_disconnect(device_id, owner=None, *, reason="unknown"):
+        seen["disconnects"].append((device_id, reason))
+        return {"ok": True}
+
+    monkeypatch.setattr(main.ws_mgr, "broadcast", capture)
+    monkeypatch.setattr(main.ssh_mgr, "disconnect", record_disconnect)
+    monkeypatch.setattr(main.ws_mgr, "unselect_device_everywhere", seen["unselects"].append)
+    return seen
+
+
+def _other_device() -> dict:
+    other = _device([])
+    other.update({"id": "dev_other", "name": "Other Device", "host": "10.0.0.6"})
+    return other
+
+
+def test_half_failed_delete_closes_the_session_and_broadcasts(tmp_path: Path, monkeypatch) -> None:
+    client = _authenticated_client(tmp_path, monkeypatch)
+    _real_storage_with_failing_backup(monkeypatch, tmp_path, [_device([]), _other_device()])
+    seen = _capture_side_effects(monkeypatch)
+
+    response = client.delete("/api/devices/dev_existing", headers=_csrf_headers(client))
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "error": main._SAVE_ERROR}
+    assert [d["id"] for d in runtime_state._devices_cache] == ["dev_other"]
+    assert seen["unselects"] == ["dev_existing"]
+    assert seen["disconnects"] == [("dev_existing", "device deleted")]
+    assert seen["broadcasts"] == [{"type": "devices", "devices": runtime_state._devices_cache}]
+
+
+def test_delete_that_fails_before_replacing_the_file_keeps_the_session(tmp_path: Path, monkeypatch) -> None:
+    client = _authenticated_client(tmp_path, monkeypatch)
+    _stub_storage(monkeypatch, [_device([])])
+    monkeypatch.setattr(persistence, "_save", lambda _devices: False)
+    seen = _capture_side_effects(monkeypatch)
+
+    response = client.delete("/api/devices/dev_existing", headers=_csrf_headers(client))
+
+    assert response.json() == {"ok": False, "error": main._SAVE_ERROR}
+    assert [d["id"] for d in runtime_state._devices_cache] == ["dev_existing"]
+    assert seen == {"broadcasts": [], "disconnects": [], "unselects": []}
+
+
+def test_half_failed_command_save_still_broadcasts_the_replaced_list(tmp_path: Path, monkeypatch) -> None:
+    client = _authenticated_client(tmp_path, monkeypatch)
+    _real_storage_with_failing_backup(monkeypatch, tmp_path, [_device(["uptime"])])
+    seen = _capture_side_effects(monkeypatch)
+
+    response = client.put(
+        "/api/devices/dev_existing/commands",
+        json={"commands": [{"name": "df", "command": "df -h", "sudo": False, "confirm": ""}]},
+        headers=_csrf_headers(client),
+    )
+
+    assert response.json() == {"ok": False, "error": main._SAVE_ERROR}
+    assert [c["name"] for c in runtime_state._devices_cache[0]["commands"]] == ["df"]
+    assert seen["broadcasts"] == [{"type": "devices", "devices": runtime_state._devices_cache}]
+    assert seen["disconnects"] == []
+
+
+def test_command_save_that_fails_before_replacing_the_file_sends_nothing(tmp_path: Path, monkeypatch) -> None:
+    client = _authenticated_client(tmp_path, monkeypatch)
+    _stub_storage(monkeypatch, [_device(["uptime"])])
+    monkeypatch.setattr(persistence, "_save", lambda _devices: False)
+    seen = _capture_side_effects(monkeypatch)
+
+    response = client.put(
+        "/api/devices/dev_existing/commands",
+        json={"commands": []},
+        headers=_csrf_headers(client),
+    )
+
+    assert response.json() == {"ok": False, "error": main._SAVE_ERROR}
+    assert [c["name"] for c in runtime_state._devices_cache[0]["commands"]] == ["uptime"]
+    assert seen["broadcasts"] == []
