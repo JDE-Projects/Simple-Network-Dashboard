@@ -65,7 +65,7 @@ def test_concurrent_connects_from_different_owners_leave_one_live_session(monkey
     results = {}
 
     def run_owner_a():
-        results["a"] = mgr.connect("d1", "pw", device, "owner-a")
+        results["a"] = mgr.connect("d1", "pw", lambda _id: device, "owner-a")
 
     t = threading.Thread(target=run_owner_a)
     t.start()
@@ -74,7 +74,7 @@ def test_concurrent_connects_from_different_owners_leave_one_live_session(monkey
     # A second, different owner races in while owner-a's connect is still
     # in flight. The slot is already reserved, so this must be rejected
     # immediately rather than racing the network connect.
-    result_b = mgr.connect("d1", "pw", device, "owner-b")
+    result_b = mgr.connect("d1", "pw", lambda _id: device, "owner-b")
     assert result_b == {"ok": False, "in_use": True,
                          "error": "This device is in use by another session."}
 
@@ -109,7 +109,7 @@ def test_same_owner_reconnect_supersedes_the_in_flight_connect(monkeypatch):
     results = {}
 
     def run(key):
-        results[key] = mgr.connect("d1", "pw", device, "owner-1")
+        results[key] = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
 
     t_a = threading.Thread(target=run, args=("a",))
     t_a.start()
@@ -145,7 +145,7 @@ def test_connect_failure_releases_slot_but_unknown_host_key_keeps_it(monkeypatch
         raise RuntimeError("network unreachable")
 
     monkeypatch.setattr(ssh_manager._Session, "connect", boom)
-    result = mgr.connect("d1", "pw", device, "owner-1")
+    result = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
 
     assert result["ok"] is False
     assert "d1" not in mgr.sessions
@@ -154,7 +154,7 @@ def test_connect_failure_releases_slot_but_unknown_host_key_keeps_it(monkeypatch
         raise ssh_manager.UnknownHostKey(device["host"], _FakeKey())
 
     monkeypatch.setattr(ssh_manager._Session, "connect", unknown_key)
-    result2 = mgr.connect("d1", "pw", device, "owner-1")
+    result2 = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
 
     assert result2["ok"] is False
     assert result2["host_key_unknown"] is True
@@ -288,7 +288,7 @@ def test_reconnect_failure_after_retiring_a_live_session_unlocks_and_goes_idle(m
         self.client = _FakeClient()
 
     monkeypatch.setattr(ssh_manager._Session, "connect", ok_connect)
-    result1 = mgr.connect("d1", "pw", device, "owner-1")
+    result1 = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
     assert result1 == {"ok": True}
     assert mgr.sessions["d1"].state == "connected"
 
@@ -303,7 +303,7 @@ def test_reconnect_failure_after_retiring_a_live_session_unlocks_and_goes_idle(m
         raise RuntimeError("network unreachable")
 
     monkeypatch.setattr(ssh_manager._Session, "connect", boom)
-    result2 = mgr.connect("d1", "pw", device, "owner-1")
+    result2 = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
 
     assert result2["ok"] is False
     assert "d1" not in mgr.sessions
@@ -316,14 +316,14 @@ def test_reconnect_failure_reports_reason_and_device_label(monkeypatch):
     device = _device()
 
     monkeypatch.setattr(ssh_manager._Session, "connect", lambda self: setattr(self, "client", _FakeClient()))
-    assert mgr.connect("d1", "pw", device, "owner-1") == {"ok": True}
+    assert mgr.connect("d1", "pw", lambda _id: device, "owner-1") == {"ok": True}
 
     statuses = []
     monkeypatch.setattr(mgr, "_status", lambda did, state, owner, **kwargs: statuses.append((did, state, owner, kwargs)))
     monkeypatch.setattr(mgr, "_lock", lambda *args, **kwargs: None)
     monkeypatch.setattr(ssh_manager._Session, "connect", lambda self: (_ for _ in ()).throw(RuntimeError("network unreachable")))
 
-    result = mgr.connect("d1", "pw", device, "owner-1")
+    result = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
 
     assert result["ok"] is False
     assert statuses == [("d1", "idle", "owner-1", {
@@ -359,7 +359,7 @@ def test_fresh_failed_connect_with_no_prior_session_does_not_unlock(monkeypatch)
         raise RuntimeError("network unreachable")
 
     monkeypatch.setattr(ssh_manager._Session, "connect", boom)
-    result = mgr.connect("d1", "pw", device, "owner-1")
+    result = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
 
     assert result["ok"] is False
     assert "d1" not in mgr.sessions
@@ -405,3 +405,153 @@ def test_owner_snapshot_reports_a_reserved_command_as_running(monkeypatch):
     assert mgr.owner_ssh_snapshot("owner-1") == (["d1"], ["d1"])
     assert mgr.cancel("d1", sess.run_id, owner="owner-1") == {"ok": True}
     assert sess.cancel_requested is True
+
+
+# ---------------------------------------------------------------------------
+# Identity-edit guard and lookup-at-reservation
+# ---------------------------------------------------------------------------
+
+_SAVING_ERROR = {"ok": False, "error": "This device's settings are being saved. Try again."}
+
+
+def _stub_network_connect(monkeypatch):
+    def fake_connect(self):
+        self.client = _FakeClient()
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", fake_connect)
+
+
+def test_connect_refused_while_identity_edit_in_progress(monkeypatch):
+    mgr = _mgr()
+    _stub_network_connect(monkeypatch)
+    mgr._identity_edits.add("d1")
+
+    result = mgr.connect("d1", "pw", lambda _id: _device(), "owner-1")
+
+    assert result == _SAVING_ERROR
+    assert mgr.sessions == {}
+
+
+def test_connect_uses_lookup_data_at_reservation_time(monkeypatch):
+    mgr = _mgr()
+    _stub_network_connect(monkeypatch)
+    host_a = _device()
+    host_b = dict(_device(), host="10.0.0.77")
+    current = {"device": host_a}
+
+    # The caller held host A, but the saved device changed before the slot
+    # was reserved: the lookup is read at reservation time and returns B.
+    current["device"] = host_b
+    result = mgr.connect("d1", "pw", lambda _id: current["device"], "owner-1")
+
+    assert result == {"ok": True}
+    assert mgr.sessions["d1"].device["host"] == "10.0.0.77"
+
+
+def test_connect_with_missing_device_creates_no_session(monkeypatch):
+    mgr = _mgr()
+    _stub_network_connect(monkeypatch)
+
+    result = mgr.connect("d1", "pw", lambda _id: None, "owner-1")
+
+    assert result == {"ok": False, "error": "Device not found."}
+    assert mgr.sessions == {}
+
+
+def test_begin_identity_edit_blocks_connect_until_ended(monkeypatch):
+    mgr = _mgr()
+    _stub_network_connect(monkeypatch)
+
+    assert mgr.begin_identity_edit("d1", "owner-1") == {"ok": True}
+    assert mgr.begin_identity_edit("d1", "owner-1")["saving"] is True
+
+    results = {}
+    started = threading.Event()
+
+    def run():
+        started.set()
+        results["blocked"] = mgr.connect("d1", "pw", lambda _id: _device(), "owner-1")
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert started.wait(2)
+    t.join(5)
+    assert results["blocked"] == _SAVING_ERROR
+    assert mgr.sessions == {}
+
+    mgr.end_identity_edit("d1")
+    assert mgr._identity_edits == set()
+
+    after = {}
+    t2 = threading.Thread(
+        target=lambda: after.update(r=mgr.connect("d1", "pw", lambda _id: _device(), "owner-1")))
+    t2.start()
+    t2.join(5)
+    assert after["r"] == {"ok": True}
+    assert mgr.sessions["d1"].state == "connected"
+
+
+def test_begin_identity_edit_refused_while_connect_holds_the_slot(monkeypatch):
+    mgr = _mgr()
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_connect(self):
+        started.set()
+        release.wait(5)
+        self.client = _FakeClient()
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", fake_connect)
+    results = {}
+    t = threading.Thread(
+        target=lambda: results.update(r=mgr.connect("d1", "pw", lambda _id: _device(), "owner-1")))
+    t.start()
+    assert started.wait(2), "connect never reached the network step"
+
+    same = mgr.begin_identity_edit("d1", "owner-1")
+    other = mgr.begin_identity_edit("d1", "owner-2")
+    assert same == {"ok": False, "same_owner": True, "saving": False}
+    assert other == {"ok": False, "same_owner": False, "saving": False}
+    assert mgr._identity_edits == set()
+
+    release.set()
+    t.join(5)
+    assert results["r"] == {"ok": True}
+
+
+def test_delete_while_connect_is_in_flight_leaves_no_session(monkeypatch):
+    mgr = _mgr()
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_connect(self):
+        started.set()
+        release.wait(5)
+        self.client = _FakeClient()
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", fake_connect)
+    results = {}
+    t = threading.Thread(
+        target=lambda: results.update(r=mgr.connect("d1", "pw", lambda _id: _device(), "owner-1")))
+    t.start()
+    assert started.wait(2), "connect never reached the network step"
+
+    mgr.disconnect("d1", reason="device deleted")
+    release.set()
+    t.join(5)
+
+    assert mgr.sessions == {}
+    assert results["r"]["ok"] is False
+
+
+def test_connect_after_delete_creates_no_session(monkeypatch):
+    mgr = _mgr()
+    _stub_network_connect(monkeypatch)
+    devices = [_device()]
+    lookup = lambda device_id: next((d for d in devices if d["id"] == device_id), None)
+
+    devices.clear()
+    result = mgr.connect("d1", "pw", lookup, "owner-1")
+
+    assert result == {"ok": False, "error": "Device not found."}
+    assert mgr.sessions == {}

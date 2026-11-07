@@ -779,14 +779,17 @@ def _resolve_saved_commands(incoming: Optional[list], existing: Optional[dict]) 
 
 
 @app.post("/api/devices")
-async def upsert_device(body: DeviceIn):
+async def upsert_device(body: DeviceIn, request: Request):
     if runtime_state._recovery_mode:
         return {"ok": False, "error": _RECOVERY_READ_ONLY_ERROR}
     d       = body.model_dump()
     devices = copy.deepcopy(runtime_state._devices_cache)
+    identity_edit = False
     if d.get("id"):
         for i, existing in enumerate(devices):
             if existing["id"] == d["id"]:
+                identity_edit = (d["host"] != existing["host"]
+                                 or d["username"] != existing["username"])
                 d["commands"] = _resolve_saved_commands(d["commands"], existing)
                 devices[i] = persistence._norm(d)
                 break
@@ -798,7 +801,31 @@ async def upsert_device(body: DeviceIn):
         d["id"]       = "dev_" + uuid.uuid4().hex[:12]
         d["commands"] = _resolve_saved_commands(d["commands"], None)
         devices.append(persistence._norm(d))
-    if not persistence._save(devices):
+    if identity_edit:
+        claim = ssh_mgr.begin_identity_edit(d["id"], _request_session_owner(request))
+        if not claim["ok"]:
+            if claim.get("same_owner"):
+                error = "Disconnect this device before changing its host or username."
+            elif claim.get("saving"):
+                error = "This device's settings are being saved. Try again."
+            else:
+                error = ("This device is in use by another session. Its host and "
+                         "username can't be changed until that session disconnects.")
+            return {"ok": False, "error": error}
+    cache_before = runtime_state._devices_cache
+    # This guard relies on the read, compare, and save above and below running
+    # synchronously on the event loop without yielding. If persistence moves to
+    # an executor, a set guard alone will not serialize whole-inventory saves.
+    try:
+        saved = persistence._save(devices)
+    finally:
+        if identity_edit:
+            ssh_mgr.end_identity_edit(d["id"])
+    if not saved:
+        if runtime_state._devices_cache is not cache_before:
+            # The primary file was replaced before the backup write failed, so
+            # the live list changed even though the save reports failure.
+            await ws_mgr.broadcast({"type": "devices", "devices": runtime_state._devices_cache})
         return {"ok": False, "error": _SAVE_ERROR}
     await ws_mgr.broadcast({"type": "devices", "devices": devices})
     return {"ok": True, "devices": devices}
@@ -863,9 +890,14 @@ async def ssh_connect(body: ConnectIn, request: Request):
         return {"ok": False, "error": "Device not found."}
     if not body.password:
         return {"ok": False, "error": "Password is required."}
+
+    def device_lookup(device_id: str):
+        found = next((x for x in runtime_state._devices_cache if x["id"] == device_id), None)
+        return copy.deepcopy(found) if found is not None else None
+
     loop   = asyncio.get_running_loop()
     result = await loop.run_in_executor(
-        None, ssh_mgr.connect, body.device_id, body.password, device, owner)
+        None, ssh_mgr.connect, body.device_id, body.password, device_lookup, owner)
     return result
 
 
