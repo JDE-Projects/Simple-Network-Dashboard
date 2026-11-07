@@ -591,6 +591,7 @@
     <div class="field"><label>Display Name</label><input type="text" id="fName" placeholder="e.g. Pi 4 Media Server" /></div>
     <div class="field"><label>Host / IP Address</label><input type="text" id="fHost" placeholder="e.g. 192.168.1.50" /></div>
     <div class="field"><label>SSH Username</label><input type="text" id="fUser" placeholder="e.g. youruser" /></div>
+    <p class="hint" id="fIdentityNote" hidden>Disconnect to change host or username.</p>
     <div class="field"><label>Node Exporter Port</label><input type="number" id="fPort" value="9100" min="1" max="65535" /></div>
     <div class="modal-err" id="devErr"></div>
     <div class="modal-actions">
@@ -827,6 +828,7 @@ function connectWS() {
         // Track which devices are locked (in use by any browser)
         SSH_LOCKS = {};
         (msg.ssh_locked || []).forEach(id => { SSH_LOCKS[id] = true; });
+        refreshDeviceEditorIdentityLock($('fId').value, false);
         updateDisconnectAllBtn();
         renderDevices();
         renderStats();
@@ -866,6 +868,7 @@ function connectWS() {
         if (msg.locked) SSH_LOCKS[msg.device_id] = true;
         else delete SSH_LOCKS[msg.device_id];
         updateLockUI(msg.device_id);
+        refreshDeviceEditorIdentityLock(msg.device_id);
         break;
       case 'ssh_idle_warning':
         showIdleWarning(msg.seconds || 30);
@@ -1867,6 +1870,7 @@ function forgetRunId(deviceId, runId) {
 
 function handleSSHStatus(id, state) {
   SSH_STATE[id] = state;
+  refreshDeviceEditorIdentityLock(id, state === 'idle');
   if (state !== 'running') {
     forgetRunId(id, TERMINAL_RUN_IDS[id]);
     if (state === 'idle') {
@@ -2356,6 +2360,21 @@ $('saveName').addEventListener('keydown', e => { if (e.key === 'Enter') $('saveD
 /* ============================================================
    Device editor modal
    ============================================================ */
+// Host and username cannot change while the device has an SSH session, here
+// or in another browser. Only the disabled state and the note change; typed
+// values are never touched.
+function applyDeviceEditorIdentityLock(deviceId, stateIsIdle) {
+  const inUse = !!deviceId && (!!SSH_LOCKS[deviceId] ||
+    (!stateIsIdle && !!SSH_STATE[deviceId] && SSH_STATE[deviceId] !== 'idle'));
+  $('fHost').disabled = inUse;
+  $('fUser').disabled = inUse;
+  $('fIdentityNote').hidden = !inUse;
+}
+function refreshDeviceEditorIdentityLock(deviceId, stateIsIdle) {
+  if (!$('deviceModal').classList.contains('show')) return;
+  if ($('fId').value !== deviceId) return;
+  applyDeviceEditorIdentityLock(deviceId, !!stateIsIdle);
+}
 function openDeviceEditor(d) {
   $('devModalTitle').textContent = d ? 'Edit Device' : 'Add Device';
   $('fId').value   = d ? d.id       : '';
@@ -2364,6 +2383,7 @@ function openDeviceEditor(d) {
   $('fUser').value = d ? d.username : '';
   $('fPort').value = d ? (d.metrics_port || 9100) : 9100;
   $('devErr').textContent = '';
+  applyDeviceEditorIdentityLock(d ? d.id : '', false);
   $('deviceModal').classList.add('show');
   setTimeout(() => $('fName').focus(), 40);
 }

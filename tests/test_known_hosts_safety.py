@@ -223,7 +223,7 @@ def test_connect_reports_unreadable_file_without_host_key_prompt(tmp_path, monke
     manager = _manager(debug_lines.append)
 
     result = manager.connect(
-        "device-1", "password", {"host": "host-one", "username": "user"}, "browser-1"
+        "device-1", "password", lambda _id: {"host": "host-one", "username": "user"}, "browser-1"
     )
 
     assert result == {

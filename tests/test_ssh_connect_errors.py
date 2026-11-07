@@ -59,7 +59,7 @@ def test_failed_connect_returns_fixed_message_and_logs_type_only(monkeypatch):
         raise paramiko.SSHException(MARKER)
 
     monkeypatch.setattr(ssh_manager._Session, "connect", boom)
-    result = mgr.connect("d1", "pw", device, "owner-1")
+    result = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
 
     assert result == {"ok": False, "error": _PROTOCOL}
     assert "d1" not in mgr.sessions

@@ -8,6 +8,7 @@ import hmac
 import secrets
 import threading
 import time
+from typing import Callable
 
 import paramiko
 
@@ -52,6 +53,11 @@ class SSHManager(TerminalControlMixin):
         # never nested, and never held across a blocking call.
         self._dlocks:       dict[str, threading.Lock] = {}
         self._dlocks_guard  = threading.Lock()
+
+        # Device ids whose host or username is being saved right now. While an
+        # id is here, connect refuses it, so a session can never start against
+        # an identity that is mid-change.
+        self._identity_edits: set[str] = set()
 
         # _owner_activity is read-modified-written from the worker thread,
         # the idle loop, and the connect executor thread; it gets its own
@@ -301,9 +307,37 @@ class SSHManager(TerminalControlMixin):
 
     # ---- connection -------------------------------------------------------
 
-    def connect(self, device_id: str, password: str, device: dict, owner: str) -> dict:
-        """Synchronous — run via run_in_executor from the async route handler."""
+    def begin_identity_edit(self, device_id: str, owner: str) -> dict:
+        """Claim the right to save a host or username change for one device.
+        Returns {"ok": True} when claimed. Otherwise {"ok": False, "same_owner":
+        bool, "saving": bool}: a session exists (same_owner says whether it is
+        the caller's) or another identity edit is in progress (saving)."""
         with self._device_lock(device_id):
+            existing = self.sessions.get(device_id)
+            if existing is not None:
+                return {"ok": False, "same_owner": existing.owner == owner,
+                        "saving": False}
+            if device_id in self._identity_edits:
+                return {"ok": False, "same_owner": False, "saving": True}
+            self._identity_edits.add(device_id)
+            return {"ok": True}
+
+    def end_identity_edit(self, device_id: str) -> None:
+        with self._device_lock(device_id):
+            self._identity_edits.discard(device_id)
+
+    def connect(self, device_id: str, password: str,
+                device_lookup: Callable[[str], dict | None], owner: str) -> dict:
+        """Synchronous — run via run_in_executor from the async route handler.
+        device_lookup is called inside the device lock, so the session is built
+        from the device's saved data at the moment the slot is reserved."""
+        with self._device_lock(device_id):
+            if device_id in self._identity_edits:
+                return {"ok": False,
+                        "error": "This device's settings are being saved. Try again."}
+            device = device_lookup(device_id)
+            if device is None:
+                return {"ok": False, "error": "Device not found."}
             existing = self.sessions.get(device_id)
             old_sess = None
             if existing and existing.state in ("connecting", "connected", "host_key_pending"):

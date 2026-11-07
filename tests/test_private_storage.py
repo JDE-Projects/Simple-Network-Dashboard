@@ -735,7 +735,7 @@ def test_recovery_mode_uses_cached_devices_and_rejects_all_configuration_mutatio
     monkeypatch.setattr(main.ws_mgr, "broadcast", lambda _message: pytest.fail("broadcast rejected mutation"))
 
     assert asyncio.run(main.get_devices()) == cached
-    add_result = asyncio.run(main.upsert_device(main.DeviceIn(name="New", host="new", username="user")))
+    add_result = asyncio.run(main.upsert_device(main.DeviceIn(name="New", host="new", username="user"), None))
     delete_result = asyncio.run(main.delete_device("saved"))
     command_result = asyncio.run(main.update_commands("saved", main.CommandsIn(commands=[])))
 
