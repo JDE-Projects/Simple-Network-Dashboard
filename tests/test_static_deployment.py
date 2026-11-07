@@ -727,27 +727,175 @@ exit "$rc"
     assert "Restoring" not in result.stdout
 
 
-def test_success_deletes_rollback_point_and_keeps_legacy_files_until_readiness_passed() -> None:
+def test_successful_update_keeps_rollback_point_and_legacy_files_after_readiness() -> None:
     result = _run_update(
-        r'''
+        r"""
 printf legacy > "$APP_DIR/main.py"
 READY_RESULTS="0"
 run_update
 check test "$rc" -eq 0
-check test ! -e "$ROLLBACK"
+check test -d "$ROLLBACK"
+check test -f "$ROLLBACK/complete"
 check content_is "$APP_DIR/venv/marker" new-venv
 check test -f "$APP_DIR/@PACKAGE@/__main__.py"
 check grep -q -- "--port 3001" "$UNIT_DEST"
 check test "$(cat "$tmp/ready.log")" = "ready 3001"
 check test -f "$APP_DIR/main.py"
-'''.replace("@PACKAGE@", PACKAGE)
+""".replace("@PACKAGE@", PACKAGE)
     )
 
     assert result.returncode == 0, result.stderr
 
 
-def test_main_flow_cleans_legacy_files_after_readiness_and_rollback_deletion() -> None:
-    installer = (ROOT / "install.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+def _installer_text() -> str:
+    return (ROOT / "install.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def _main_tail() -> str:
+    """The part of main() that runs after the update, as a shell function."""
+    installer = _installer_text()
+    main_body = installer[installer.index("\nmain() {"):]
+    start = main_body.index("if ! publish_dashboard_endpoint; then")
+    end = main_body.index('echo ""\necho "Simple Network Dashboard is running."')
+    return "main_tail() {\n" + main_body[start:end] + "\n}\n"
+
+
+_LATE_STUBS = r"""
+CADDY_RC=0
+CERT_RC=0
+UFW_RC=0
+CADDY_DISCARD_RC=0
+write_caddy_proxy_config() { echo caddy-write >> "$tmp/late.log"; return "$CADDY_RC"; }
+export_caddy_root_certificate() { echo cert-export >> "$tmp/late.log"; return "$CERT_RC"; }
+snapshot_dashboard_ufw_ports() { echo ufw-snapshot >> "$tmp/late.log"; }
+configure_ufw_https() { echo ufw-configure >> "$tmp/late.log"; return "$UFW_RC"; }
+undo_dashboard_ufw_change() { echo ufw-undo >> "$tmp/late.log"; }
+rollback_caddy_proxy_config() { echo caddy-rollback >> "$tmp/late.log"; }
+discard_caddy_proxy_rollback() {
+  if [ -e "$ROLLBACK" ]; then echo caddy-discard >> "$tmp/late.log"; else echo caddy-discard-after-rollback-point >> "$tmp/late.log"; fi
+  return "$CADDY_DISCARD_RC"
+}
+remove_legacy_application_files() {
+  if [ -e "$ROLLBACK" ]; then echo legacy-removed-too-early >> "$tmp/late.log"; else echo legacy-removed >> "$tmp/late.log"; fi
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("failing", "expected_log"),
+    [
+        ("CADDY_RC", ["caddy-write"]),
+        ("CERT_RC", ["caddy-write", "cert-export", "caddy-rollback"]),
+        ("UFW_RC", ["caddy-write", "cert-export", "ufw-snapshot", "ufw-configure", "ufw-undo", "caddy-rollback"]),
+    ],
+)
+def test_late_step_failure_in_an_update_restores_the_previous_version(
+    failing: str, expected_log: list[str]
+) -> None:
+    result = _run_update(
+        _LATE_STUBS
+        + _main_tail()
+        + f"""
+{failing}=1
+READY_RESULTS="0 0"
+run_update
+check test "$rc" -eq 0
+check test -d "$ROLLBACK"
+check content_is "$APP_DIR/venv/marker" new-venv
+if ( main_tail ); then late_rc=0; else late_rc=$?; fi
+check test "$late_rc" -eq 1
+check_old_install_back
+check test ! -e "$ROLLBACK"
+check test "$(cat "$tmp/ready.log")" = "ready 3001
+ready 3005"
+check test "$(cat "$tmp/late.log")" = "{chr(10).join(expected_log)}"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Previous version restored and responding." in result.stdout
+
+
+def test_late_step_failure_in_a_fresh_install_only_rolls_back_caddy() -> None:
+    result = _run_update(
+        _LATE_STUBS
+        + _main_tail()
+        + r"""
+rm -r -- "$APP_DIR" "$UNIT_DEST"
+command mkdir -p "$APP_DIR"
+DASHBOARD_WAS_ACTIVE=false
+UFW_RC=1
+run_update
+check test "$rc" -eq 0
+check test "$UPDATE_ELIGIBLE" = false
+if ( main_tail ); then late_rc=0; else late_rc=$?; fi
+check test "$late_rc" -eq 1
+check test ! -e "$ROLLBACK"
+check_not grep -q 'reset-failed' "$tmp/systemctl.log"
+check test "$(cat "$tmp/late.log")" = "caddy-write
+cert-export
+ufw-snapshot
+ufw-configure
+ufw-undo
+caddy-rollback"
+check content_is "$APP_DIR/venv/marker" new-venv
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Restoring" not in result.stdout
+
+
+def test_successful_update_discards_the_rollback_point_before_removing_legacy_files() -> None:
+    result = _run_update(
+        _LATE_STUBS
+        + _main_tail()
+        + r"""
+printf legacy > "$APP_DIR/main.py"
+run_update
+check test "$rc" -eq 0
+check test -d "$ROLLBACK"
+check test -f "$APP_DIR/main.py"
+if ( main_tail ); then late_rc=0; else late_rc=$?; fi
+check test "$late_rc" -eq 0
+check test ! -e "$ROLLBACK"
+check test "$(cat "$tmp/late.log")" = "caddy-write
+cert-export
+ufw-snapshot
+ufw-configure
+caddy-discard
+legacy-removed"
+check content_is "$APP_DIR/venv/marker" new-venv
+check_not grep -q 'reset-failed' "$tmp/systemctl.log"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_cleanup_failure_after_a_working_update_exits_without_restoring() -> None:
+    result = _run_update(
+        _LATE_STUBS
+        + _main_tail()
+        + r"""
+CADDY_DISCARD_RC=1
+run_update
+check test "$rc" -eq 0
+if ( main_tail ); then late_rc=0; else late_rc=$?; fi
+check test "$late_rc" -eq 1
+check content_is "$APP_DIR/venv/marker" new-venv
+check test ! -e "$ROLLBACK"
+check_not grep -q 'reset-failed' "$tmp/systemctl.log"
+check grep -qx legacy-removed "$tmp/late.log"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Error: could not remove temporary Caddy rollback files." in result.stdout
+
+
+def test_main_flow_orders_publication_and_cleanup_after_the_update() -> None:
+    installer = _installer_text()
 
     apply_new_version = installer[installer.index("apply_new_version() {"):installer.index("update_application() {")]
     unit_write = apply_new_version.index("if ! write_service_unit; then")
@@ -756,18 +904,29 @@ def test_main_flow_cleans_legacy_files_after_readiness_and_rollback_deletion() -
     start = apply_new_version.index("if ! start_dashboard_backend; then", enable)
     assert unit_write < reload < enable < start
 
-    update_application = installer[installer.index("update_application() {"):installer.index("\nmain() {")]
-    assert update_application.index("apply_new_version") < update_application.index("if ! discard_rollback_point; then")
+    update_application = installer[installer.index("update_application() {"):installer.index("publish_dashboard_endpoint() {")]
+    assert "discard_rollback_point" not in update_application
+
+    publish = installer[installer.index("publish_dashboard_endpoint() {"):installer.index("\nmain() {")]
+    assert (
+        publish.index("write_caddy_proxy_config")
+        < publish.index("export_caddy_root_certificate")
+        < publish.index("snapshot_dashboard_ufw_ports")
+        < publish.index("configure_ufw_https")
+    )
 
     main_body = installer[installer.index("\nmain() {"):]
     update = main_body.index("if ! update_application; then")
+    publish_call = main_body.index("if ! publish_dashboard_endpoint; then")
+    restore = main_body.index("restore_after_failed_update", publish_call)
+    caddy_discard = main_body.index("if ! discard_caddy_proxy_rollback; then")
+    rollback_discard = main_body.index("if ! discard_rollback_point; then")
     cleanup = main_body.index("if ! remove_legacy_application_files; then")
-    proxy = main_body.index("if ! write_caddy_proxy_config; then")
-    assert update < cleanup < proxy
+    assert update < publish_call < restore < caddy_discard < rollback_discard < cleanup
 
 
 def test_main_flow_restores_previous_version_when_a_step_fails() -> None:
-    installer = (ROOT / "install.sh").read_text(encoding="utf-8").replace("\r\n", "\n")
+    installer = _installer_text()
     apply_new_version = installer[installer.index("apply_new_version() {"):installer.index("update_application() {")]
 
     for command, error in (
@@ -787,9 +946,158 @@ def test_main_flow_restores_previous_version_when_a_step_fails() -> None:
         if error is not None:
             assert error in block, command
 
-    update_application = installer[installer.index("update_application() {"):installer.index("\nmain() {")]
+    update_application = installer[installer.index("update_application() {"):installer.index("publish_dashboard_endpoint() {")]
     failure = update_application.index("if ! apply_new_version; then")
     assert "restore_after_failed_update" in update_application[failure:update_application.index("return 1", failure)]
+
+    main_body = installer[installer.index("\nmain() {"):]
+    publish_call = main_body.index("if ! publish_dashboard_endpoint; then")
+    block = main_body[publish_call:main_body.index("\nfi\n", publish_call)]
+    assert "restore_after_failed_update" in block
+    assert "exit 1" in block
+
+
+# ---------------------------------------------------------------------------
+# Firewall undo
+# ---------------------------------------------------------------------------
+
+_FAKE_UFW = r"""
+tmp=$(mktemp -d) || exit 78
+trap 'rm -rf -- "$tmp"' EXIT
+UFW_STATE=active
+UFW_ALLOW_RC=0
+UFW_DELETE_RC=0
+: > "$tmp/ufw.rules"
+: > "$tmp/ufw.log"
+add_rule() {
+  printf '%s                   ALLOW IN    Anywhere                   # %s\n' "$1" "$2" >> "$tmp/ufw.rules"
+}
+add_dashboard_rule() {
+  add_rule "$1" "$UFW_COMMENT"
+  printf '%s (v6)              ALLOW IN    Anywhere (v6)              # %s\n' "$1" "$UFW_COMMENT" >> "$tmp/ufw.rules"
+}
+ufw() {
+  printf 'ufw %s\n' "$*" >> "$tmp/ufw.log"
+  case "$1" in
+    status)
+      if [ "$2" = numbered ]; then
+        local n=0 line
+        while IFS= read -r line; do n=$((n + 1)); printf '[%2d] %s\n' "$n" "$line"; done < "$tmp/ufw.rules"
+      else
+        echo "Status: $UFW_STATE"
+      fi
+      ;;
+    allow)
+      [ "$UFW_ALLOW_RC" -eq 0 ] || return "$UFW_ALLOW_RC"
+      add_dashboard_rule "$2"
+      ;;
+    --force)
+      [ "$UFW_DELETE_RC" -eq 0 ] || return "$UFW_DELETE_RC"
+      sed -i "${3}d" "$tmp/ufw.rules"
+      ;;
+  esac
+}
+check() { "$@" || { echo "CHECK FAILED: $*" >&2; exit 90; }; }
+ports() { dashboard_ufw_ports | tr '\n' ' '; }
+"""
+
+
+def test_firewall_undo_removes_a_port_added_by_the_update() -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + r"""
+add_rule 22/tcp ""
+add_dashboard_rule 8443/tcp
+snapshot_dashboard_ufw_ports
+HTTPS_PORT=9443
+UFW_DELETE_RC=1
+if configure_ufw_https; then exit 10; fi
+UFW_DELETE_RC=0
+check test "$(ports)" = "8443/tcp 9443/tcp "
+: > "$tmp/ufw.log"
+undo_dashboard_ufw_change
+check test "$(ports)" = "8443/tcp "
+check grep -q '22/tcp' "$tmp/ufw.rules"
+if grep -q '^ufw allow' "$tmp/ufw.log"; then exit 11; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_firewall_undo_readds_a_port_the_update_removed() -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + r"""
+add_rule 22/tcp ""
+add_dashboard_rule 8443/tcp
+snapshot_dashboard_ufw_ports
+HTTPS_PORT=9443
+configure_ufw_https
+check test "$(ports)" = "9443/tcp "
+undo_dashboard_ufw_change
+check test "$(ports)" = "8443/tcp "
+check grep -q '22/tcp' "$tmp/ufw.rules"
+check test "$(grep -c '8443/tcp' "$tmp/ufw.rules")" -eq 2
+check test "$(grep -c '9443/tcp' "$tmp/ufw.rules")" -eq 0
+check grep -q 'ufw allow 8443/tcp comment Simple Network Dashboard HTTPS' "$tmp/ufw.log"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_firewall_undo_failure_is_reported_and_returns_one() -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + r"""
+add_dashboard_rule 8443/tcp
+snapshot_dashboard_ufw_ports
+HTTPS_PORT=9443
+configure_ufw_https
+UFW_ALLOW_RC=1
+if undo_dashboard_ufw_change; then exit 10; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Error: could not restore the firewall rule for 8443/tcp." in result.stdout
+
+
+def test_firewall_undo_does_nothing_when_ufw_is_inactive() -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + r"""
+add_dashboard_rule 8443/tcp
+UFW_STATE=inactive
+snapshot_dashboard_ufw_ports
+HTTPS_PORT=9443
+configure_ufw_https
+: > "$tmp/ufw.log"
+undo_dashboard_ufw_change
+check test ! -s "$tmp/ufw.log"
+check test "$(ports)" = "8443/tcp "
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_firewall_undo_does_nothing_when_ufw_is_missing() -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + r"""
+command() {
+  if [ "$1" = -v ] && [ "$2" = ufw ]; then return 1; fi
+  builtin command "$@"
+}
+snapshot_dashboard_ufw_ports
+undo_dashboard_ufw_change
+check test ! -s "$tmp/ufw.log"
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_uninstaller_removes_leftover_rollback_folder() -> None:
