@@ -831,6 +831,84 @@ configure_ufw_https() {
     fi
 }
 
+# Ports (such as 8443/tcp) of the existing dashboard firewall rules, one per
+# line. The IPv4 and IPv6 lines of one rule give the same port once.
+dashboard_ufw_ports() {
+    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" '
+        $0 ~ ("# " comment "[[:space:]]*$") {
+            line=$0
+            sub(/^[[:space:]]*\[[^]]*\][[:space:]]*/, "", line)
+            split(line, fields, /[[:space:]]+/)
+            if (fields[1] != "") print fields[1]
+        }
+    ' | sort -u
+}
+
+# Numbers of dashboard firewall rules whose port is not in the list given as
+# the argument (one port per line, none containing spaces), highest number first.
+dashboard_ufw_rule_numbers_outside() {
+    local keep
+    keep=$(tr '\n' ' ' <<< "$1")
+    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" -v keep="$keep" '
+        BEGIN { n = split(keep, kept, " "); for (i = 1; i <= n; i++) if (kept[i] != "") allowed[kept[i]] = 1 }
+        $0 ~ ("# " comment "[[:space:]]*$") {
+            line=$0
+            sub(/^[[:space:]]*\[/, "", line)
+            number=line
+            sub(/\].*/, "", number)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", number)
+            sub(/^[^]]*\][[:space:]]*/, "", line)
+            split(line, fields, /[[:space:]]+/)
+            if (!(fields[1] in allowed)) print number
+        }
+    ' | sort -rn
+}
+
+UFW_SNAPSHOT_TAKEN=false
+UFW_SNAPSHOT_PORTS=""
+
+# Records the dashboard firewall ports as they are before configure_ufw_https
+# changes anything. Nothing is recorded when ufw is absent or inactive, since
+# configure_ufw_https changes nothing then.
+snapshot_dashboard_ufw_ports() {
+    UFW_SNAPSHOT_TAKEN=false
+    UFW_SNAPSHOT_PORTS=""
+    if ! command -v ufw &>/dev/null; then
+        return 0
+    fi
+    if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+        return 0
+    fi
+    UFW_SNAPSHOT_PORTS=$(dashboard_ufw_ports) || return 0
+    UFW_SNAPSHOT_TAKEN=true
+}
+
+# Puts the dashboard firewall rules back to the recorded ports: missing ones
+# are added again, then rules for other ports are deleted. Returns 1 if any
+# step fails, after trying the rest.
+undo_dashboard_ufw_change() {
+    local status=0 current port rule_numbers
+    if [ "$UFW_SNAPSHOT_TAKEN" != true ]; then
+        return 0
+    fi
+    current=$(dashboard_ufw_ports) || current=""
+    while IFS= read -r port; do
+        [ -n "$port" ] || continue
+        if ! grep -qxF -- "$port" <<< "$current"; then
+            if ! ufw allow "$port" comment "$UFW_COMMENT"; then
+                echo "Error: could not restore the firewall rule for $port."
+                status=1
+            fi
+        fi
+    done <<< "$UFW_SNAPSHOT_PORTS"
+    rule_numbers=$(dashboard_ufw_rule_numbers_outside "$UFW_SNAPSHOT_PORTS") || rule_numbers=""
+    if ! delete_dashboard_ufw_rule_numbers "$rule_numbers"; then
+        echo "Error: could not remove the dashboard firewall rules added by the update."
+        status=1
+    fi
+    return "$status"
+}
+
 select_backend_port() {
     local candidate listening
 
@@ -1892,8 +1970,9 @@ apply_new_version() {
 
 # Updates save the old package, environment and small files before anything is
 # replaced, so a failed update can put the working version back. The saved copy
-# is deleted only once the new version answers. Returns 1 on any failure, after
-# restoring the previous version when there is one.
+# is kept until main() has published the dashboard and the update has fully
+# landed. Returns 1 on any failure, after restoring the previous version when
+# there is one.
 update_application() {
     if [ "$UPDATE_ELIGIBLE" = true ]; then
         if ! create_rollback_point; then
@@ -1913,9 +1992,28 @@ update_application() {
         restore_after_failed_update || true
         return 1
     fi
+}
 
-    # The new version answers; the saved copy is no longer needed.
-    if ! discard_rollback_point; then
+# Publishes the dashboard through Caddy and the firewall. Returns 1 on any
+# failure, after restoring the Caddy configuration and the firewall rules this
+# step changed. The caller restores the previous version.
+publish_dashboard_endpoint() {
+    if ! write_caddy_proxy_config; then
+        return 1
+    fi
+    if ! export_caddy_root_certificate; then
+        echo "Error: Caddy root certificate export failed; restoring the dashboard proxy configuration before firewall changes."
+        if ! rollback_caddy_proxy_config; then
+            echo "Error: Caddy rollback after certificate export failure was incomplete."
+        fi
+        return 1
+    fi
+    snapshot_dashboard_ufw_ports
+    if ! configure_ufw_https; then
+        undo_dashboard_ufw_change || true
+        if ! rollback_caddy_proxy_config; then
+            echo "Error: Caddy rollback after firewall failure was incomplete."
+        fi
         return 1
     fi
 }
@@ -2046,29 +2144,27 @@ repair_runtime_storage
 if ! update_application; then
     exit 1
 fi
-# The old flat layout is removed only after the new version is confirmed working.
+if ! publish_dashboard_endpoint; then
+    restore_after_failed_update || true
+    exit 1
+fi
+# The new version is fully working. The saved copy and the old flat layout go
+# last, in this order, because a restored old version runs from them. Leftover
+# Caddy temporary files do not block the rest, since a leftover saved copy
+# would make the next update refuse to run.
+cleanup_failed=false
+if ! discard_caddy_proxy_rollback; then
+    echo "Error: could not remove temporary Caddy rollback files."
+    cleanup_failed=true
+fi
+if ! discard_rollback_point; then
+    exit 1
+fi
 if ! remove_legacy_application_files; then
     echo "Error: legacy application cleanup failed."
     exit 1
 fi
-if ! write_caddy_proxy_config; then
-    exit 1
-fi
-if ! export_caddy_root_certificate; then
-    echo "Error: Caddy root certificate export failed; restoring the dashboard proxy configuration before firewall changes."
-    if ! rollback_caddy_proxy_config; then
-        echo "Error: Caddy rollback after certificate export failure was incomplete."
-    fi
-    exit 1
-fi
-if ! configure_ufw_https; then
-    if ! rollback_caddy_proxy_config; then
-        echo "Error: Caddy rollback after firewall failure was incomplete."
-    fi
-    exit 1
-fi
-if ! discard_caddy_proxy_rollback; then
-    echo "Error: could not remove temporary Caddy rollback files."
+if [ "$cleanup_failed" = true ]; then
     exit 1
 fi
 
