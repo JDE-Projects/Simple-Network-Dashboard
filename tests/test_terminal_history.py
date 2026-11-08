@@ -69,7 +69,7 @@ def test_trim_keeps_newest_lines_and_partial_within_shared_budget():
         {"lines": ["old", "mid", "new"], "partial": "prompt "},
         {"lines": ["x" * 10] * 5, "partial": ""},
     ]
-    trim_to_budget(terminals, 50)
+    trim_to_budget(terminals, 110)
     assert terminals[0]["lines"] == ["mid", "new"]
     assert terminals[0]["partial"] == "prompt "
     assert terminals[1]["lines"] == ["x" * 10]
@@ -80,3 +80,36 @@ def test_trim_counts_escaped_size_of_non_ascii_text():
     terminals = [{"lines": ["é" * 10, "é" * 10], "partial": ""}]
     trim_to_budget(terminals, 100)
     assert terminals[0]["lines"] == ["é" * 10]
+
+
+def test_trim_keeps_end_of_unfinished_line_past_its_share():
+    import json
+    from simple_network_dashboard.terminal_history import trim_to_budget
+    terminals = [{"lines": ["old"], "partial": "a" * 200 + "prompt> "}]
+    trim_to_budget(terminals, 100)
+    assert terminals[0]["lines"] == []
+    assert terminals[0]["partial"].endswith("prompt> ")
+    assert len(terminals[0]["partial"]) < 100
+    assert len(json.dumps(terminals)) <= 100
+
+
+def test_trim_holds_total_budget_and_keeps_every_terminal():
+    import json
+    from simple_network_dashboard.terminal_history import trim_to_budget
+    emoji = "\U0001F600"
+    terminals = [
+        {"device_id": f"dev_{index}", "run_id": "r" * 22, "cols": 120, "rows": 30, "label": "Label",
+         "lines": ["line"] * 100, "partial": emoji * 4096, "fullscreen": False, "seq": 7}
+        for index in range(10)
+    ]
+    trim_to_budget(terminals, 20_000)
+    assert len(json.dumps(terminals)) <= 20_000
+    assert [terminal["device_id"] for terminal in terminals] == [f"dev_{index}" for index in range(10)]
+    assert all(terminal["partial"] and set(terminal["partial"]) == {emoji} for terminal in terminals)
+
+
+def test_trim_empties_history_when_only_terminal_fields_fit():
+    from simple_network_dashboard.terminal_history import trim_to_budget
+    terminals = [{"device_id": "d", "lines": ["old"], "partial": "prompt> "}]
+    trim_to_budget(terminals, 10)
+    assert terminals == [{"device_id": "d", "lines": [], "partial": ""}]
