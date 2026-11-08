@@ -10,6 +10,10 @@ from simple_network_dashboard.ssh_manager import SSHManager, _Session
 from simple_network_dashboard.ws_manager import _WSManager
 
 
+def _reject_json_constant(value):
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
 class _Socket:
     def __init__(self, stall=False):
         self.frames = []
@@ -24,7 +28,7 @@ class _Socket:
         self.sending.set()
         if self.stall:
             await asyncio.Event().wait()
-        self.frames.append(json.loads(data))
+        self.frames.append(json.loads(data, parse_constant=_reject_json_constant))
 
     async def close(self, *, code):
         self.closed.append(code)
@@ -323,3 +327,167 @@ def test_init_frame_with_config_and_history_at_their_caps_is_delivered():
     assert socket.closed == []
     assert socket.frames[0] == frame
     assert len(socket.frames) == 2
+
+
+def test_valid_messages_encode_unchanged():
+    async def exercise():
+        manager = _WSManager()
+        socket = _Socket()
+        await manager.connect(socket)
+        await manager.send_init(socket, {"type": "init"})
+        await manager.broadcast({"type": "metrics", "data": {"cpu_percent": 5.0}})
+        for _ in range(10):
+            await asyncio.sleep(0)
+        manager.drop(socket)
+        return socket.frames
+
+    assert asyncio.run(exercise()) == [
+        {"type": "init"}, {"type": "metrics", "data": {"cpu_percent": 5.0}},
+    ]
+
+
+def test_unencodable_broadcast_closes_sockets_and_does_not_raise():
+    async def exercise():
+        manager = _WSManager()
+        first, second = _Socket(), _Socket()
+        await manager.connect(first)
+        await manager.connect(second)
+        await manager.broadcast({"type": "metrics", "reading": float("nan")})
+        await asyncio.sleep(0)
+        return first, second
+
+    first, second = asyncio.run(exercise())
+    assert first.closed == second.closed == [1013]
+    assert first.frames == second.frames == []
+
+
+def test_unencodable_send_to_closes_only_that_socket():
+    async def exercise():
+        manager = _WSManager()
+        first, second = _Socket(), _Socket()
+        await manager.connect(first)
+        await manager.connect(second)
+        await manager.send_to(first, {"type": "metrics", "reading": float("nan")})
+        await asyncio.sleep(0)
+        manager.drop(second)
+        return first.closed, second.closed
+
+    assert asyncio.run(exercise()) == ([1013], [])
+
+
+def test_unencodable_send_to_owner_closes_only_that_owner():
+    async def exercise():
+        manager = _WSManager()
+        owned, other = _Socket(), _Socket()
+        await manager.connect(owned, "owner-a")
+        await manager.connect(other, "owner-b")
+        await manager.send_to_owner("owner-a", {"type": "metrics", "reading": float("nan")})
+        await asyncio.sleep(0)
+        manager.drop(other)
+        return owned.closed, other.closed
+
+    assert asyncio.run(exercise()) == ([1013], [])
+
+
+def test_unencodable_init_closes_socket():
+    async def exercise():
+        manager = _WSManager()
+        socket = _Socket()
+        await manager.connect(socket)
+        await manager.send_init(socket, {"type": "init", "reading": float("nan")})
+        await asyncio.sleep(0)
+        return socket.closed, socket.frames
+
+    assert asyncio.run(exercise()) == ([1013], [])
+
+
+def test_unencodable_report_is_limited_per_type(monkeypatch, capsys):
+    clock = iter([0.0, 1.0, 2.0, 301.0])
+    monkeypatch.setattr("simple_network_dashboard.ws_manager._monotonic", clock.__next__)
+    debug_lines = []
+    monkeypatch.setattr("simple_network_dashboard.ws_manager.debug_log._debug_write", debug_lines.append)
+
+    async def exercise():
+        manager = _WSManager()
+        sockets = []
+        for message_type in ("metrics", "metrics", "devices", "metrics"):
+            socket = _Socket()
+            sockets.append(socket)
+            await manager.connect(socket)
+            await manager.send_to(socket, {"type": message_type, "reading": float("nan")})
+        await asyncio.sleep(0)
+        return sockets
+
+    sockets = asyncio.run(exercise())
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3
+    assert len(debug_lines) == 3
+    assert [socket.closed for socket in sockets] == [[1013]] * 4
+
+
+def test_report_never_contains_message_content(monkeypatch, capsys):
+    marker = "message-content-marker"
+    debug_lines = []
+    monkeypatch.setattr("simple_network_dashboard.ws_manager.debug_log._debug_write", debug_lines.append)
+
+    async def exercise():
+        manager = _WSManager()
+        socket = _Socket()
+        await manager.connect(socket)
+        await manager.send_to(socket, {"type": "metrics", "content": marker, "reading": float("nan")})
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+    assert marker not in capsys.readouterr().out
+    assert not any(marker in line for line in debug_lines)
+
+
+def test_poll_cycle_continues_after_bad_device(monkeypatch):
+    monkeypatch.setattr(main.runtime_state, "_devices_cache", [
+        {"id": "bad", "host": "10.0.0.4", "metrics_port": 9100},
+        {"id": "good", "host": "10.0.0.5", "metrics_port": 9100},
+    ])
+    monkeypatch.setattr(main, "_metrics_cache", {})
+
+    release_bad = asyncio.Event()
+
+    async def fake_fetch(host, port, prev=None):
+        if host == "10.0.0.4":
+            await release_bad.wait()
+            return {"reading": float("nan")}
+        return {"cpu_percent": 5.0}
+
+    monkeypatch.setattr(main, "fetch_metrics", fake_fetch)
+
+    async def exercise():
+        manager = _WSManager()
+        bad_socket, good_socket = _Socket(), _Socket()
+        good_frame = asyncio.Event()
+        original_send = good_socket.send_text
+
+        async def record_good_frame(data):
+            await original_send(data)
+            if json.loads(data, parse_constant=_reject_json_constant).get("device_id") == "good":
+                good_frame.set()
+
+        good_socket.send_text = record_good_frame
+        await manager.connect(bad_socket)
+        await manager.connect(good_socket)
+        await manager.send_init(bad_socket, {"type": "init"})
+        await manager.send_init(good_socket, {"type": "init"})
+        manager.set_selected_device(bad_socket, "bad")
+        manager.set_selected_device(good_socket, "good")
+        monkeypatch.setattr(main, "ws_mgr", manager)
+        poll = asyncio.create_task(main._poll_once())
+        await good_frame.wait()
+        release_bad.set()
+        await poll
+        for _ in range(10):
+            await asyncio.sleep(0)
+        manager.drop(bad_socket)
+        manager.drop(good_socket)
+        return bad_socket, good_socket
+
+    bad_socket, good_socket = asyncio.run(exercise())
+    assert bad_socket.closed == good_socket.closed == [1013]
+    assert any(frame.get("device_id") == "good" for frame in good_socket.frames)

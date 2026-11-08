@@ -5,7 +5,10 @@ cpu count, temperatures, uptime formatting) and the two-sample delta paths
 (cpu_percent and network rx/tx rates) that depend on a previous sample.
 """
 
+import json
 import math
+
+import pytest
 
 from simple_network_dashboard.metrics_poller import _parse, extract_metrics
 
@@ -252,3 +255,193 @@ def test_network_interfaces_listed_in_name_order():
     out = extract_metrics(_parse(sample(2000)), prev)
 
     assert list(out["network"]) == sorted(names)
+
+
+_BAD_VALUES = ["NaN", "+Inf", "-Inf"]
+
+
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_boot_time_omits_uptime(bad):
+    out = extract_metrics(_parse(f"node_uname_info{{nodename=\"pi5\"}} 1\nnode_boot_time_seconds {bad}\nnode_load1 0.5"), None)
+
+    assert "uptime" not in out
+    assert out["hostname"] == "pi5"
+    assert out["load1"] == 0.5
+
+
+@pytest.mark.parametrize("metric", ["node_load1", "node_load5", "node_load15"])
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_load_omits_all_three(metric, bad):
+    text = SAMPLE.replace(f"{metric} " + {"node_load1": "0.10", "node_load5": "0.20", "node_load15": "0.30"}[metric], f"{metric} {bad}")
+    out = extract_metrics(_parse(text), None)
+
+    assert not {"load1", "load5", "load15"} & out.keys()
+
+
+@pytest.mark.parametrize("mode", ["idle", "user"])
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_cpu_counter_skips_sample(mode, bad):
+    previous = extract_metrics(_parse(SAMPLE), None)
+    text = SAMPLE.replace(f'cpu="0",mode="{mode}"}} 1000' if mode == "idle" else f'cpu="0",mode="{mode}"}} 200', f'cpu="0",mode="{mode}"}} {bad}')
+    out = extract_metrics(_parse(text), previous)
+
+    assert out["cpu_count"] == 4
+    assert "_cpu_raw" not in out
+    assert "cpu_percent" not in out
+
+
+@pytest.mark.parametrize("metric", ["node_memory_MemTotal_bytes", "node_memory_MemAvailable_bytes"])
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_memory_omits_only_ram(metric, bad):
+    text = SAMPLE.replace(f"{metric} " + str(_MEM_TOTAL if metric.endswith("Total_bytes") else _MEM_AVAIL), f"{metric} {bad}")
+    out = extract_metrics(_parse(text), None)
+
+    assert not {"ram_total_gb", "ram_used_gb", "ram_percent"} & out.keys()
+    assert out["swap_percent"] == 50.0
+
+
+@pytest.mark.parametrize("metric", ["node_memory_SwapTotal_bytes", "node_memory_SwapFree_bytes"])
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_swap_omits_only_swap(metric, bad):
+    text = SAMPLE.replace(f"{metric} " + str(_SWAP_TOTAL if metric.endswith("Total_bytes") else _SWAP_FREE), f"{metric} {bad}")
+    out = extract_metrics(_parse(text), None)
+
+    assert not {"swap_total_gb", "swap_used_gb", "swap_percent"} & out.keys()
+    assert out["ram_percent"] == 75.0
+
+
+@pytest.mark.parametrize("metric", ["node_filesystem_size_bytes", "node_filesystem_avail_bytes"])
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_disk_omits_only_that_disk(metric, bad):
+    text = f'''
+node_filesystem_size_bytes{{device="/dev/a",fstype="ext4",mountpoint="/a"}} {bad if metric.endswith("size_bytes") else 100 * GB}
+node_filesystem_avail_bytes{{device="/dev/a",fstype="ext4",mountpoint="/a"}} {bad if metric.endswith("avail_bytes") else 25 * GB}
+node_filesystem_size_bytes{{device="/dev/b",fstype="ext4",mountpoint="/b"}} {100 * GB}
+node_filesystem_avail_bytes{{device="/dev/b",fstype="ext4",mountpoint="/b"}} {25 * GB}
+'''
+    disks = extract_metrics(_parse(text), None)["disks"]
+
+    assert [disk["mount"] for disk in disks] == ["/b"]
+    assert disks[0]["percent"] == 75.0
+
+
+@pytest.mark.parametrize("metric", ["node_thermal_zone_temp", "node_hwmon_temp_celsius"])
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_temperature_skips_only_that_sensor(metric, bad):
+    text = f'''
+node_thermal_zone_temp{{type="thermal-bad"}} {bad if metric == "node_thermal_zone_temp" else 40}
+node_thermal_zone_temp{{type="thermal-good"}} 41
+node_hwmon_temp_celsius{{sensor="temp1_input",chip="bad"}} {bad if metric == "node_hwmon_temp_celsius" else 42}
+node_hwmon_temp_celsius{{sensor="temp2_input",chip="good"}} 43
+'''
+    labels = {temp["label"] for temp in extract_metrics(_parse(text), None)["temps"]}
+
+    assert "thermal-good" in labels and "temp2_input" in labels
+    assert ("thermal-bad" in labels) is (metric != "node_thermal_zone_temp")
+    assert ("temp1_input" in labels) is (metric != "node_hwmon_temp_celsius")
+
+
+@pytest.mark.parametrize("metric", ["node_network_receive_bytes_total", "node_network_transmit_bytes_total"])
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_non_finite_network_omits_only_that_interface(monkeypatch, metric, bad):
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller.time.time", iter([1000.0, 1010.0]).__next__)
+    previous = extract_metrics(_parse('node_network_receive_bytes_total{device="bad"} 100\nnode_network_transmit_bytes_total{device="bad"} 100\nnode_network_receive_bytes_total{device="good"} 100\nnode_network_transmit_bytes_total{device="good"} 100'), None)
+    text = f'''
+node_network_receive_bytes_total{{device="bad"}} {bad if metric.endswith("receive_bytes_total") else 200}
+node_network_transmit_bytes_total{{device="bad"}} {bad if metric.endswith("transmit_bytes_total") else 200}
+node_network_receive_bytes_total{{device="good"}} 200
+node_network_transmit_bytes_total{{device="good"}} 200
+'''
+    out = extract_metrics(_parse(text), previous)
+
+    assert "bad" not in out["_net_raw"]
+    assert "bad" not in out["network"]
+    assert out["network"]["good"] == {"rx_kbs": 0.0, "tx_kbs": 0.0}
+
+
+def test_cpu_recovers_good_bad_good_good():
+    good_one = 'node_cpu_seconds_total{cpu="0",mode="idle"} 100\nnode_cpu_seconds_total{cpu="0",mode="user"} 100'
+    bad = 'node_cpu_seconds_total{cpu="0",mode="idle"} NaN\nnode_cpu_seconds_total{cpu="0",mode="user"} 200'
+    good_two = 'node_cpu_seconds_total{cpu="0",mode="idle"} 200\nnode_cpu_seconds_total{cpu="0",mode="user"} 200'
+    good_three = 'node_cpu_seconds_total{cpu="0",mode="idle"} 300\nnode_cpu_seconds_total{cpu="0",mode="user"} 300'
+    one = extract_metrics(_parse(good_one), None)
+    two = extract_metrics(_parse(bad), one)
+    three = extract_metrics(_parse(good_two), two)
+    four = extract_metrics(_parse(good_three), three)
+
+    assert "cpu_percent" not in two and "cpu_percent" not in three
+    assert four["cpu_percent"] == 50.0
+
+
+def test_network_recovers_good_bad_good_good(monkeypatch):
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller.time.time", iter([1000.0, 1010.0, 1020.0, 1030.0]).__next__)
+
+    def sample(bad=False, value=100):
+        return _parse(f'''node_network_receive_bytes_total{{device="bad"}} {"NaN" if bad else value}
+node_network_transmit_bytes_total{{device="bad"}} {value}
+node_network_receive_bytes_total{{device="good"}} {value}
+node_network_transmit_bytes_total{{device="good"}} {value}''')
+
+    one = extract_metrics(sample(value=100), None)
+    two = extract_metrics(sample(bad=True, value=200), one)
+    three = extract_metrics(sample(value=300), two)
+    four = extract_metrics(sample(value=400), three)
+
+    assert "bad" not in two["_net_raw"] and "bad" not in two["network"]
+    assert "bad" not in three["network"]
+    assert four["network"]["bad"] == {"rx_kbs": 0.0, "tx_kbs": 0.0}
+    assert all("good" in sample["network"] for sample in (two, three, four))
+
+
+@pytest.mark.parametrize(
+    ("previous", "text"),
+    [
+        ({"_cpu_raw": {"total": -1e308, "idle": 0}}, 'node_cpu_seconds_total{cpu="0",mode="idle"} 1e308\nnode_cpu_seconds_total{cpu="0",mode="user"} 1e308'),
+        ({"_cpu_raw": {"total": -1e308, "idle": 0}}, 'node_cpu_seconds_total{cpu="0",mode="idle"} 1e308'),
+    ],
+)
+def test_overflowing_cpu_values_skip_sample(previous, text):
+    out = extract_metrics(_parse(text), previous)
+
+    assert "_cpu_raw" not in out
+    assert "cpu_percent" not in out
+
+
+def test_overflowing_negative_network_delta_is_not_zero(monkeypatch):
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller.time.time", lambda: 10.0)
+    prev = {"_timestamp": 0.0, "_net_raw": {"eth0": {"rx": 1e308, "tx": 1}}}
+    out = extract_metrics(_parse('node_network_receive_bytes_total{device="eth0"} -1e308\nnode_network_transmit_bytes_total{device="eth0"} 2'), prev)
+
+    assert "eth0" not in out["_net_raw"]
+    assert "eth0" not in out["network"]
+
+
+def test_overflowing_memory_omits_ram():
+    out = extract_metrics(_parse('node_memory_MemTotal_bytes 1e308\nnode_memory_MemAvailable_bytes -1e308'), None)
+
+    assert not {"ram_total_gb", "ram_used_gb", "ram_percent"} & out.keys()
+
+
+def test_backstop_returns_invalid_metrics_error(monkeypatch):
+    monkeypatch.setattr("simple_network_dashboard.metrics_poller._all_numbers_finite", lambda _value: False)
+
+    assert extract_metrics(_parse("node_load1 0.5"), None) == {"error": "invalid metrics"}
+
+
+@pytest.mark.parametrize("bad", _BAD_VALUES)
+def test_all_single_non_finite_inputs_give_strict_json(bad):
+    parsed = _parse(SAMPLE + '''
+node_boot_time_seconds 100
+node_filesystem_size_bytes{device="/dev/a",fstype="ext4",mountpoint="/a"} 1000
+node_filesystem_avail_bytes{device="/dev/a",fstype="ext4",mountpoint="/a"} 500
+node_network_receive_bytes_total{device="eth0"} 100
+node_network_transmit_bytes_total{device="eth0"} 100
+''')
+    for entries in parsed.values():
+        for entry in entries:
+            original = entry["value"]
+            entry["value"] = float(bad.replace("+Inf", "inf").replace("-Inf", "-inf"))
+            out = extract_metrics(parsed, None)
+            public = {key: value for key, value in out.items() if not key.startswith("_")}
+            json.dumps(public, allow_nan=False)
+            entry["value"] = original

@@ -2,11 +2,16 @@ import asyncio
 import collections
 import json
 import secrets
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from simple_network_dashboard import config
+from simple_network_dashboard import config, debug_log
 from fastapi import WebSocket
+
+
+_ENCODE_FAILURE_REPORT_SECONDS = 300
+_monotonic = time.monotonic
 
 
 @dataclass
@@ -26,6 +31,27 @@ class _WSManager:
         self._selections: dict[WebSocket, str] = {}  # ws -> selected device id
         self._states: dict[WebSocket, _SocketState] = {}
         self._closing: set[asyncio.Task] = set()  # keeps close tasks alive until done
+        self._encode_failure_reports: dict[str, float] = {}
+
+    def _encode(self, msg: dict) -> Optional[str]:
+        try:
+            return json.dumps(msg, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            message_type = str(msg.get("type", "unknown"))
+            now = _monotonic()
+            last_report = self._encode_failure_reports.get(message_type)
+            if last_report is None or now - last_report >= _ENCODE_FAILURE_REPORT_SECONDS:
+                self._encode_failure_reports[message_type] = now
+                line = f"outbound encoding failed: {message_type} {type(error).__name__}"
+                try:
+                    print(line, flush=True)
+                except Exception:
+                    pass
+                try:
+                    debug_log._debug_write(line)
+                except Exception:
+                    pass
+            return None
 
     async def connect(self, ws: WebSocket, owner_id: str = None):
         await ws.accept()
@@ -42,7 +68,10 @@ class _WSManager:
         state = self._states.get(ws)
         if state is None:
             return
-        data = json.dumps(msg)
+        data = self._encode(msg)
+        if data is None:
+            self._close_socket(ws)
+            return
         if state.queued_bytes + len(data) > config.SOCKET_QUEUE_MAX_BYTES:
             self._close_socket(ws)
             return
@@ -52,7 +81,11 @@ class _WSManager:
         state.event.set()
 
     async def send_to(self, ws: WebSocket, msg: dict, still_current: Callable[[], bool] = None):
-        self._enqueue(ws, json.dumps(msg), still_current)
+        data = self._encode(msg)
+        if data is None:
+            self._close_socket(ws)
+            return
+        self._enqueue(ws, data, still_current)
 
     def drop(self, ws: WebSocket):
         self._connections = [c for c in self._connections if c is not ws]
@@ -152,7 +185,11 @@ class _WSManager:
     async def broadcast(self, msg: dict, still_current: Callable[[], bool] = None):
         if not self._connections:
             return
-        data = json.dumps(msg)
+        data = self._encode(msg)
+        if data is None:
+            for ws in list(self._connections):
+                self._close_socket(ws)
+            return
         for ws in list(self._connections):
             self._enqueue(ws, data, still_current)
 
@@ -160,7 +197,12 @@ class _WSManager:
                             still_current: Callable[[], bool] = None):
         if not self._connections or not owner_id:
             return
-        data = json.dumps(msg)
+        data = self._encode(msg)
+        if data is None:
+            for ws in list(self._connections):
+                if self._owners.get(ws) == owner_id:
+                    self._close_socket(ws)
+            return
         for ws in list(self._connections):
             if self._owners.get(ws) == owner_id:
                 self._enqueue(ws, data, still_current)

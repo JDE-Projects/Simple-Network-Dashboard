@@ -1044,11 +1044,12 @@ function renderStats() {
     panel.innerHTML = html; return;
   }
   if (m.error) {
+    const invalidMetrics = m.error === 'invalid metrics';
     html += `
       <div class="stats-offline">
         <div class="err-icon">○</div>
-        <div class="err-msg">Node Exporter unreachable on <b>${esc(device.host)}:${device.metrics_port || 9100}</b></div>
-        <div class="install-box">sudo apt install prometheus-node-exporter</div>
+        <div class="err-msg">${invalidMetrics ? 'Node Exporter on' : 'Node Exporter unreachable on'} <b>${esc(device.host)}:${device.metrics_port || 9100}</b>${invalidMetrics ? ' sent invalid readings' : ''}</div>
+        ${invalidMetrics ? '' : '<div class="install-box">sudo apt install prometheus-node-exporter</div>'}
       </div>`;
     panel.innerHTML = html; return;
   }
