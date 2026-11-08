@@ -52,6 +52,16 @@ dpkg-query() {{
     printf '%s' "$MOCK_DPKG_STATUS"
     return "$MOCK_DPKG_QUERY_RC"
 }}
+# A scenario has a Caddy binary only if it defines a caddy shell function, so
+# a Caddy installed on the machine running the tests cannot change the result.
+command() {{
+    if [ "$1" = -v ] && [ "$2" = caddy ]; then
+        declare -F caddy >/dev/null || return 1
+        printf 'caddy\\n'
+        return 0
+    fi
+    builtin command "$@"
+}}
 {body}
 """
     return subprocess.run(
@@ -176,6 +186,24 @@ preflight_https
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_caddy_installed_on_the_test_machine_does_not_change_a_fresh_scenario() -> None:
+    result = _run_installer(
+        """
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+printf '#!/bin/sh\\nexit 0\\n' > "$tmpdir/caddy"
+chmod +x "$tmpdir/caddy"
+PATH="$tmpdir:$PATH"
+parse_install_arguments --https-host 10.0.0.4
+preflight_https
+printf 'state=%s\\n' "$CADDY_STATE"
+"""
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "state=fresh" in result.stdout
 
 
 def test_compatible_caddy_is_accepted_when_port_is_free_or_caddy_owned() -> None:
@@ -319,7 +347,7 @@ if preflight_https; then exit 10; fi
     [
         "MOCK_DPKG_STATUS='ii '",
         "MOCK_DPKG_QUERY_RC=1",
-        "unset -f dpkg-query",
+        "dpkg-query() { return 127; }",
     ],
 )
 def test_unconfirmed_removed_caddy_configuration_uses_generic_refusal(
