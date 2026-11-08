@@ -569,7 +569,9 @@ _READINESS_STUBS = r'''
 tmp=$(mktemp -d) || exit 78
 trap 'rm -rf -- "$tmp"' EXIT
 SERVICE_NAME=simple-network-dashboard
-READY_TIMEOUT_SECONDS=1
+# Bash counts whole seconds, so a limit of 1 can be almost no real time. Only
+# a test that expects the timeout lowers this.
+READY_TIMEOUT_SECONDS=10
 READY_POLL_SECONDS=0
 probe_n=0
 dashboard_probe() { local rc="${PROBE_RC[$probe_n]:-1}"; probe_n=$((probe_n + 1)); return "$rc"; }
@@ -634,7 +636,6 @@ def test_readiness_requires_consecutive_successes() -> None:
     result = _run_install(
         _READINESS_STUBS
         + r'''
-READY_TIMEOUT_SECONDS=2
 PROBE_RC=(0 0 1 0 0 0 0)
 wait_for_dashboard_ready 3000
 test "$probe_n" -eq 7
