@@ -28,6 +28,7 @@ TERM_ACK_STALL_SECONDS = 20  # seconds without terminal acknowledgement progress
 TERM_HISTORY_MAX_LINES = 1500  # complete terminal history lines kept for page refresh
 TERM_HISTORY_MAX_LINE_CHARS = 4096  # character cap for one terminal history line, dropping excess input
 TERM_INIT_HISTORY_MAX_CHARS = 1_048_576  # encoded size cap for all history lines in one init frame, oldest dropped first, kept well under SOCKET_QUEUE_MAX_BYTES
+MAX_CONFIG_BYTES = 1_048_576  # cap on all saved device configuration as sent over the socket, kept well under SOCKET_QUEUE_MAX_BYTES with room for terminal history and back-to-back broadcasts
 TERM_DEFAULT_COLS = 120  # columns used when the browser provides no terminal size
 TERM_DEFAULT_ROWS = 30  # rows used when the browser provides no terminal size
 TERM_MIN_COLS = 20  # smallest accepted terminal column count

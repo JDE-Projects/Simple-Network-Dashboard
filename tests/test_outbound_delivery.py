@@ -295,3 +295,31 @@ def test_a_failed_delivery_does_not_stop_later_messages():
     delivered, logged = asyncio.run(exercise())
     assert delivered == [{"type": "good"}]
     assert logged == ["Outbound message delivery failed (RuntimeError)"]
+
+
+def test_init_frame_with_config_and_history_at_their_caps_is_delivered():
+    config_at_cap = [{"id": "d", "name": "n", "commands": []}]
+    filler = config.MAX_CONFIG_BYTES - len(json.dumps(config_at_cap)) - 20
+    config_at_cap[0]["note"] = "x" * filler
+    assert len(json.dumps(config_at_cap)) <= config.MAX_CONFIG_BYTES
+    line = "h" * 1000
+    lines = [line] * ((config.TERM_INIT_HISTORY_MAX_CHARS // (len(json.dumps(line)) + 2)) - 1)
+    terminals = [{"device_id": "d", "run_id": "r", "lines": lines, "partial": ""}]
+    frame = {"type": "init", "devices": config_at_cap, "ssh_terminals": terminals}
+    assert len(json.dumps(frame)) < config.SOCKET_QUEUE_MAX_BYTES
+
+    async def exercise():
+        manager = _WSManager()
+        socket = _Socket()
+        await manager.connect(socket)
+        await manager.send_init(socket, frame)
+        await manager.broadcast({"type": "devices", "devices": config_at_cap})
+        for _ in range(10):
+            await asyncio.sleep(0)
+        manager.drop(socket)
+        return socket
+
+    socket = asyncio.run(exercise())
+    assert socket.closed == []
+    assert socket.frames[0] == frame
+    assert len(socket.frames) == 2

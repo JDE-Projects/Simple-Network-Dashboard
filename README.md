@@ -117,7 +117,11 @@ The dashboard's bottom bar also has a **Check for updates** button that tells yo
 2. Click **Add Device** and enter the display name, IP address, SSH username, and Node Exporter port (default 9100).
 3. Stats appear automatically: CPU, RAM, disk, temperature, and network rates.
 4. To manage a device via SSH, enter the password for that device and click **Connect**.
-5. Use the **Command Library** to save and reuse commands per device.
+5. Use the **Command Library** to save and reuse commands per device. All
+   devices and saved commands together are limited to 1 MB; a save that would
+   go past it is refused with a message. If the service log reports the saved
+   configuration is over the limit, remove saved commands or devices until it
+   is back under.
 6. Use **Sign out** to end your session on that browser. The tab you sign out
    from returns to the sign-in page at once; any other open tabs of that browser stop receiving
    updates within about ten seconds.

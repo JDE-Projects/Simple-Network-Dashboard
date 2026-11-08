@@ -41,6 +41,7 @@ from simple_network_dashboard.config import (
     LOG_DIR,
     MAX_COMMAND_LEN,
     MAX_COMMANDS_PER_DEVICE,
+    MAX_CONFIG_BYTES,
     MAX_CONFIRM_LEN,
     MAX_DEVICES,
     MAX_HOST_LEN,
@@ -297,6 +298,13 @@ async def lifespan(app: FastAPI):
     if os.path.exists(DEVICES_FILE) and not os.access(DEVICES_FILE, os.W_OK):
         runtime_state._storage_warning = True
         print(f"WARNING: {DEVICES_FILE} is not writable. Device and command changes will NOT be saved.", flush=True)
+    config_size = len(json.dumps(runtime_state._devices_cache))
+    if config_size > MAX_CONFIG_BYTES:
+        msg = (f"WARNING: saved configuration is {config_size} bytes, over the {MAX_CONFIG_BYTES} byte "
+               "limit. Saves that add to it are refused, and browsers may fail to load the dashboard. "
+               "Remove saved commands or devices to bring it under the limit.")
+        debug_log._debug_write(msg)
+        print(msg, flush=True)
     ssh_mgr.set_loop(asyncio.get_running_loop())
     debug_log.configure(broadcaster=ws_mgr.broadcast, loop=asyncio.get_running_loop())
     metrics_task = asyncio.create_task(_metrics_loop())
@@ -814,6 +822,29 @@ def _resolve_saved_commands(incoming: Optional[list], existing: Optional[dict]) 
     return incoming
 
 
+_CONFIG_SIZE_ERROR = ("This change would make the saved configuration larger than the 1 MB limit. "
+                      "Remove or shorten some saved commands and try again.")
+
+
+def _config_too_large(devices: list) -> bool:
+    """True when a save would grow the configuration past MAX_CONFIG_BYTES.
+
+    A save that is smaller than the current configuration is always allowed,
+    so a configuration that is already over the cap can be trimmed back down.
+    """
+    new_size = len(json.dumps(devices))
+    if new_size <= MAX_CONFIG_BYTES:
+        return False
+    current_size = len(json.dumps(runtime_state._devices_cache))
+    if new_size < current_size:
+        return False
+    msg = (f"SAVE REJECTED: configuration would be {new_size} bytes, over the "
+           f"{MAX_CONFIG_BYTES} byte limit (currently {current_size} bytes).")
+    debug_log._debug_write(msg)
+    print(msg, flush=True)
+    return True
+
+
 @app.post("/api/devices")
 async def upsert_device(body: DeviceIn, request: Request):
     if runtime_state._recovery_mode:
@@ -837,6 +868,8 @@ async def upsert_device(body: DeviceIn, request: Request):
         d["id"]       = "dev_" + uuid.uuid4().hex[:12]
         d["commands"] = _resolve_saved_commands(d["commands"], None)
         devices.append(persistence._norm(d))
+    if _config_too_large(devices):
+        return {"ok": False, "error": _CONFIG_SIZE_ERROR}
     if identity_edit:
         claim = ssh_mgr.begin_identity_edit(d["id"], _request_session_owner(request))
         if not claim["ok"]:
@@ -908,6 +941,8 @@ async def update_commands(device_id: str, body: CommandsIn):
             break
     else:
         return {"ok": False, "error": _UNKNOWN_DEVICE_ERROR}
+    if _config_too_large(devices):
+        return {"ok": False, "error": _CONFIG_SIZE_ERROR}
     cache_before = runtime_state._devices_cache
     if not persistence._save(devices):
         if runtime_state._devices_cache is not cache_before:
