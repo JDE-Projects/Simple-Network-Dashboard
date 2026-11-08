@@ -10,6 +10,8 @@ network."""
 
 import threading
 
+import pytest
+
 from simple_network_dashboard import ssh_manager
 
 
@@ -20,6 +22,9 @@ class _FakeKey:
 
     def asbytes(self):
         return b"fake-key-bytes"
+
+    def get_base64(self):
+        return "ZmFrZQ=="
 
 
 class _FakeClient:
@@ -135,6 +140,67 @@ def test_same_owner_reconnect_supersedes_the_in_flight_connect(monkeypatch):
 
     assert list(mgr.sessions.keys()) == ["d1"]
     assert mgr.sessions["d1"].state == "connected"
+
+
+def _unknown_key_error(host):
+    return ssh_manager.UnknownHostKey(host, _FakeKey())
+
+
+def _changed_key_error(host):
+    return ssh_manager.paramiko.BadHostKeyException(host, _FakeKey(), _FakeKey())
+
+
+@pytest.mark.parametrize("stale_error", [_unknown_key_error, _changed_key_error])
+@pytest.mark.parametrize("newer_error", [_unknown_key_error, _changed_key_error, None])
+def test_superseded_attempt_offers_no_host_key_prompt(monkeypatch, stale_error, newer_error):
+    mgr = _mgr()
+    device = _device()
+    starts = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    attempts = []
+    attempts_lock = threading.Lock()
+
+    def fake_connect(self):
+        with attempts_lock:
+            index = len(attempts)
+            attempts.append(self)
+        starts[index].set()
+        releases[index].wait(5)
+        error = stale_error if index == 0 else newer_error
+        if error is not None:
+            raise error(device["host"])
+        self.client = _FakeClient()
+
+    monkeypatch.setattr(ssh_manager._Session, "connect", fake_connect)
+    results = {}
+
+    def run(key):
+        results[key] = mgr.connect("d1", "pw", lambda _id: device, "owner-1")
+
+    older = threading.Thread(target=run, args=("older",))
+    older.start()
+    assert starts[0].wait(2), "first connect never started"
+    newer = threading.Thread(target=run, args=("newer",))
+    newer.start()
+    assert starts[1].wait(2), "second connect never started"
+
+    releases[1].set()
+    newer.join(5)
+    releases[0].set()
+    older.join(5)
+
+    assert results["older"] == {"ok": False, "superseded": True,
+                                "error": "This device was reconnected from another tab."}
+    current = mgr.sessions["d1"]
+    assert current is attempts[1]
+    if newer_error is None:
+        assert results["newer"] == {"ok": True}
+        assert current.state == "connected"
+        assert "d1" not in mgr._pending
+    else:
+        assert current.state == "host_key_pending"
+        assert mgr._pending["d1"].code == results["newer"]["code"]
+        assert mgr._pending["d1"].generation == current.generation
 
 
 def test_connect_failure_releases_slot_but_unknown_host_key_keeps_it(monkeypatch):
