@@ -7,6 +7,7 @@ import time
 
 from simple_network_dashboard import config, main
 from simple_network_dashboard.ssh_manager import SSHManager, _Session
+from simple_network_dashboard.terminal_history import trim_to_budget
 from simple_network_dashboard.ws_manager import _WSManager
 
 
@@ -327,6 +328,37 @@ def test_init_frame_with_config_and_history_at_their_caps_is_delivered():
     assert socket.closed == []
     assert socket.frames[0] == frame
     assert len(socket.frames) == 2
+
+
+def test_init_frame_with_many_long_unfinished_lines_and_config_at_cap_is_delivered():
+    config_at_cap = [{"id": "d", "name": "n", "commands": []}]
+    filler = config.MAX_CONFIG_BYTES - len(json.dumps(config_at_cap)) - 20
+    config_at_cap[0]["note"] = "x" * filler
+    terminals = [
+        {"device_id": f"dev_{index:012x}", "run_id": "r" * 22, "cols": 120, "rows": 30, "label": "Label",
+         "lines": ["h" * 100] * 50, "partial": "\U0001F600" * config.TERM_HISTORY_MAX_LINE_CHARS,
+         "fullscreen": False, "seq": 1}
+        for index in range(config.MAX_DEVICES)
+    ]
+    assert len(json.dumps(terminals)) > config.SOCKET_QUEUE_MAX_BYTES
+
+    trim_to_budget(terminals, config.TERM_INIT_HISTORY_MAX_CHARS)
+    assert len(json.dumps(terminals)) <= config.TERM_INIT_HISTORY_MAX_CHARS
+    frame = {"type": "init", "devices": config_at_cap, "ssh_terminals": terminals}
+
+    async def exercise():
+        manager = _WSManager()
+        socket = _Socket()
+        await manager.connect(socket)
+        await manager.send_init(socket, frame)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        manager.drop(socket)
+        return socket
+
+    socket = asyncio.run(exercise())
+    assert socket.closed == []
+    assert socket.frames == [frame]
 
 
 def test_valid_messages_encode_unchanged():

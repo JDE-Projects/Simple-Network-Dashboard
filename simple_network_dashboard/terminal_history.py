@@ -8,19 +8,44 @@ import json
 from simple_network_dashboard import config
 
 
+def _escaped_size(text: str) -> int:
+    """Return the characters `text` takes inside a JSON string, without quotes."""
+    return len(json.dumps(text)) - 2
+
+
+def _keep_end(text: str, room: int) -> str:
+    """Return the longest end of `text` whose escaped size fits in `room`."""
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high) // 2
+        if _escaped_size(text[middle:]) <= room:
+            high = middle
+        else:
+            low = middle + 1
+    return text[low:]
+
+
 def trim_to_budget(terminals: list[dict], budget: int) -> list[dict]:
-    """Drop the oldest history lines so the terminals' lines, measured as
-    sent over the WebSocket, fit within `budget` characters shared evenly.
-    The unfinished line is always kept."""
+    """Trim history so the terminal list, measured as sent over the WebSocket,
+    fits within `budget` characters shared evenly.
+
+    Each share pays for the terminal's own fields, then the end of its
+    unfinished line, then its newest complete lines. The fields are never
+    dropped, because the page treats a terminal missing from the list as
+    finished. They could only exceed the budget by themselves with thousands
+    of terminals open, far past MAX_DEVICES."""
     if not terminals:
         return terminals
-    share = budget // len(terminals)
+    share = (budget - 2) // len(terminals)  # 2 for the list's brackets
     for terminal in terminals:
-        used = len(json.dumps(terminal["partial"]))
+        fields = {**terminal, "lines": [], "partial": ""}
+        room = share - len(json.dumps(fields)) - 2  # 2 for the separator
+        terminal["partial"] = _keep_end(terminal["partial"], room)
+        used = _escaped_size(terminal["partial"])
         kept = 0
         for line in reversed(terminal["lines"]):
             used += len(json.dumps(line)) + 2
-            if used > share:
+            if used > room:
                 break
             kept += 1
         terminal["lines"] = terminal["lines"][len(terminal["lines"]) - kept:]
