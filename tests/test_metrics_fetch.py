@@ -304,3 +304,57 @@ def test_redirect_is_not_followed(monkeypatch):
 
     assert "error" in result
     assert len(calls) == 1
+
+
+def test_stalled_dns_lookup_returns_dns_timeout_within_deadline(monkeypatch):
+    calls = []
+    _install_mock_transport(monkeypatch, _no_call_handler(calls))
+    monkeypatch.setattr(metrics_poller, "METRICS_FETCH_DEADLINE", 0.05)
+
+    async def fake_getaddrinfo(self, host, port, *args, **kwargs):
+        await asyncio.Event().wait()  # never completes
+    monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", fake_getaddrinfo)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await fetch_metrics("networkpi5")
+        return result, loop.time() - started
+
+    result, elapsed = asyncio.run(run())
+
+    assert result == {"error": "dns timeout"}
+    assert calls == []
+    assert elapsed < 1.0
+
+
+def test_slow_dns_lookup_counts_against_the_fetch_deadline(monkeypatch):
+    """The fetch after a slow lookup gets only the time the lookup left, so
+    the two together end at the single deadline."""
+    async def body():
+        while True:
+            await asyncio.sleep(0.05)
+            yield b"x"
+
+    def handler(request):
+        return httpx.Response(200, stream=_AsyncIteratorStream(body()))
+
+    _install_mock_transport(monkeypatch, handler)
+    monkeypatch.setattr(metrics_poller, "METRICS_FETCH_DEADLINE", 0.4)
+
+    async def fake_getaddrinfo(self, host, port, *args, **kwargs):
+        await asyncio.sleep(0.3)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.4", port))]
+    monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", fake_getaddrinfo)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await fetch_metrics("networkpi5")
+        return result, loop.time() - started
+
+    result, elapsed = asyncio.run(run())
+
+    assert result == {"error": "timeout"}
+    # A separate full deadline after the lookup would take about 0.7s.
+    assert elapsed < 0.6

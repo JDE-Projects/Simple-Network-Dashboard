@@ -333,9 +333,20 @@ async def _resolve_metrics_hostname(host: str, port: int) -> Optional[str]:
 
 async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None) -> dict:
     """Fetch Node Exporter metrics for one device. Returns an extracted dict.
-    On any failure returns {'error': '<reason>'}."""
+    On any failure returns {'error': '<reason>'}.
+
+    One METRICS_FETCH_DEADLINE covers hostname resolution, connection, and
+    reading the reply together. A lookup that outlasts it returns
+    'dns timeout'; the resolver thread itself runs on until the system
+    resolver gives up, but the polling cycle does not wait for it."""
     if not is_valid_host_string(host):
         return {"error": "invalid host"}
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + METRICS_FETCH_DEADLINE
+
+    def remaining() -> float:
+        return max(0.0, deadline - loop.time())
 
     try:
         ipaddress.ip_address(host)
@@ -349,9 +360,11 @@ async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None
             return {"error": "blocked"}
     else:
         try:
-            ip = await _resolve_metrics_hostname(host, port)
+            ip = await asyncio.wait_for(_resolve_metrics_hostname(host, port), remaining())
         except socket.gaierror:
             return {"error": "dns"}
+        except asyncio.TimeoutError:
+            return {"error": "dns timeout"}
         if ip is None:
             return {"error": "blocked"}
 
@@ -378,9 +391,9 @@ async def fetch_metrics(host: str, port: int = 9100, prev: Optional[dict] = None
                 return extract_metrics(_parse(text), prev)
 
     try:
-        # The deadline covers the whole fetch, so a reply that trickles in
-        # never outlasts it.
-        return await asyncio.wait_for(_fetch(), METRICS_FETCH_DEADLINE)
+        # The fetch gets only the time the lookup left, so a slow lookup plus
+        # a reply that trickles in never outlast the deadline together.
+        return await asyncio.wait_for(_fetch(), remaining())
     except httpx.ConnectError:
         return {"error": "unreachable"}
     except httpx.TimeoutException:
