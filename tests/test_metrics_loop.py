@@ -242,3 +242,43 @@ def test_metrics_loop_survives_failed_cycles_and_logs_once_per_streak(monkeypatc
     assert out.count("metrics polling cycle failed") == 1
     assert "TypeError: unhashable type: 'list'" in out
     assert out.count("polling recovered") == 1
+
+
+def test_stalled_dns_lookup_does_not_hold_up_a_healthy_device(monkeypatch):
+    """With the real fetch_metrics, a device whose name lookup never finishes
+    times out within the deadline, and the healthy device is broadcast on
+    this cycle and the next."""
+    import functools
+
+    import httpx
+
+    from simple_network_dashboard import metrics_poller
+
+    devices = [
+        {"id": "dev_stuck", "host": "stuckhost", "metrics_port": 9100},
+        {"id": "dev_ok", "host": "10.0.0.5", "metrics_port": 9100},
+    ]
+    monkeypatch.setattr(runtime_state, "_devices_cache", devices)
+    monkeypatch.setattr(main, "_metrics_cache", {})
+    monkeypatch.setattr(metrics_poller, "METRICS_FETCH_DEADLINE", 0.1)
+    _select(monkeypatch, {"dev_stuck", "dev_ok"})
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text="node_load1 0.5\n"))
+    monkeypatch.setattr(httpx, "AsyncClient", functools.partial(httpx.AsyncClient, transport=transport))
+
+    async def fake_getaddrinfo(self, host, port, *args, **kwargs):
+        await asyncio.Event().wait()  # never completes
+    monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", fake_getaddrinfo)
+
+    broadcasts, broadcast = _recorder()
+    monkeypatch.setattr(main.ws_mgr, "broadcast", broadcast)
+
+    async def two_cycles():
+        await asyncio.wait_for(main._poll_once(), 2)
+        await asyncio.wait_for(main._poll_once(), 2)
+    asyncio.run(two_cycles())
+
+    ok = [b for b in broadcasts if b["device_id"] == "dev_ok"]
+    stuck = [b for b in broadcasts if b["device_id"] == "dev_stuck"]
+    assert len(ok) == 2 and all("error" not in b["data"] for b in ok)
+    assert [b["data"] for b in stuck] == [{"error": "dns timeout"}] * 2
