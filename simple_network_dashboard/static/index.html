@@ -2275,7 +2275,7 @@ function openCmdEditor(deviceId, index) {
   $('cSudo').checked  = c ? !!c.sudo     : false;
   $('cmdErr').textContent = '';
   $('cmdModal').classList.add('show');
-  setTimeout(() => $('cName').focus(), 40);
+  $('cName').focus();
 }
 $('cmdCancel').onclick = () => $('cmdModal').classList.remove('show');
 $('cmdSave').onclick   = async () => {
@@ -2337,7 +2337,7 @@ function maybeOfferSave(deviceId, command, sudo) {
   $('saveName').value = '';
   $('saveNoAsk').checked = false;
   $('saveModal').classList.add('show');
-  setTimeout(() => $('saveName').focus(), 40);
+  $('saveName').focus();
 }
 function closeSave() {
   if ($('saveNoAsk').checked) askSaveCustom = false;
@@ -2386,7 +2386,7 @@ function openDeviceEditor(d) {
   $('devErr').textContent = '';
   applyDeviceEditorIdentityLock(d ? d.id : '', false);
   $('deviceModal').classList.add('show');
-  setTimeout(() => $('fName').focus(), 40);
+  $('fName').focus();
 }
 $('addBtn').onclick    = () => openDeviceEditor(null);
 $('devCancel').onclick = () => $('deviceModal').classList.remove('show');
