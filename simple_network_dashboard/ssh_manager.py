@@ -326,6 +326,24 @@ class SSHManager(TerminalControlMixin):
         with self._device_lock(device_id):
             self._identity_edits.discard(device_id)
 
+    def _hold_for_host_key(self, device_id: str, sess: "_Session", host: str, key) -> str | None:
+        """Hold the current connection attempt for host-key approval and
+        return its one-time code, or None if the attempt was replaced."""
+        with self._device_lock(device_id):
+            if self.sessions.get(device_id) is not sess:
+                return None
+            code = secrets.token_urlsafe(24)
+            sess.state = "host_key_pending"
+            self._pending[device_id] = _PendingHostKey(host, key, code, sess.owner, sess.generation)
+            return code
+
+    @staticmethod
+    def _superseded_connect(sess: "_Session") -> dict:
+        """Discard a connection attempt that is no longer the current one."""
+        sess.close()
+        return {"ok": False, "superseded": True,
+                "error": "This device was reconnected from another tab."}
+
     def connect(self, device_id: str, password: str,
                 device_lookup: Callable[[str], dict | None], owner: str) -> dict:
         """Synchronous — run via run_in_executor from the async route handler.
@@ -365,24 +383,18 @@ class SSHManager(TerminalControlMixin):
         try:
             sess.connect()
         except UnknownHostKey as e:
-            code = secrets.token_urlsafe(24)
-            with self._device_lock(device_id):
-                if self.sessions.get(device_id) is sess:
-                    sess.state = "host_key_pending"
-                    self._pending[device_id] = _PendingHostKey(
-                        e.hostname, e.key, code, owner, sess.generation)
+            code = self._hold_for_host_key(device_id, sess, e.hostname, e.key)
+            if code is None:
+                return self._superseded_connect(sess)
             return {
                 "ok": False, "host_key_unknown": True,
                 "host": device["host"], "key_type": e.key.get_name(),
                 "fingerprint": _fp(e.key), "code": code,
             }
         except paramiko.BadHostKeyException as e:
-            code = secrets.token_urlsafe(24)
-            with self._device_lock(device_id):
-                if self.sessions.get(device_id) is sess:
-                    sess.state = "host_key_pending"
-                    self._pending[device_id] = _PendingHostKey(
-                        device["host"], e.key, code, owner, sess.generation)
+            code = self._hold_for_host_key(device_id, sess, device["host"], e.key)
+            if code is None:
+                return self._superseded_connect(sess)
             return {
                 "ok": False, "host_key_changed": True,
                 "host": device["host"], "key_type": e.key.get_name(),
@@ -442,9 +454,7 @@ class SSHManager(TerminalControlMixin):
         if superseded:
             # A newer connect (same owner) won the race while we were
             # connecting; discard the socket we just made.
-            sess.close()
-            return {"ok": False, "superseded": True,
-                    "error": "This device was reconnected from another tab."}
+            return self._superseded_connect(sess)
 
         self._owner_touch(owner)
         self._log(device_id, f"Connected to {device['host']} as {device['username']}.",
