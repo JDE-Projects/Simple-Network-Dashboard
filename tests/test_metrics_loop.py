@@ -249,7 +249,6 @@ def test_stalled_dns_lookup_does_not_hold_up_a_healthy_device(monkeypatch):
     times out within the deadline, and the healthy device is broadcast on
     this cycle and the next."""
     import functools
-    import socket
 
     import httpx
 
