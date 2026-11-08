@@ -96,6 +96,18 @@ def test_allowed_ip_literal_is_fetched_and_parsed(monkeypatch):
     assert calls[0].url.host == "10.0.0.4"
 
 
+def test_fetch_with_nan_reading_returns_other_readings(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, text="node_load1 NaN\nnode_load5 0.5\nnode_memory_MemTotal_bytes 100\nnode_memory_MemAvailable_bytes 25\n")
+
+    _install_mock_transport(monkeypatch, handler)
+    result = asyncio.run(fetch_metrics("10.0.0.4"))
+
+    assert "error" not in result
+    assert "load1" not in result
+    assert result["ram_percent"] == 75.0
+
+
 def test_response_exactly_at_size_cap_is_parsed(monkeypatch):
     body = NODE_EXPORTER_SAMPLE.encode()
     body += b"#" * (METRICS_MAX_RESPONSE_BYTES - len(body))

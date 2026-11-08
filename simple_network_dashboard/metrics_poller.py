@@ -5,6 +5,7 @@ No SSH required — polls http://host:port/metrics directly.
 
 import asyncio
 import ipaddress
+import math
 import re
 import socket
 import time
@@ -158,6 +159,17 @@ def _scalar(parsed: dict, name: str) -> Optional[float]:
     return entries[0]["value"] if entries else None
 
 
+def _all_numbers_finite(value) -> bool:
+    """Return whether every numeric value nested in value is finite."""
+    if isinstance(value, (int, float)):
+        return math.isfinite(value)
+    if isinstance(value, dict):
+        return all(_all_numbers_finite(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_all_numbers_finite(item) for item in value)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Metric extraction (with delta-based CPU and network rates)
 # ---------------------------------------------------------------------------
@@ -175,7 +187,7 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
         out["arch"]     = lbl.get("machine", "")
 
     boot = _scalar(parsed, "node_boot_time_seconds")
-    if boot:
+    if boot and math.isfinite(boot):
         s = int(time.time() - boot)
         d, r = divmod(s, 86400)
         h, r = divmod(r, 3600)
@@ -188,10 +200,13 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
             out["uptime"] = f"{m}m"
 
     # --- Load averages ---
-    for key, metric in [("load1", "node_load1"), ("load5", "node_load5"), ("load15", "node_load15")]:
-        v = _scalar(parsed, metric)
-        if v is not None:
-            out[key] = round(v, 2)
+    loads = [(key, _scalar(parsed, metric)) for key, metric in [
+        ("load1", "node_load1"), ("load5", "node_load5"), ("load15", "node_load15"),
+    ]]
+    if all(value is None or math.isfinite(value) for _, value in loads):
+        for key, value in loads:
+            if value is not None:
+                out[key] = round(value, 2)
 
     # --- CPU ---
     cpu_entries = parsed.get("node_cpu_seconds_total", [])
@@ -199,29 +214,45 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
         total_now = sum(e["value"] for e in cpu_entries)
         idle_now  = sum(e["value"] for e in cpu_entries if e["labels"].get("mode") == "idle")
         out["cpu_count"] = len({e["labels"].get("cpu") for e in cpu_entries})
-        out["_cpu_raw"]  = {"total": total_now, "idle": idle_now}
-        if prev and "_cpu_raw" in prev:
+        if math.isfinite(total_now) and math.isfinite(idle_now):
+            out["_cpu_raw"] = {"total": total_now, "idle": idle_now}
+        if "_cpu_raw" in out and prev and "_cpu_raw" in prev:
             dt = total_now - prev["_cpu_raw"]["total"]
             di = idle_now  - prev["_cpu_raw"]["idle"]
-            if dt > 0:
-                out["cpu_percent"] = round((1 - di / dt) * 100, 1)
+            if not math.isfinite(dt) or not math.isfinite(di):
+                out.pop("_cpu_raw", None)
+            elif dt > 0:
+                percent = (1 - di / dt) * 100
+                if math.isfinite(percent):
+                    out["cpu_percent"] = round(percent, 1)
+                else:
+                    out.pop("_cpu_raw", None)
 
     # --- Memory ---
     mem_total = _scalar(parsed, "node_memory_MemTotal_bytes")
     mem_avail = _scalar(parsed, "node_memory_MemAvailable_bytes")
-    if mem_total and mem_avail is not None:
+    if mem_total and mem_avail is not None and math.isfinite(mem_total) and math.isfinite(mem_avail):
         used = mem_total - mem_avail
-        out["ram_total_gb"] = round(mem_total / 1024**3, 2)
-        out["ram_used_gb"]  = round(used       / 1024**3, 2)
-        out["ram_percent"]  = round(used / mem_total * 100, 1)
+        ram_total = mem_total / 1024**3
+        ram_used = used / 1024**3
+        ram_percent = used / mem_total * 100
+        if all(math.isfinite(value) for value in (used, ram_total, ram_used, ram_percent)):
+            out["ram_total_gb"] = round(ram_total, 2)
+            out["ram_used_gb"] = round(ram_used, 2)
+            out["ram_percent"] = round(ram_percent, 1)
 
     swap_total = _scalar(parsed, "node_memory_SwapTotal_bytes")
     swap_free  = _scalar(parsed, "node_memory_SwapFree_bytes")
-    if swap_total and swap_total > 0 and swap_free is not None:
+    if (swap_total and swap_total > 0 and swap_free is not None
+            and math.isfinite(swap_total) and math.isfinite(swap_free)):
         swap_used = swap_total - swap_free
-        out["swap_total_gb"] = round(swap_total / 1024**3, 2)
-        out["swap_used_gb"]  = round(swap_used  / 1024**3, 2)
-        out["swap_percent"]  = round(swap_used / swap_total * 100, 1)
+        swap_total_gb = swap_total / 1024**3
+        swap_used_gb = swap_used / 1024**3
+        swap_percent = swap_used / swap_total * 100
+        if all(math.isfinite(value) for value in (swap_used, swap_total_gb, swap_used_gb, swap_percent)):
+            out["swap_total_gb"] = round(swap_total_gb, 2)
+            out["swap_used_gb"] = round(swap_used_gb, 2)
+            out["swap_percent"] = round(swap_percent, 1)
 
     # --- Disk ---
     avail_map = {
@@ -240,17 +271,23 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
         if _EXCLUDE_DEVICE.match(device):
             continue
         seen.add(mountpoint)
-        size  = e["value"]
-        avail = avail_map.get((device, mountpoint), 0)
-        if size <= 0:
+        size = e["value"]
+        avail_key = (device, mountpoint)
+        avail = avail_map.get(avail_key, 0)
+        if not math.isfinite(size) or (avail_key in avail_map and not math.isfinite(avail)) or size <= 0:
             continue
         used = size - avail
+        total_gb = size / 1024**3
+        used_gb = used / 1024**3
+        percent = used / size * 100
+        if not all(math.isfinite(value) for value in (used, total_gb, used_gb, percent)):
+            continue
         disks.append({
             "mount":    mountpoint,
             "device":   device,
-            "total_gb": round(size / 1024**3, 1),
-            "used_gb":  round(used  / 1024**3, 1),
-            "percent":  round(used / size * 100, 1),
+            "total_gb": round(total_gb, 1),
+            "used_gb":  round(used_gb, 1),
+            "percent":  round(percent, 1),
         })
     disks.sort(key=lambda d: (0 if d["mount"] == "/" else 1, d["mount"]))
     out["disks"] = disks
@@ -260,6 +297,8 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
     for e in parsed.get("node_thermal_zone_temp", []):
         lbl = e["labels"]
         label = lbl.get("type") or f"zone{lbl.get('zone', '?')}"
+        if not math.isfinite(e["value"]):
+            continue
         c = round(e["value"], 1)
         if c > 0:
             temps.append({"label": label, "celsius": c})
@@ -273,6 +312,8 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
             if any(sensor.endswith(s) for s in ("_max", "_crit", "_alarm", "_min", "_emergency")):
                 continue
         label = lbl.get("name") or sensor or lbl.get("chip", "")
+        if not math.isfinite(e["value"]):
+            continue
         c = round(e["value"], 1)
         if c > 0:
             temps.append({"label": label, "celsius": c})
@@ -289,21 +330,35 @@ def extract_metrics(parsed: dict, prev: Optional[dict]) -> dict:
     for iface in sorted(ifaces):
         if _EXCLUDE_IFACE.match(iface):
             continue
-        net_raw[iface] = {"rx": rx_map.get(iface, 0), "tx": tx_map.get(iface, 0)}
+        rx = rx_map.get(iface, 0)
+        tx = tx_map.get(iface, 0)
+        if not math.isfinite(rx) or not math.isfinite(tx):
+            continue
+        net_raw[iface] = {"rx": rx, "tx": tx}
     out["_net_raw"] = net_raw
 
     if prev and "_net_raw" in prev and "_timestamp" in prev:
         elapsed = out["_timestamp"] - prev["_timestamp"]
         if elapsed > 0:
             rates = {}
-            for iface, vals in net_raw.items():
+            for iface, vals in list(net_raw.items()):
                 if iface in prev["_net_raw"]:
                     p = prev["_net_raw"][iface]
-                    rx_kbs = max(0, vals["rx"] - p["rx"]) / elapsed / 1024
-                    tx_kbs = max(0, vals["tx"] - p["tx"]) / elapsed / 1024
+                    rx_delta = vals["rx"] - p["rx"]
+                    tx_delta = vals["tx"] - p["tx"]
+                    if not math.isfinite(rx_delta) or not math.isfinite(tx_delta):
+                        net_raw.pop(iface)
+                        continue
+                    rx_kbs = max(0, rx_delta) / elapsed / 1024
+                    tx_kbs = max(0, tx_delta) / elapsed / 1024
+                    if not math.isfinite(rx_kbs) or not math.isfinite(tx_kbs):
+                        net_raw.pop(iface)
+                        continue
                     rates[iface] = {"rx_kbs": round(rx_kbs, 1), "tx_kbs": round(tx_kbs, 1)}
             out["network"] = rates
 
+    if not _all_numbers_finite(out):
+        return {"error": "invalid metrics"}
     return out
 
 
