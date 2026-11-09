@@ -764,11 +764,12 @@ def _main_tail() -> str:
 _LATE_STUBS = r"""
 CADDY_RC=0
 CERT_RC=0
+SNAPSHOT_RC=0
 UFW_RC=0
 CADDY_DISCARD_RC=0
 write_caddy_proxy_config() { echo caddy-write >> "$tmp/late.log"; return "$CADDY_RC"; }
 export_caddy_root_certificate() { echo cert-export >> "$tmp/late.log"; return "$CERT_RC"; }
-snapshot_dashboard_ufw_ports() { echo ufw-snapshot >> "$tmp/late.log"; }
+snapshot_dashboard_ufw_ports() { echo ufw-snapshot >> "$tmp/late.log"; return "$SNAPSHOT_RC"; }
 configure_ufw_https() { echo ufw-configure >> "$tmp/late.log"; return "$UFW_RC"; }
 undo_dashboard_ufw_change() { echo ufw-undo >> "$tmp/late.log"; }
 rollback_caddy_proxy_config() { echo caddy-rollback >> "$tmp/late.log"; }
@@ -787,6 +788,7 @@ remove_legacy_application_files() {
     [
         ("CADDY_RC", ["caddy-write"]),
         ("CERT_RC", ["caddy-write", "cert-export", "caddy-rollback"]),
+        ("SNAPSHOT_RC", ["caddy-write", "cert-export", "ufw-snapshot", "caddy-rollback"]),
         ("UFW_RC", ["caddy-write", "cert-export", "ufw-snapshot", "ufw-configure", "ufw-undo", "caddy-rollback"]),
     ],
 )
@@ -966,6 +968,8 @@ _FAKE_UFW = r"""
 tmp=$(mktemp -d) || exit 78
 trap 'rm -rf -- "$tmp"' EXIT
 UFW_STATE=active
+UFW_STATUS_RC=0
+UFW_NUMBERED_RC=0
 UFW_ALLOW_RC=0
 UFW_DELETE_RC=0
 : > "$tmp/ufw.rules"
@@ -982,9 +986,11 @@ ufw() {
   case "$1" in
     status)
       if [ "$2" = numbered ]; then
+        [ "$UFW_NUMBERED_RC" -eq 0 ] || return "$UFW_NUMBERED_RC"
         local n=0 line
         while IFS= read -r line; do n=$((n + 1)); printf '[%2d] %s\n' "$n" "$line"; done < "$tmp/ufw.rules"
       else
+        [ "$UFW_STATUS_RC" -eq 0 ] || return "$UFW_STATUS_RC"
         echo "Status: $UFW_STATE"
       fi
       ;;
@@ -1063,6 +1069,56 @@ if undo_dashboard_ufw_change; then exit 10; fi
 
     assert result.returncode == 0, result.stderr
     assert "Error: could not restore the firewall rule for 8443/tcp." in result.stdout
+
+
+@pytest.mark.parametrize("failing", ["UFW_STATUS_RC", "UFW_NUMBERED_RC"])
+def test_firewall_snapshot_failure_is_reported_and_undo_keeps_existing_rules(failing: str) -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + f"""
+add_dashboard_rule 8443/tcp
+{failing}=1
+if snapshot_dashboard_ufw_ports; then exit 10; fi
+{failing}=0
+check test "$UFW_SNAPSHOT_TAKEN" = false
+undo_dashboard_ufw_change
+check test "$(ports)" = "8443/tcp "
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "could not read the existing firewall rules" in result.stdout
+
+
+def test_firewall_change_stops_when_its_rules_cannot_be_read() -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + r"""
+add_dashboard_rule 8443/tcp
+HTTPS_PORT=9443
+UFW_NUMBERED_RC=1
+if configure_ufw_https; then exit 10; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_firewall_undo_reports_rules_it_cannot_read() -> None:
+    result = _run_install(
+        _FAKE_UFW
+        + r"""
+add_dashboard_rule 8443/tcp
+snapshot_dashboard_ufw_ports
+HTTPS_PORT=9443
+configure_ufw_https
+UFW_NUMBERED_RC=1
+if undo_dashboard_ufw_change; then exit 10; fi
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "could not read the firewall rules" in result.stdout
 
 
 def test_firewall_undo_does_nothing_when_ufw_is_inactive() -> None:

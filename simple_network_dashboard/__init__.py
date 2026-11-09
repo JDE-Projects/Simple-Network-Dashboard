@@ -1,3 +1,3 @@
 """Simple Network Dashboard package."""
 
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.8.5"

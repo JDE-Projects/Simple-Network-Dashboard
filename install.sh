@@ -778,9 +778,11 @@ EOF
 }
 
 dashboard_ufw_rule_numbers() {
-    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" '
+    local numbered
+    numbered=$(ufw status numbered 2>/dev/null) || return 1
+    awk -v comment="$UFW_COMMENT" '
         $0 ~ ("# " comment "[[:space:]]*$") { line=$0; sub(/^[[:space:]]*\[/, "", line); sub(/\].*/, "", line); gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); print line }
-    ' | sort -rn
+    ' <<< "$numbered" | sort -rn
 }
 
 delete_dashboard_ufw_rule_numbers() {
@@ -798,7 +800,9 @@ remove_dashboard_ufw_rules() {
 }
 
 stale_dashboard_ufw_rule_numbers() {
-    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" -v port="$HTTPS_PORT" '
+    local numbered
+    numbered=$(ufw status numbered 2>/dev/null) || return 1
+    awk -v comment="$UFW_COMMENT" -v port="$HTTPS_PORT" '
         $0 ~ ("# " comment "[[:space:]]*$") {
             line=$0
             sub(/^[[:space:]]*\[/, "", line)
@@ -808,7 +812,7 @@ stale_dashboard_ufw_rule_numbers() {
             sub(/^[^]]*\][[:space:]]*/, "", line)
             if (line !~ ("^" port "/")) print number
         }
-    ' | sort -rn
+    ' <<< "$numbered" | sort -rn
 }
 
 configure_ufw_https() {
@@ -824,7 +828,10 @@ configure_ufw_https() {
         echo "Error: could not add the dashboard HTTPS firewall rule; existing dashboard rules were preserved."
         return 1
     fi
-    stale_rule_numbers=$(stale_dashboard_ufw_rule_numbers) || return 1
+    if ! stale_rule_numbers=$(stale_dashboard_ufw_rule_numbers); then
+        echo "Error: could not read the existing firewall rules to remove old dashboard ones."
+        return 1
+    fi
     if ! delete_dashboard_ufw_rule_numbers "$stale_rule_numbers"; then
         echo "Error: could not remove existing dashboard HTTPS firewall rules."
         return 1
@@ -832,24 +839,28 @@ configure_ufw_https() {
 }
 
 # Ports (such as 8443/tcp) of the existing dashboard firewall rules, one per
-# line. The IPv4 and IPv6 lines of one rule give the same port once.
+# line. The IPv4 and IPv6 lines of one rule give the same port once. Returns 1
+# when the rules cannot be read, which is different from there being none.
 dashboard_ufw_ports() {
-    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" '
+    local numbered
+    numbered=$(ufw status numbered 2>/dev/null) || return 1
+    awk -v comment="$UFW_COMMENT" '
         $0 ~ ("# " comment "[[:space:]]*$") {
             line=$0
             sub(/^[[:space:]]*\[[^]]*\][[:space:]]*/, "", line)
             split(line, fields, /[[:space:]]+/)
             if (fields[1] != "") print fields[1]
         }
-    ' | sort -u
+    ' <<< "$numbered" | sort -u
 }
 
 # Numbers of dashboard firewall rules whose port is not in the list given as
 # the argument (one port per line, none containing spaces), highest number first.
 dashboard_ufw_rule_numbers_outside() {
-    local keep
+    local keep numbered
     keep=$(tr '\n' ' ' <<< "$1")
-    ufw status numbered 2>/dev/null | awk -v comment="$UFW_COMMENT" -v keep="$keep" '
+    numbered=$(ufw status numbered 2>/dev/null) || return 1
+    awk -v comment="$UFW_COMMENT" -v keep="$keep" '
         BEGIN { n = split(keep, kept, " "); for (i = 1; i <= n; i++) if (kept[i] != "") allowed[kept[i]] = 1 }
         $0 ~ ("# " comment "[[:space:]]*$") {
             line=$0
@@ -861,7 +872,7 @@ dashboard_ufw_rule_numbers_outside() {
             split(line, fields, /[[:space:]]+/)
             if (!(fields[1] in allowed)) print number
         }
-    ' | sort -rn
+    ' <<< "$numbered" | sort -rn
 }
 
 UFW_SNAPSHOT_TAKEN=false
@@ -869,17 +880,27 @@ UFW_SNAPSHOT_PORTS=""
 
 # Records the dashboard firewall ports as they are before configure_ufw_https
 # changes anything. Nothing is recorded when ufw is absent or inactive, since
-# configure_ufw_https changes nothing then.
+# configure_ufw_https changes nothing then. Returns 1 when the rules cannot be
+# read, so the firewall is left alone rather than undone to a wrong record.
 snapshot_dashboard_ufw_ports() {
+    local status
     UFW_SNAPSHOT_TAKEN=false
     UFW_SNAPSHOT_PORTS=""
     if ! command -v ufw &>/dev/null; then
         return 0
     fi
-    if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+    if ! status=$(ufw status 2>/dev/null); then
+        echo "Error: could not read the existing firewall rules, so the firewall was not changed."
+        return 1
+    fi
+    if ! grep -q '^Status: active' <<< "$status"; then
         return 0
     fi
-    UFW_SNAPSHOT_PORTS=$(dashboard_ufw_ports) || return 0
+    if ! UFW_SNAPSHOT_PORTS=$(dashboard_ufw_ports); then
+        UFW_SNAPSHOT_PORTS=""
+        echo "Error: could not read the existing firewall rules, so the firewall was not changed."
+        return 1
+    fi
     UFW_SNAPSHOT_TAKEN=true
 }
 
@@ -901,8 +922,10 @@ undo_dashboard_ufw_change() {
             fi
         fi
     done <<< "$UFW_SNAPSHOT_PORTS"
-    rule_numbers=$(dashboard_ufw_rule_numbers_outside "$UFW_SNAPSHOT_PORTS") || rule_numbers=""
-    if ! delete_dashboard_ufw_rule_numbers "$rule_numbers"; then
+    if ! rule_numbers=$(dashboard_ufw_rule_numbers_outside "$UFW_SNAPSHOT_PORTS"); then
+        echo "Error: could not read the firewall rules to remove the ones added by the update."
+        status=1
+    elif ! delete_dashboard_ufw_rule_numbers "$rule_numbers"; then
         echo "Error: could not remove the dashboard firewall rules added by the update."
         status=1
     fi
@@ -2008,7 +2031,12 @@ publish_dashboard_endpoint() {
         fi
         return 1
     fi
-    snapshot_dashboard_ufw_ports
+    if ! snapshot_dashboard_ufw_ports; then
+        if ! rollback_caddy_proxy_config; then
+            echo "Error: Caddy rollback after the firewall read failure was incomplete."
+        fi
+        return 1
+    fi
     if ! configure_ufw_https; then
         undo_dashboard_ufw_change || true
         if ! rollback_caddy_proxy_config; then
