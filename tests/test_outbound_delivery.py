@@ -128,10 +128,11 @@ def test_blocked_terminal_producer_proceeds_after_drain_pops(monkeypatch):
         await asyncio.sleep(0)
         assert thread.is_alive()
         manager._delivery.wake()
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if len(delivered) == 3:
-                break
+        # The worker thread queues its message on its own schedule, and
+        # thread.join would stop the event loop from delivering it.
+        deadline = time.monotonic() + 5
+        while len(delivered) < 3 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         thread.join(timeout=1)
         manager.shutdown_delivery()
         return result, delivered
